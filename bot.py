@@ -19,6 +19,7 @@ import base64
 import struct
 import logging
 import sys
+from html import escape  # NEW: for safe HTML output
 
 import aiohttp
 from dotenv import load_dotenv
@@ -119,8 +120,11 @@ async def get_jetton_info(session: aiohttp.ClientSession, address: str) -> dict 
     """Get jetton metadata from TonAPI."""
     url = f"{TONAPI_BASE}/jettons/{address}"
     try:
-        async with session.get(url, headers=_tonapi_headers(),
-                               timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+        async with session.get(
+            url,
+            headers=_tonapi_headers(),
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
@@ -128,13 +132,21 @@ async def get_jetton_info(session: aiohttp.ClientSession, address: str) -> dict 
         return None
 
 
-async def get_jetton_holders(session: aiohttp.ClientSession, address: str, limit: int = 10) -> dict | None:
+async def get_jetton_holders(
+    session: aiohttp.ClientSession,
+    address: str,
+    limit: int = 10,
+) -> dict | None:
     """Get top jetton holders from TonAPI."""
     url = f"{TONAPI_BASE}/jettons/{address}/holders"
     params = {"limit": limit}
     try:
-        async with session.get(url, headers=_tonapi_headers(), params=params,
-                               timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+        async with session.get(
+            url,
+            headers=_tonapi_headers(),
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
             if resp.status != 200:
                 return None
             return await resp.json()
@@ -258,7 +270,11 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
             "percentage": pct,
         })
 
-    top_pct = sum(h["percentage"] for h in holders if h["percentage"] is not None) if holders else None
+    top_pct = (
+        sum(h["percentage"] for h in holders if h["percentage"] is not None)
+        if holders
+        else None
+    )
     return {"holders": holders, "top_concentration": top_pct}
 
 
@@ -403,9 +419,9 @@ def _assess_risk(report: dict) -> tuple[str, list[str]]:
 
 
 def format_token_report(report: dict) -> str:
-    """Format a scan report as an HTML Telegram message."""
+    """Format a scan report as an HTML Telegram message, with escaped values."""
     if not report.get("found"):
-        errors = "\n".join(f"- {e}" for e in report.get("errors", []))
+        errors = "\n".join(f"- {escape(str(e))}" for e in report.get("errors", []))
         return (
             "Token not found.\n\n"
             "Make sure you pasted the jetton master contract address "
@@ -417,9 +433,10 @@ def format_token_report(report: dict) -> str:
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
 
-    name = info.get("name", "Unknown")
-    symbol = info.get("symbol", "???")
-    address = report.get("address", "")
+    # Escape core fields
+    name = escape(str(info.get("name", "Unknown")))
+    symbol = escape(str(info.get("symbol", "???")))
+    address = escape(str(report.get("address", "")))
 
     risk, reasons = _assess_risk(report)
 
@@ -429,56 +446,67 @@ def format_token_report(report: dict) -> str:
     lines.append("")
 
     # Price
-    lines.append(f"Price: <b>{_fmt_price(dex.get('price_usd'))}</b>")
+    lines.append(f"Price: <b>{escape(_fmt_price(dex.get('price_usd')))}</b>")
     if dex.get("price_native"):
-        lines.append(f"  Native: {dex['price_native']} {dex.get('quote_symbol', '')}")
+        native = escape(str(dex["price_native"]))
+        quote_symbol = escape(str(dex.get("quote_symbol", "")))
+        lines.append(f"  Native: {native} {quote_symbol}")
 
     changes = []
-    for label, key in [("5m", "price_change_5m"), ("1h", "price_change_1h"),
-                       ("6h", "price_change_6h"), ("24h", "price_change_24h")]:
+    for label, key in [
+        ("5m", "price_change_5m"),
+        ("1h", "price_change_1h"),
+        ("6h", "price_change_6h"),
+        ("24h", "price_change_24h"),
+    ]:
         val = dex.get(key)
         if val is not None:
-            changes.append(f"{label}: {_fmt_pct(val)}")
+            changes.append(f"{label}: {escape(_fmt_pct(val))}")
     if changes:
         lines.append(f"  Change: {' | '.join(changes)}")
 
     lines.append("")
 
     # Market data
-    lines.append(f"Market Cap: <b>{_fmt_usd(dex.get('market_cap'))}</b>")
-    lines.append(f"FDV: {_fmt_usd(dex.get('fdv'))}")
-    liq_str = f"<b>{_fmt_usd(dex.get('liquidity_usd'))}</b>"
+    lines.append(f"Market Cap: <b>{escape(_fmt_usd(dex.get('market_cap')))}</b>")
+    lines.append(f"FDV: {escape(_fmt_usd(dex.get('fdv')))}")
+    liq_str = f"<b>{escape(_fmt_usd(dex.get('liquidity_usd')))}</b>"
     if dex.get("total_liquidity_usd") and dex.get("total_liquidity_usd") != dex.get("liquidity_usd"):
-        liq_str += f" (total: {_fmt_usd(dex.get('total_liquidity_usd'))})"
+        liq_str += f" (total: {escape(_fmt_usd(dex.get('total_liquidity_usd')))})"
     lines.append(f"Liquidity: {liq_str}")
-    lines.append(f"Volume 24h: <b>{_fmt_usd(dex.get('volume_24h'))}</b>")
+    lines.append(f"Volume 24h: <b>{escape(_fmt_usd(dex.get('volume_24h')))}</b>")
 
     buys = dex.get("txns_24h_buys", 0)
     sells = dex.get("txns_24h_sells", 0)
     if buys or sells:
-        lines.append(f"Txns 24h: {buys} buys / {sells} sells")
+        lines.append(f"Txns 24h: {escape(str(buys))} buys / {escape(str(sells))} sells")
 
     dexes = dex.get("dexes", [])
     pair_count = dex.get("pair_count", 0)
     if dexes:
-        lines.append(f"DEX: {', '.join(dexes)} ({pair_count} pair{'s' if pair_count != 1 else ''})")
+        dex_list = ", ".join(escape(str(d)) for d in dexes)
+        lines.append(f"DEX: {dex_list} ({pair_count} pair{'s' if pair_count != 1 else ''})")
 
     age = _fmt_age(dex.get("pair_created_at"))
     if age != "N/A":
-        lines.append(f"Pair age: {age}")
+        lines.append(f"Pair age: {escape(age)}")
 
     if dex.get("dex_url"):
-        lines.append(f'<a href="{dex["dex_url"]}">View on DexScreener</a>')
+        url = escape(str(dex["dex_url"]))
+        lines.append(f'<a href="{url}">View on DexScreener</a>')
 
     lines.append("")
 
     # Token info
     lines.append("<b>Token Info</b>")
     verification = info.get("verification", "none")
-    ver_label = {"whitelist": "Verified (whitelist)", "approve": "Verified (approved)",
-                 "none": "Unverified"}.get(verification, verification)
-    lines.append(f"Verification: {ver_label}")
-    lines.append(f"Holders: <b>{_fmt_num(info.get('holders_count'))}</b>")
+    ver_label = {
+        "whitelist": "Verified (whitelist)",
+        "approve": "Verified (approved)",
+        "none": "Unverified",
+    }.get(verification, verification)
+    lines.append(f"Verification: {escape(str(ver_label))}")
+    lines.append(f"Holders: <b>{escape(_fmt_num(info.get('holders_count')))}</b>")
 
     supply = info.get("total_supply")
     if supply:
@@ -486,7 +514,8 @@ def format_token_report(report: dict) -> str:
             supply_int = int(supply)
             decimals = int(info.get("decimals", "9"))
             human = supply_int / (10 ** decimals)
-            lines.append(f"Total Supply: {_fmt_num(human)} {symbol}")
+            human_str = _fmt_num(human)
+            lines.append(f"Total Supply: {escape(human_str)} {symbol}")
         except (ValueError, TypeError):
             pass
 
@@ -503,18 +532,21 @@ def format_token_report(report: dict) -> str:
         for i, h in enumerate(holder_list[:5], 1):
             pct = h.get("percentage")
             pct_str = f" ({pct:.1f}%)" if pct is not None else ""
-            name_str = f" [{h['name']}]" if h.get("name") else ""
+            name_val = h.get("name")
+            name_str = f" [{escape(str(name_val))}]" if name_val else ""
             scam = " [SCAM]" if h.get("is_scam") else ""
-            addr = h.get("address", "")
-            short = addr[:10] + "..." + addr[-4:] if len(addr) > 16 else addr
+            addr_raw = h.get("address", "")
+            addr_raw = str(addr_raw)
+            short_raw = addr_raw[:10] + "..." + addr_raw[-4:] if len(addr_raw) > 16 else addr_raw
+            short = escape(short_raw)
             lines.append(f"  {i}. <code>{short}</code>{name_str}{scam}{pct_str}")
         lines.append("")
 
     # Risk
-    lines.append(f"<b>Risk Level: {risk.capitalize()}</b>")
+    lines.append(f"<b>Risk Level: {escape(risk.capitalize())}</b>")
     if reasons:
         for r in reasons:
-            lines.append(f"  - {r}")
+            lines.append(f"  - {escape(str(r))}")
 
     lines.append("")
     lines.append("Data: DexScreener + TonAPI | Not financial advice")
@@ -529,7 +561,7 @@ if not BOT_TOKEN:
 
 bot = Bot(
     token=BOT_TOKEN,
-    default=DefaultBotProperties,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),  # Ensure HTML mode
 )
 dp = Dispatcher()
 
@@ -575,7 +607,11 @@ async def handle_address(message: Message):
         await status_msg.edit_text(result, disable_web_page_preview=True)
     except Exception as e:
         logger.exception("Error scanning token")
-        await status_msg.edit_text(f"Error scanning token: {e}\n\nPlease try again later.")
+        # Escape error text so Telegram doesn't complain
+        err_text = escape(str(e))
+        await status_msg.edit_text(
+            f"Error scanning token: {err_text}\n\nPlease try again later."
+        )
 
 
 async def main():
