@@ -59,9 +59,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ton-scanner-bot")
 
-ADDR_FRIENDLY_RE = re.compile(r"^[EU]Q[A-Za-z0-9_\\-]{46}$")
+ADDR_FRIENDLY_RE = re.compile(r"^[EU]Q[A-Za-z0-9_\-]{46}$")
 ADDR_RAW_RE = re.compile(r"^(0|[-1]):[0-9a-fA-F]{64}$")
-TICKER_RE = re.compile(r"^\\$?[A-Za-z0-9]{2,15}$")
+TICKER_RE = re.compile(r"^\$?[A-Za-z0-9]{2,15}$")
 
 
 def init_db():
@@ -604,8 +604,8 @@ def _build_scanner_meta(message: Message, report: dict) -> dict:
 
 def format_token_report(report: dict, show_info: bool = False, show_holders: bool = False, scan_history: list[dict] | None = None) -> str:
     if not report.get("found"):
-        errors = "\\n".join(f"- {e}" for e in report.get("errors", []))
-        return f"Token not found.\\n\\nDetails:\\n{errors}"
+        errors = "\n".join(f"- {e}" for e in report.get("errors", []))
+        return f"Token not found.\n\nDetails:\n{errors}"
 
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
@@ -677,7 +677,7 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
         lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
 
     lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_chart: bool = False):
@@ -749,7 +749,7 @@ dp = Dispatcher()
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     await message.answer(
-        "<b>TON Meme Token Scanner</b>\\n\\n"
+        "<b>TON Meme Token Scanner</b>\n\n"
         "Send a TON jetton contract address or ticker."
     )
 
