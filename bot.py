@@ -181,6 +181,7 @@ def create_price_chart(df, token_address: str):
     plt.savefig(tmp_file.name, dpi=200)
     plt.close()
     return tmp_file.name
+m
 
 @dp.message(F.text)
 async def handle_address(message: Message):
@@ -202,6 +203,7 @@ async def handle_address(message: Message):
             report = await scan_token(session, text)
             result = format_token_report(report)
 
+            # Try to build the chart
             try:
                 df = await fetch_price_history(session, text, days=7)
                 if df is not None and not df.empty:
@@ -209,7 +211,12 @@ async def handle_address(message: Message):
             except Exception as chart_error:
                 logger.exception("Chart error")
 
-            await status_msg.edit_text(result, disable_web_page_preview=True)
+            # IMPORTANT: parse_mode="HTML" so <b>...</b> etc. are rendered
+            await status_msg.edit_text(
+                result,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
             if chart_file and os.path.exists(chart_file):
                 await message.answer_photo(
@@ -220,11 +227,13 @@ async def handle_address(message: Message):
     except Exception as e:
         logger.exception("Error scanning token")
         await status_msg.edit_text(
-            f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later."
+            f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.",
+            parse_mode="HTML",
         )
     finally:
         if chart_file and os.path.exists(chart_file):
             os.remove(chart_file)
+
 
 async def main():
     logger.info("Starting TON Meme Token Scanner bot...")
