@@ -38,8 +38,6 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
 
-# ─── Configuration ───────────────────────────────────────────────────────────
-
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -66,8 +64,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ton-scanner-bot")
 
-# ─── Report Cache ────────────────────────────────────────────────────────────
-
 REPORT_CACHE: dict[str, dict] = {}
 REPORT_CACHE_TTL = 60 * 60
 
@@ -80,6 +76,7 @@ def _cache_report(report: dict) -> str:
         "show_info": False,
         "show_holders": False,
         "chart_tf": DEFAULT_CHART_TIMEFRAME,
+        "has_image": bool((report.get("jetton_info") or {}).get("image")),
         "ts": time.time(),
     }
     return key
@@ -91,7 +88,6 @@ def _prune_report_cache():
     for k in expired:
         REPORT_CACHE.pop(k, None)
 
-# ─── Address Utilities ───────────────────────────────────────────────────────
 
 ADDR_FRIENDLY_RE = re.compile(r"^[EU]Q[A-Za-z0-9_\-]{46}$")
 ADDR_RAW_RE = re.compile(r"^(0|[-1]):[0-9a-fA-F]{64}$")
@@ -129,7 +125,6 @@ def _raw_to_friendly(raw: str) -> str | None:
     except Exception:
         return None
 
-# ─── DexScreener API ─────────────────────────────────────────────────────────
 
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
     url = f"{DEXSCREENER_API}/{address}"
@@ -146,7 +141,6 @@ async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dic
     except (aiohttp.ClientError, TimeoutError):
         return None
 
-# ─── TonAPI ──────────────────────────────────────────────────────────────────
 
 def _tonapi_headers() -> dict:
     headers = {"Accept": "application/json"}
@@ -186,7 +180,6 @@ async def get_jetton_holders(session: aiohttp.ClientSession, address: str, limit
     except (aiohttp.ClientError, TimeoutError):
         return None
 
-# ─── GeckoTerminal ───────────────────────────────────────────────────────────
 
 async def get_ohlcv(session: aiohttp.ClientSession, pool_address: str, timeframe_key: str) -> list | None:
     preset = CHART_TIMEFRAMES.get(timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME])
@@ -286,7 +279,6 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
     plt.close(fig)
     return buf.getvalue()
 
-# ─── Scanner ─────────────────────────────────────────────────────────────────
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     address = address.strip()
@@ -401,7 +393,6 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
     top_pct = sum(h["percentage"] for h in holders if h["percentage"] is not None) if holders else None
     return {"holders": holders, "top_concentration": top_pct}
 
-# ─── Formatting ──────────────────────────────────────────────────────────────
 
 def _fmt_price(price_str) -> str:
     if price_str is None:
@@ -717,7 +708,46 @@ def build_chart_keyboard(key: str, selected_tf: str):
     )
     return builder.as_markup()
 
-# ─── Telegram Bot ────────────────────────────────────────────────────────────
+
+async def _render_report_message(target_message: Message, key: str):
+    entry = REPORT_CACHE.get(key)
+    if not entry:
+        return
+
+    report = entry["report"]
+    text = format_token_report(
+        report,
+        show_info=entry["show_info"],
+        show_holders=entry["show_holders"],
+    )
+    has_chart = bool((report.get("dex_data") or {}).get("pair_address"))
+    keyboard = build_report_keyboard(
+        key,
+        entry["show_info"],
+        entry["show_holders"],
+        has_chart=has_chart,
+    )
+    image_url = (report.get("jetton_info") or {}).get("image")
+
+    if image_url:
+        try:
+            await target_message.edit_caption(
+                caption=text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:
+            pass
+
+    try:
+        await target_message.edit_text(
+            text,
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        pass
+
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set! Copy .env.example to .env and add your token.")
@@ -777,10 +807,31 @@ async def handle_address(message: Message):
         has_chart = bool((report.get("dex_data") or {}).get("pair_address"))
         result = format_token_report(report, show_info=False, show_holders=False)
         keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=has_chart)
-        await status_msg.edit_text(result, disable_web_page_preview=True, reply_markup=keyboard)
+        image_url = (report.get("jetton_info") or {}).get("image")
+
+        if image_url:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer_photo(
+                photo=image_url,
+                caption=result,
+                reply_markup=keyboard,
+            )
+        else:
+            await status_msg.edit_text(
+                result,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+
     except Exception as e:
         logger.exception("Error scanning token")
-        await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+        try:
+            await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+        except Exception:
+            await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
 
 
 @dp.callback_query(F.data.startswith("tg:"))
@@ -815,17 +866,29 @@ async def handle_toggle(callback: CallbackQuery):
             entry["show_holders"],
             has_chart=has_chart,
         )
+        image_url = (entry["report"].get("jetton_info") or {}).get("image")
 
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+        if image_url:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer_photo(
+                photo=image_url,
+                caption=text,
+                reply_markup=keyboard,
+            )
+        else:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(
+                text,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
 
-        await callback.message.answer(
-            text,
-            disable_web_page_preview=True,
-            reply_markup=keyboard,
-        )
         await callback.answer()
         return
 
@@ -834,26 +897,7 @@ async def handle_toggle(callback: CallbackQuery):
     elif section == "holders":
         entry["show_holders"] = not entry["show_holders"]
 
-    has_chart = bool((entry["report"].get("dex_data") or {}).get("pair_address"))
-    text = format_token_report(
-        entry["report"],
-        show_info=entry["show_info"],
-        show_holders=entry["show_holders"],
-    )
-    keyboard = build_report_keyboard(
-        key,
-        entry["show_info"],
-        entry["show_holders"],
-        has_chart=has_chart,
-    )
-    try:
-        await callback.message.edit_text(
-            text,
-            disable_web_page_preview=True,
-            reply_markup=keyboard,
-        )
-    except Exception:
-        pass
+    await _render_report_message(callback.message, key)
     await callback.answer()
 
 
