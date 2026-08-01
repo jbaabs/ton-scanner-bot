@@ -1,6 +1,8 @@
+
 """
 TON Meme Token Scanner Bot — Single File Version
-A Telegram bot that scans TON meme tokens by contract address or ticker.
+Persistent scan history edition.
+Shows full contract address and uses Scanned By.
 """
 
 import os
@@ -251,27 +253,23 @@ def _safe_image_url(report: dict) -> str | None:
     return None
 
 
-def _pretty_dex_name(name: str) -> str:
-    mapping = {
-        "dedust": "Dedust",
-        "stonfi": "STON.fi",
-        "ston.fi": "STON.fi",
-    }
-    key = str(name).strip().lower()
-    return mapping.get(key, str(name).strip().title())
-
-
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
     url = f"{DEXSCREENER_API}/{address}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
             if resp.status != 200:
                 return None
             data = await resp.json()
             pairs = data.get("pairs")
             if not pairs:
                 return []
-            pairs.sort(key=lambda p: (p.get("liquidity") or {}).get("usd", 0), reverse=True)
+            pairs.sort(
+                key=lambda p: (p.get("liquidity") or {}).get("usd", 0),
+                reverse=True,
+            )
             return pairs
     except (aiohttp.ClientError, TimeoutError):
         return None
@@ -318,12 +316,14 @@ def _pair_volume(pair: dict) -> float:
         return 0.0
 
 
-async def resolve_ticker_to_address(session: aiohttp.ClientSession, ticker_text: str) -> tuple[str | None, str | None]:
+async def resolve_ticker_to_address(
+    session: aiohttp.ClientSession, ticker_text: str
+) -> tuple[str | None, str | None]:
     ticker = normalize_ticker(ticker_text)
     pairs = await search_dex_pairs(session, ticker)
 
     if pairs is None:
-        return None, f"Ticker search failed. Please try again later."
+        return None, "Ticker search failed. Please try again later."
     if not pairs:
         return None, f"No results found for ${ticker}."
 
@@ -335,7 +335,9 @@ async def resolve_ticker_to_address(session: aiohttp.ClientSession, ticker_text:
     symbol_contains = [p for p in ton_pairs if ticker in _pair_symbol(p)]
     name_contains = [p for p in ton_pairs if ticker in _pair_name(p)]
     candidates = exact_symbol or symbol_contains or name_contains or ton_pairs
-    candidates.sort(key=lambda p: (_pair_symbol(p) != ticker, -_pair_liquidity(p), -_pair_volume(p)))
+    candidates.sort(
+        key=lambda p: (_pair_symbol(p) != ticker, -_pair_liquidity(p), -_pair_volume(p))
+    )
 
     best = candidates[0]
     address = (best.get("baseToken") or {}).get("address")
@@ -366,7 +368,9 @@ async def get_jetton_info(session: aiohttp.ClientSession, address: str) -> dict 
         return None
 
 
-async def get_jetton_holders(session: aiohttp.ClientSession, address: str, limit: int = 10) -> dict | None:
+async def get_jetton_holders(
+    session: aiohttp.ClientSession, address: str, limit: int = 10
+) -> dict | None:
     url = f"{TONAPI_BASE}/jettons/{address}/holders"
     try:
         async with session.get(
@@ -382,7 +386,9 @@ async def get_jetton_holders(session: aiohttp.ClientSession, address: str, limit
         return None
 
 
-async def get_ohlcv(session: aiohttp.ClientSession, pool_address: str, timeframe_key: str) -> list | None:
+async def get_ohlcv(
+    session: aiohttp.ClientSession, pool_address: str, timeframe_key: str
+) -> list | None:
     preset = CHART_TIMEFRAMES.get(timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME])
     url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/{preset['timeframe']}"
     params = {"aggregate": preset["aggregate"], "limit": preset["limit"], "currency": "usd"}
@@ -400,6 +406,8 @@ async def get_ohlcv(session: aiohttp.ClientSession, pool_address: str, timeframe
             return sorted(items, key=lambda c: c[0]) if items else None
     except (aiohttp.ClientError, TimeoutError):
         return None
+
+
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
     import matplotlib
     matplotlib.use("Agg")
@@ -424,11 +432,22 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
         bottom = min(o, c)
         height = abs(c - o) or max((h - l) * 0.01, h * 0.0005, 1e-12)
         ax.add_patch(
-            plt.Rectangle((i - 0.3, bottom), 0.6, height, facecolor=color, edgecolor=color, linewidth=0)
+            plt.Rectangle(
+                (i - 0.3, bottom),
+                0.6,
+                height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0,
+            )
         )
 
     tick_count = min(6, len(ohlcv))
-    tick_idx = [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)] if tick_count > 1 else [0]
+    tick_idx = (
+        [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)]
+        if tick_count > 1
+        else [0]
+    )
     tick_idx = sorted(set(tick_idx))
     fmt = "%H:%M" if timeframe_label in ("5m", "1H", "4H") else "%b %d"
 
@@ -473,6 +492,7 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
             balance = int(h.get("balance", "0"))
         except (ValueError, TypeError):
             balance = 0
+
         owner = h.get("owner", {})
         pct = (balance / supply * 100) if supply > 0 else None
         holders.append(
@@ -480,7 +500,6 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
                 "address": owner.get("address", h.get("address", "")),
                 "name": owner.get("name", ""),
                 "is_scam": owner.get("is_scam", False),
-                "is_wallet": owner.get("is_wallet", False),
                 "balance": balance,
                 "percentage": pct,
             }
@@ -491,8 +510,6 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
 
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
-    address = address.strip()
-
     jetton_info = await get_jetton_info(session, address)
     dex_pairs = await get_dex_data(session, address)
 
@@ -517,14 +534,19 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     if jetton_info:
         report["found"] = True
         metadata = jetton_info.get("metadata", {}) or {}
+        social_candidates = {
+            "website": metadata.get("website") or metadata.get("websites"),
+            "telegram": metadata.get("telegram") or metadata.get("social") or metadata.get("community"),
+            "twitter": metadata.get("twitter") or metadata.get("x") or metadata.get("x_com"),
+        }
         report["jetton_info"] = {
             "name": metadata.get("name", "Unknown"),
             "symbol": metadata.get("symbol", "???"),
             "decimals": metadata.get("decimals", "9"),
             "image": metadata.get("image"),
-            "website": metadata.get("website") or metadata.get("websites"),
-            "telegram": metadata.get("telegram") or metadata.get("social") or metadata.get("community"),
-            "twitter": metadata.get("twitter") or metadata.get("x") or metadata.get("x_com"),
+            "website": social_candidates.get("website"),
+            "telegram": social_candidates.get("telegram"),
+            "twitter": social_candidates.get("twitter"),
             "total_supply": jetton_info.get("total_supply"),
             "mintable": jetton_info.get("mintable"),
             "verification": jetton_info.get("verification", "none"),
@@ -542,34 +564,26 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         total_vol = sum((p.get("volume") or {}).get("h24", 0) for p in dex_pairs)
         total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in dex_pairs)
         best = dex_pairs[0]
-        dexes = list(set(p.get("dexId", "unknown") for p in dex_pairs))
         dex_info = best.get("info") or {}
-
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
-            "price_native": best.get("priceNative"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
-            "total_liquidity_usd": total_liq,
             "volume_24h": total_vol,
-            "fdv": best.get("fdv"),
             "market_cap": best.get("marketCap"),
-            "price_change_5m": (best.get("priceChange") or {}).get("m5"),
+            "fdv": best.get("fdv"),
             "price_change_1h": (best.get("priceChange") or {}).get("h1"),
-            "price_change_6h": (best.get("priceChange") or {}).get("h6"),
             "price_change_24h": (best.get("priceChange") or {}).get("h24"),
-            "txns_24h_buys": (best.get("txns", {}).get("h24") or {}).get("buys", 0),
-            "txns_24h_sells": (best.get("txns", {}).get("h24") or {}).get("sells", 0),
-            "pair_count": len(dex_pairs),
-            "dexes": dexes,
-            "dex_url": best.get("url"),
             "pair_address": best.get("pairAddress"),
             "pair_created_at": best.get("pairCreatedAt"),
-            "quote_symbol": (best.get("quoteToken") or {}).get("symbol", ""),
+            "dex_url": best.get("url"),
+            "total_liquidity_usd": total_liq,
             "websites": dex_info.get("websites") or [],
             "socials": dex_info.get("socials") or [],
         }
     else:
-        report["errors"].append("DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed")
+        report["errors"].append(
+            "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
+        )
 
     return report
 
@@ -581,6 +595,7 @@ def _fmt_price(price_str) -> str:
         price = float(price_str)
     except (ValueError, TypeError):
         return "N/A"
+
     if price == 0:
         return "$0"
     if price < 0.000001:
@@ -660,6 +675,8 @@ def _fmt_scan_age(scan_ts: int | None) -> str:
     if delta < 86400:
         return f"{delta // 3600}h"
     return f"{delta // 86400}d"
+
+
 def _fmt_username(message: Message) -> str:
     user = message.from_user
     if not user:
@@ -683,7 +700,9 @@ def _build_scanner_meta(message: Message, report: dict) -> dict:
 
 def _first_url(value) -> str | None:
     if isinstance(value, str):
-        return value.strip() or None
+        v = value.strip()
+        return v or None
+
     if isinstance(value, list):
         for item in value:
             if isinstance(item, str) and item.strip():
@@ -699,9 +718,11 @@ def _first_url(value) -> str | None:
 def _normalize_url(url: str | None) -> str | None:
     if not url:
         return None
+
     u = str(url).strip()
     if not u:
         return None
+
     if u.startswith("@"):
         return f"https://t.me/{u[1:]}"
     if u.startswith("t.me/"):
@@ -727,26 +748,32 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
         links.append(("TV", f"https://tonviewer.com/{address}"))
         links.append(("GT", f"https://www.geckoterminal.com/ton/tokens/{address}"))
 
-    for item in dex.get("websites") or []:
+    dex_websites = dex.get("websites") or []
+    for item in dex_websites:
         if isinstance(item, dict):
             url = _normalize_url(item.get("url"))
             if url:
                 links.append(("WEB", url))
 
-    for item in dex.get("socials") or []:
+    dex_socials = dex.get("socials") or []
+    for item in dex_socials:
         if not isinstance(item, dict):
             continue
+
         platform = str(item.get("platform") or "").lower().strip()
         handle = str(item.get("handle") or "").strip()
         if not handle:
             continue
+
         if platform in ("twitter", "x"):
-            handle = handle[1:] if handle.startswith("@") else handle
+            if handle.startswith("@"):
+                handle = handle[1:]
             url = _normalize_url(f"https://x.com/{handle}")
             if url:
                 links.append(("X", url))
         elif platform == "telegram":
-            handle = handle[1:] if handle.startswith("@") else handle
+            if handle.startswith("@"):
+                handle = handle[1:]
             url = _normalize_url(f"https://t.me/{handle}")
             if url:
                 links.append(("TG", url))
@@ -758,6 +785,7 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
     website = _normalize_url(_first_url(info.get("website")))
     telegram = _normalize_url(_first_url(info.get("telegram")))
     twitter = _normalize_url(_first_url(info.get("twitter")))
+
     if website:
         links.append(("WEB", website))
     if telegram:
@@ -765,19 +793,14 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
     if twitter:
         links.append(("X", twitter))
 
-    deduped, seen = [], set()
+    deduped = []
+    seen = set()
     for label, url in links:
         if url not in seen:
             deduped.append((label, url))
             seen.add(url)
+
     return deduped
-
-
-def _short_addr(addr: str, left: int = 6, right: int = 6) -> str:
-    addr = str(addr or "")
-    if len(addr) <= left + right + 3:
-        return addr
-    return f"{addr[:left]}...{addr[-right:]}"
 
 
 def format_token_report(
@@ -793,75 +816,38 @@ def format_token_report(
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
+    full_address = html.escape(str(report.get("address", "")))
 
-    name = html.escape(str(info.get("name", "Unknown")))
-    symbol = html.escape(str(info.get("symbol", "???")))
-    address_raw = str(report.get("address", "")).strip()
-    address = html.escape(address_raw)
-    price = html.escape(_fmt_price(dex.get("price_usd")))
-    mc = html.escape(_fmt_usd(dex.get("market_cap")))
-    ath = html.escape(_fmt_usd(dex.get("fdv")))
-    age = html.escape(_fmt_age(dex.get("pair_created_at")))
-    lp = html.escape(_fmt_usd(dex.get("liquidity_usd")))
-    vol = html.escape(_fmt_usd(dex.get("volume_24h")))
-    h1 = html.escape(_fmt_pct(dex.get("price_change_1h")))
-    h6 = html.escape(_fmt_pct(dex.get("price_change_6h")))
-    h24 = html.escape(_fmt_pct(dex.get("price_change_24h")))
-    holders_count = html.escape(_fmt_num(info.get("holders_count")))
-    top_conc_val = holders.get("top_concentration")
-    top_conc = f"{top_conc_val:.2f}%" if top_conc_val is not None else "N/A"
-    buys = _fmt_num(dex.get("txns_24h_buys", 0))
-    sells = _fmt_num(dex.get("txns_24h_sells", 0))
-    pair_dexes = dex.get("dexes") or []
-    dex_label = ", ".join(_pretty_dex_name(d) for d in pair_dexes[:2]) if pair_dexes else "TON"
+    h1_value = dex.get("price_change_1h")
+    h24_value = dex.get("price_change_24h")
 
-    history_rows = scan_history or []
-    first_called = history_rows[0] if history_rows else None
-    scanned_line = None
-    if first_called:
-        scanner_name = html.escape(str(first_called.get("scanner_name", DEFAULT_SCANNER_LABEL)))
-        scan_mc = html.escape(str(first_called.get("scan_market_cap", "N/A")))
-        scan_age = html.escape(_fmt_scan_age(first_called.get("scan_ts")))
-        scanned_line = f"📞 First called: {scanner_name} • MC {scan_mc} • {scan_age} ago"
+    try:
+        h1_positive = float(h1_value) >= 0
+    except (ValueError, TypeError):
+        h1_positive = True
+
+    try:
+        h24_positive = float(h24_value) >= 0
+    except (ValueError, TypeError):
+        h24_positive = True
+
+    h1_emoji = "💎" if h1_positive else "🩸"
+    h24_emoji = "💎" if h24_positive else "🩸"
 
     lines = [
-        f"🐹 <b>{name}</b> • <b>${symbol}</b>",
-        f"<i>{html.escape(dex_label)}</i>",
+        f"<b>💎 {html.escape(str(info.get('name', 'Unknown')))}</b>  <b>${html.escape(str(info.get('symbol', '???')))}</b>",
+        f"<code>{full_address}</code>",
         "",
-        f"<code>{address}</code>",
+        f"├ Holders: <b>{_fmt_num(info.get('holders_count'))}</b>",
+        f"└ Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>",
         "",
-        f"💰 Price: <b>{price}</b> • 1H <b>{h1}</b>",
-        f"📈 MCap: <b>{mc}</b> • ATH: <b>{ath}</b>",
-        f"🌱 Age: <b>{age}</b> • Dex: <b>{html.escape(dex_label)}</b>",
-        f"💧 LP: <b>{lp}</b> • 24H <b>{h24}</b>",
-        f"📊 Vol: <b>{vol}</b> • 6H <b>{h6}</b>",
-        "",
-    ]
-
-    holder_list = holders.get("holders", [])
-    if holder_list:
-        token_holders_url = f"https://tonviewer.com/{address_raw}"
-        lines.append(
-            f'👥 <a href="{html.escape(token_holders_url)}"><b>Holders: {holders_count}</b></a> • Top 10: <b>{html.escape(top_conc)}</b>'
-        )
-        if show_holders:
-            for i, h in enumerate(holder_list[:10], 1):
-                pct = h.get("percentage")
-                pct_str = f"{pct:.2f}%" if pct is not None else "N/A"
-                holder_addr = str(h.get("address", "")).strip()
-                holder_url = f"https://tonviewer.com/{holder_addr}"
-                short_addr = _short_addr(holder_addr)
-                name_str = f" {html.escape(str(h['name']))}" if h.get("name") else ""
-                scam_str = " ⚠️SCAM" if h.get("is_scam") else ""
-                lines.append(
-                    f'{i}. <a href="{html.escape(holder_url)}"><code>{html.escape(short_addr)}</code></a> • <b>{html.escape(pct_str)}</b>{name_str}{scam_str}'
-                )
-    else:
-        lines.append(f"👥 Holders: <b>{holders_count}</b> • Top 10: <b>{html.escape(top_conc)}</b>")
-
-    lines += [
-        "",
-        f"📉 Buys/Sells: <b>{html.escape(buys)}</b> / <b>{html.escape(sells)}</b>",
+        "<b>📊 Token Stats</b>",
+        f"├ 💰 Price: <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>",
+        f"├ 📊 MC: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>",
+        f"├ 📈 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
+        f"├ 💧 LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>",
+        f"├ {h1_emoji} 1H: <b>{html.escape(_fmt_pct(h1_value))}</b>",
+        f"└ {h24_emoji} 24H: <b>{html.escape(_fmt_pct(h24_value))}</b>",
     ]
 
     links = _collect_links(report)
@@ -869,35 +855,58 @@ def format_token_report(
         link_bits = [f'<a href="{html.escape(url)}">{html.escape(label)}</a>' for label, url in links]
         lines += ["", " • ".join(link_bits)]
 
-    if scanned_line:
-        lines += ["", scanned_line]
-
-    lines += ["", f"🔄 Updated: <b>{html.escape(_fmt_scan_age(int(time.time())))} ago</b>"]
-
     if show_info:
-        info_lines = []
-        verification = str(info.get("verification", "none"))
-        info_lines.append(f"Verification: {html.escape(verification)}")
-        info_lines.append(f"Mintable: {'Yes' if info.get('mintable') else 'No'}")
-        total_supply = info.get("total_supply")
-        if total_supply:
-            try:
-                decimals = int(info.get("decimals", "9"))
-                supply_human = int(total_supply) / (10 ** decimals)
-                info_lines.append(f"Supply: {_fmt_num(supply_human)}")
-            except Exception:
-                pass
-        lines += ["", "<b>📋 Token Info</b>"] + info_lines
+        lines += [
+            "",
+            "<b>ℹ️ Token Info</b>",
+            f"├ Mintable: <b>{'Yes' if info.get('mintable') else 'No'}</b>",
+            f"└ FDV: <b>{html.escape(_fmt_usd(dex.get('fdv')))}</b>",
+        ]
 
+    holder_list = holders.get("holders", [])
+    if holder_list and show_holders:
+        lines += ["", "<b>👥 Top Holders</b>"]
+        for i, h in enumerate(holder_list[:5], 1):
+            pct = h.get("percentage")
+            pct_str = f" ({pct:.1f}%)" if pct is not None else ""
+            label = h.get("name") or str(h.get("address", ""))
+            lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
+
+    history_rows = scan_history or []
+    if history_rows:
+        lines += ["", "<b>Scanned By</b>"]
+        row = history_rows[0]
+        scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
+        scan_price = html.escape(str(row.get("scan_price", "N/A")))
+        scan_mc = html.escape(str(row.get("scan_market_cap", "N/A")))
+        scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
+        lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
+
+    lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
     return "\n".join(lines)
+
+
 def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_chart: bool = False):
     builder = InlineKeyboardBuilder()
+    row = []
+
     if has_chart:
-        builder.row(InlineKeyboardButton(text="▸ Chart", callback_data=f"tg:chart:{key}"))
-    builder.row(
-        InlineKeyboardButton(text="Hide Token Info" if show_info else "▸ Token Info", callback_data=f"tg:info:{key}"),
-        InlineKeyboardButton(text="Hide Top Holders" if show_holders else "▸ Top Holders", callback_data=f"tg:holders:{key}"),
+        row.append(InlineKeyboardButton(text="Chart", callback_data=f"tg:chart:{key}"))
+
+    row.append(
+        InlineKeyboardButton(
+            text="Info" if not show_info else "Hide Info",
+            callback_data=f"tg:info:{key}",
+        )
     )
+    row.append(
+        InlineKeyboardButton(
+            text="Holders" if not show_holders else "Hide Holders",
+            callback_data=f"tg:holders:{key}",
+        )
+    )
+    builder.row(*row)
+
     builder.row(
         InlineKeyboardButton(text="RedoTrade", url=REDOTRADE_URL),
         InlineKeyboardButton(text="DTrade", url=DTRADE_URL),
@@ -907,14 +916,16 @@ def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_cha
 
 def build_chart_keyboard(key: str, selected_tf: str):
     builder = InlineKeyboardBuilder()
-    builder.row(*[
-        InlineKeyboardButton(
-            text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]['label']),
-            callback_data=f"tf:{tf}:{key}",
-        )
-        for tf in CHART_TIMEFRAME_ORDER
-    ])
-    builder.row(InlineKeyboardButton(text="◂ Back to Token", callback_data=f"tg:back:{key}"))
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]["label"]),
+                callback_data=f"tf:{tf}:{key}",
+            )
+            for tf in CHART_TIMEFRAME_ORDER
+        ]
+    )
+    builder.row(InlineKeyboardButton(text="◂ Back", callback_data=f"tg:back:{key}"))
     return builder.as_markup()
 
 
@@ -922,8 +933,10 @@ async def _render_report_message(target_message: Message, key: str):
     entry = REPORT_CACHE.get(key)
     if not entry:
         return
+
     report = entry["report"]
     entry["scan_history"] = get_scan_history(report)
+
     text = format_token_report(
         report,
         show_info=entry["show_info"],
@@ -936,8 +949,8 @@ async def _render_report_message(target_message: Message, key: str):
         entry["show_holders"],
         has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
     )
-    image_url = _safe_image_url(report)
 
+    image_url = _safe_image_url(report)
     if image_url:
         try:
             await target_message.edit_caption(caption=text, reply_markup=keyboard)
@@ -955,14 +968,18 @@ if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set!")
     sys.exit(1)
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=TELEGRAM_BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
 
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     await message.answer(
-        "<b>TON Meme Token Scanner</b>\n\nSend me a TON jetton contract address or ticker."
+        "<b>TON Meme Token Scanner</b>\n\n"
+        "Send a TON jetton contract address or ticker."
     )
 
 
@@ -990,13 +1007,22 @@ async def handle_address(message: Message):
             report = await scan_token(session, lookup_value)
 
             if not report.get("found"):
-                await status_msg.edit_text(format_token_report(report), disable_web_page_preview=True)
+                await status_msg.edit_text(
+                    format_token_report(report),
+                    disable_web_page_preview=True,
+                )
                 return
 
             scanner_meta = _build_scanner_meta(message, report)
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
-            result = format_token_report(report, show_info=False, show_holders=False, scan_history=history)
+
+            result = format_token_report(
+                report,
+                show_info=False,
+                show_holders=False,
+                scan_history=history,
+            )
             keyboard = build_report_keyboard(
                 key,
                 show_info=False,
@@ -1013,21 +1039,36 @@ async def handle_address(message: Message):
 
             if image_url:
                 try:
-                    await message.answer_photo(photo=image_url, caption=result, reply_markup=keyboard)
+                    await message.answer_photo(
+                        photo=image_url,
+                        caption=result,
+                        reply_markup=keyboard,
+                    )
                 except Exception:
-                    await message.answer(result, disable_web_page_preview=True, reply_markup=keyboard)
+                    await message.answer(
+                        result,
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard,
+                    )
             else:
-                await message.answer(result, disable_web_page_preview=True, reply_markup=keyboard)
+                await message.answer(
+                    result,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard,
+                )
 
     except Exception as e:
         logger.exception("Error scanning token")
         if status_msg:
             try:
-                await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+                await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}")
                 return
             except Exception:
                 pass
-        await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+
+        await message.answer(f"Error scanning token: {html.escape(str(e))}")
+
+
 @dp.callback_query(F.data.startswith("tg:"))
 async def handle_toggle(callback: CallbackQuery):
     try:
@@ -1040,6 +1081,7 @@ async def handle_toggle(callback: CallbackQuery):
     if not entry:
         await callback.answer("This report has expired — please scan the token again.", show_alert=True)
         return
+
     entry["ts"] = time.time()
 
     if section == "chart":
@@ -1070,11 +1112,23 @@ async def handle_toggle(callback: CallbackQuery):
 
         if image_url:
             try:
-                await callback.message.answer_photo(photo=image_url, caption=text, reply_markup=keyboard)
+                await callback.message.answer_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=keyboard,
+                )
             except Exception:
-                await callback.message.answer(text, disable_web_page_preview=True, reply_markup=keyboard)
+                await callback.message.answer(
+                    text,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard,
+                )
         else:
-            await callback.message.answer(text, disable_web_page_preview=True, reply_markup=keyboard)
+            await callback.message.answer(
+                text,
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
 
         await callback.answer()
         return
@@ -1102,6 +1156,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         return
 
     await callback.answer("Loading chart...")
+
     async with aiohttp.ClientSession() as session:
         ohlcv = await get_ohlcv(session, pool_address, timeframe)
 
@@ -1109,7 +1164,12 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         await callback.answer("Couldn't load chart data for this timeframe.", show_alert=True)
         return
 
-    png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
+    png_bytes = build_candlestick_chart(
+        ohlcv,
+        symbol,
+        CHART_TIMEFRAMES[timeframe]["label"],
+    )
+
     media = InputMediaPhoto(
         media=BufferedInputFile(png_bytes, filename="chart.png"),
         caption=f"<b>{html.escape(str(symbol))}</b> price chart",
@@ -1141,16 +1201,19 @@ async def handle_timeframe(callback: CallbackQuery):
     if not entry:
         await callback.answer("This report has expired — please scan the token again.", show_alert=True)
         return
+
     entry["ts"] = time.time()
     entry["chart_tf"] = timeframe
 
     pool_address = (entry["report"].get("dex_data") or {}).get("pair_address")
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
+
     if not pool_address or timeframe not in CHART_TIMEFRAMES:
         await callback.answer()
         return
 
     await callback.answer("Loading chart...")
+
     async with aiohttp.ClientSession() as session:
         ohlcv = await get_ohlcv(session, pool_address, timeframe)
 
@@ -1158,12 +1221,18 @@ async def handle_timeframe(callback: CallbackQuery):
         await callback.answer("Couldn't load chart data for that timeframe.", show_alert=True)
         return
 
-    png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
+    png_bytes = build_candlestick_chart(
+        ohlcv,
+        symbol,
+        CHART_TIMEFRAMES[timeframe]["label"],
+    )
+
     media = InputMediaPhoto(
         media=BufferedInputFile(png_bytes, filename="chart.png"),
         caption=f"<b>{html.escape(str(symbol))}</b> price chart",
     )
     keyboard = build_chart_keyboard(key, timeframe)
+
     try:
         await callback.message.edit_media(media=media, reply_markup=keyboard)
     except Exception:
