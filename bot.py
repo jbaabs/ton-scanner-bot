@@ -1,8 +1,7 @@
-
 """
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
-Shows full contract address and uses Scanned By.
+Shows full contract address, uses Scanned By, and includes Refresh button.
 """
 
 import os
@@ -118,19 +117,24 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
-    existing = conn.execute(
-        """
-        SELECT id FROM scan_history
-        WHERE token_key = ?
-        ORDER BY scan_ts ASC, id ASC
-        LIMIT 1
-        """,
+    count_row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM scan_history WHERE token_key = ?",
         (token_key,),
     ).fetchone()
+    existing_count = int(count_row["cnt"]) if count_row else 0
 
-    if existing:
-        conn.close()
-        return
+    if existing_count >= MAX_SCAN_HISTORY:
+        oldest = conn.execute(
+            """
+            SELECT id FROM scan_history
+            WHERE token_key = ?
+            ORDER BY scan_ts ASC, id ASC
+            LIMIT 1
+            """,
+            (token_key,),
+        ).fetchone()
+        if oldest:
+            conn.execute("DELETE FROM scan_history WHERE id = ?", (oldest["id"],))
 
     conn.execute(
         """
@@ -677,25 +681,30 @@ def _fmt_scan_age(scan_ts: int | None) -> str:
     return f"{delta // 86400}d"
 
 
-def _fmt_username(message: Message) -> str:
-    user = message.from_user
+def _fmt_username_from_user(user) -> str:
     if not user:
         return DEFAULT_SCANNER_LABEL
-    if user.username:
+    if getattr(user, "username", None):
         return f"@{user.username}"
-    full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
+    full_name = " ".join(
+        part for part in [getattr(user, "first_name", None), getattr(user, "last_name", None)] if part
+    ).strip()
     return full_name or DEFAULT_SCANNER_LABEL
 
 
-def _build_scanner_meta(message: Message, report: dict) -> dict:
+def _build_scanner_meta_from_user(user, report: dict) -> dict:
     dex = report.get("dex_data") or {}
     return {
-        "scanner_name": _fmt_username(message),
-        "scanner_id": message.from_user.id if message.from_user else None,
+        "scanner_name": _fmt_username_from_user(user),
+        "scanner_id": user.id if user else None,
         "scan_price": _fmt_price(dex.get("price_usd")),
         "scan_market_cap": _fmt_usd(dex.get("market_cap")),
         "scan_ts": int(time.time()),
     }
+
+
+def _build_scanner_meta(message: Message, report: dict) -> dict:
+    return _build_scanner_meta_from_user(message.from_user, report)
 
 
 def _first_url(value) -> str | None:
@@ -893,6 +902,7 @@ def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_cha
     if has_chart:
         row.append(InlineKeyboardButton(text="Chart", callback_data=f"tg:chart:{key}"))
 
+    row.append(InlineKeyboardButton(text="Refresh", callback_data=f"tg:refresh:{key}"))
     row.append(
         InlineKeyboardButton(
             text="Info" if not show_info else "Hide Info",
@@ -1083,6 +1093,38 @@ async def handle_toggle(callback: CallbackQuery):
         return
 
     entry["ts"] = time.time()
+
+    if section == "refresh":
+        address = str(entry["report"].get("address") or "").strip()
+        if not address:
+            await callback.answer("No token address found to refresh.", show_alert=True)
+            return
+
+        await callback.answer("Refreshing price...")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                fresh_report = await scan_token(session, address)
+
+            if not fresh_report.get("found"):
+                await callback.answer("Couldn't refresh token data right now.", show_alert=True)
+                return
+
+            scanner_meta = _build_scanner_meta_from_user(callback.from_user, fresh_report)
+            save_scan_history(fresh_report, scanner_meta)
+
+            entry["report"] = fresh_report
+            entry["scanner_meta"] = scanner_meta
+            entry["has_image"] = bool(_safe_image_url(fresh_report))
+            entry["scan_history"] = get_scan_history(fresh_report)
+            entry["ts"] = time.time()
+
+            await _render_report_message(callback.message, key)
+            return
+        except Exception:
+            logger.exception("Error refreshing token report")
+            await callback.answer("Refresh failed. Try again in a moment.", show_alert=True)
+            return
 
     if section == "chart":
         entry["chart_tf"] = entry.get("chart_tf", DEFAULT_CHART_TIMEFRAME)
