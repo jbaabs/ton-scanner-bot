@@ -323,7 +323,7 @@ async def resolve_ticker_to_address(session: aiohttp.ClientSession, ticker_text:
     pairs = await search_dex_pairs(session, ticker)
 
     if pairs is None:
-        return None, "Ticker search failed. Please try again later."
+        return None, f"Ticker search failed. Please try again later."
     if not pairs:
         return None, f"No results found for ${ticker}."
 
@@ -335,9 +335,7 @@ async def resolve_ticker_to_address(session: aiohttp.ClientSession, ticker_text:
     symbol_contains = [p for p in ton_pairs if ticker in _pair_symbol(p)]
     name_contains = [p for p in ton_pairs if ticker in _pair_name(p)]
     candidates = exact_symbol or symbol_contains or name_contains or ton_pairs
-    candidates.sort(
-        key=lambda p: (_pair_symbol(p) != ticker, -_pair_liquidity(p), -_pair_volume(p))
-    )
+    candidates.sort(key=lambda p: (_pair_symbol(p) != ticker, -_pair_liquidity(p), -_pair_volume(p)))
 
     best = candidates[0]
     address = (best.get("baseToken") or {}).get("address")
@@ -402,8 +400,6 @@ async def get_ohlcv(session: aiohttp.ClientSession, pool_address: str, timeframe
             return sorted(items, key=lambda c: c[0]) if items else None
     except (aiohttp.ClientError, TimeoutError):
         return None
-
-
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
     import matplotlib
     matplotlib.use("Agg")
@@ -664,8 +660,6 @@ def _fmt_scan_age(scan_ts: int | None) -> str:
     if delta < 86400:
         return f"{delta // 3600}h"
     return f"{delta // 86400}d"
-
-
 def _fmt_username(message: Message) -> str:
     user = message.from_user
     if not user:
@@ -779,23 +773,11 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
     return deduped
 
 
-def _holder_grid_lines(holder_list: list[dict]) -> list[str]:
-    rows = []
-    cleaned = []
-    for h in holder_list[:10]:
-        pct = h.get("percentage")
-        pct_text = f"{pct:.2f}%" if pct is not None else "N/A"
-        cleaned.append(pct_text)
-    for i in range(0, len(cleaned), 2):
-        left_num = i + 1
-        left = f"{left_num}. {cleaned[i]}"
-        if i + 1 < len(cleaned):
-            right_num = i + 2
-            right = f"{right_num}. {cleaned[i+1]}"
-            rows.append(f"{left} | {right}")
-        else:
-            rows.append(left)
-    return rows
+def _short_addr(addr: str, left: int = 6, right: int = 6) -> str:
+    addr = str(addr or "")
+    if len(addr) <= left + right + 3:
+        return addr
+    return f"{addr[:left]}...{addr[-right:]}"
 
 
 def format_token_report(
@@ -814,7 +796,8 @@ def format_token_report(
 
     name = html.escape(str(info.get("name", "Unknown")))
     symbol = html.escape(str(info.get("symbol", "???")))
-    address = html.escape(str(report.get("address", "")))
+    address_raw = str(report.get("address", "")).strip()
+    address = html.escape(address_raw)
     price = html.escape(_fmt_price(dex.get("price_usd")))
     mc = html.escape(_fmt_usd(dex.get("market_cap")))
     ath = html.escape(_fmt_usd(dex.get("fdv")))
@@ -853,15 +836,28 @@ def format_token_report(
         f"💧 LP: <b>{lp}</b> • 24H <b>{h24}</b>",
         f"📊 Vol: <b>{vol}</b> • 6H <b>{h6}</b>",
         "",
-        f"👥 Holders: <b>{holders_count}</b> • Top 10: <b>{html.escape(top_conc)}</b>",
     ]
 
     holder_list = holders.get("holders", [])
     if holder_list:
+        token_holders_url = f"https://tonviewer.com/{address_raw}"
+        lines.append(
+            f'👥 <a href="{html.escape(token_holders_url)}"><b>Holders: {holders_count}</b></a> • Top 10: <b>{html.escape(top_conc)}</b>'
+        )
         if show_holders:
-            lines.extend(_holder_grid_lines(holder_list))
-        else:
-            lines.append("1–10 holders hidden • tap Top Holders below")
+            for i, h in enumerate(holder_list[:10], 1):
+                pct = h.get("percentage")
+                pct_str = f"{pct:.2f}%" if pct is not None else "N/A"
+                holder_addr = str(h.get("address", "")).strip()
+                holder_url = f"https://tonviewer.com/{holder_addr}"
+                short_addr = _short_addr(holder_addr)
+                name_str = f" {html.escape(str(h['name']))}" if h.get("name") else ""
+                scam_str = " ⚠️SCAM" if h.get("is_scam") else ""
+                lines.append(
+                    f'{i}. <a href="{html.escape(holder_url)}"><code>{html.escape(short_addr)}</code></a> • <b>{html.escape(pct_str)}</b>{name_str}{scam_str}'
+                )
+    else:
+        lines.append(f"👥 Holders: <b>{holders_count}</b> • Top 10: <b>{html.escape(top_conc)}</b>")
 
     lines += [
         "",
@@ -894,8 +890,6 @@ def format_token_report(
         lines += ["", "<b>📋 Token Info</b>"] + info_lines
 
     return "\n".join(lines)
-
-
 def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_chart: bool = False):
     builder = InlineKeyboardBuilder()
     if has_chart:
@@ -930,8 +924,18 @@ async def _render_report_message(target_message: Message, key: str):
         return
     report = entry["report"]
     entry["scan_history"] = get_scan_history(report)
-    text = format_token_report(report, show_info=entry["show_info"], show_holders=entry["show_holders"], scan_history=entry["scan_history"])
-    keyboard = build_report_keyboard(key, entry["show_info"], entry["show_holders"], has_chart=bool((report.get("dex_data") or {}).get("pair_address")))
+    text = format_token_report(
+        report,
+        show_info=entry["show_info"],
+        show_holders=entry["show_holders"],
+        scan_history=entry["scan_history"],
+    )
+    keyboard = build_report_keyboard(
+        key,
+        entry["show_info"],
+        entry["show_holders"],
+        has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
+    )
     image_url = _safe_image_url(report)
 
     if image_url:
@@ -993,7 +997,12 @@ async def handle_address(message: Message):
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
             result = format_token_report(report, show_info=False, show_holders=False, scan_history=history)
-            keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=bool((report.get("dex_data") or {}).get("pair_address")))
+            keyboard = build_report_keyboard(
+                key,
+                show_info=False,
+                show_holders=False,
+                has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
+            )
             image_url = _safe_image_url(report)
 
             if status_msg:
@@ -1019,8 +1028,6 @@ async def handle_address(message: Message):
             except Exception:
                 pass
         await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
-
-
 @dp.callback_query(F.data.startswith("tg:"))
 async def handle_toggle(callback: CallbackQuery):
     try:
@@ -1042,8 +1049,18 @@ async def handle_toggle(callback: CallbackQuery):
 
     if section == "back":
         entry["scan_history"] = get_scan_history(entry["report"])
-        text = format_token_report(entry["report"], show_info=entry["show_info"], show_holders=entry["show_holders"], scan_history=entry["scan_history"])
-        keyboard = build_report_keyboard(key, entry["show_info"], entry["show_holders"], has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")))
+        text = format_token_report(
+            entry["report"],
+            show_info=entry["show_info"],
+            show_holders=entry["show_holders"],
+            scan_history=entry["scan_history"],
+        )
+        keyboard = build_report_keyboard(
+            key,
+            entry["show_info"],
+            entry["show_holders"],
+            has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")),
+        )
         image_url = _safe_image_url(entry["report"])
 
         try:
@@ -1093,13 +1110,20 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         return
 
     png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
-    media = InputMediaPhoto(media=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart")
+    media = InputMediaPhoto(
+        media=BufferedInputFile(png_bytes, filename="chart.png"),
+        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+    )
     keyboard = build_chart_keyboard(key, timeframe)
 
     try:
         await callback.message.edit_media(media=media, reply_markup=keyboard)
     except Exception:
-        await callback.message.answer_photo(photo=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart", reply_markup=keyboard)
+        await callback.message.answer_photo(
+            photo=BufferedInputFile(png_bytes, filename="chart.png"),
+            caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+            reply_markup=keyboard,
+        )
 
     entry["chart_tf"] = timeframe
     entry["ts"] = time.time()
@@ -1135,7 +1159,10 @@ async def handle_timeframe(callback: CallbackQuery):
         return
 
     png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
-    media = InputMediaPhoto(media=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart")
+    media = InputMediaPhoto(
+        media=BufferedInputFile(png_bytes, filename="chart.png"),
+        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+    )
     keyboard = build_chart_keyboard(key, timeframe)
     try:
         await callback.message.edit_media(media=media, reply_markup=keyboard)
