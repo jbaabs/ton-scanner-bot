@@ -815,38 +815,35 @@ def format_token_report(
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
+
+    name = html.escape(str(info.get("name", "Unknown")))
+    symbol = html.escape(str(info.get("symbol", "???")))
     full_address = html.escape(str(report.get("address", "")))
 
-    h1_value = dex.get("price_change_1h")
-    h24_value = dex.get("price_change_24h")
-
-    try:
-        h1_positive = float(h1_value) >= 0
-    except (ValueError, TypeError):
-        h1_positive = True
-
-    try:
-        h24_positive = float(h24_value) >= 0
-    except (ValueError, TypeError):
-        h24_positive = True
-
-    h1_emoji = "💎" if h1_positive else "🩸"
-    h24_emoji = "💎" if h24_positive else "🩸"
+    holders_count = _fmt_num(info.get("holders_count"))
+    age = html.escape(_fmt_age(dex.get("pair_created_at")))
+    lp = html.escape(_fmt_usd(dex.get("liquidity_usd")))
+    price = html.escape(_fmt_price(dex.get("price_usd")))
+    mc = html.escape(_fmt_usd(dex.get("market_cap")))
+    vol = html.escape(_fmt_usd(dex.get("volume_24h")))
+    h1 = html.escape(_fmt_pct(dex.get("price_change_1h")))
+    h24 = html.escape(_fmt_pct(dex.get("price_change_24h")))
 
     lines = [
-        f"<b>💎 {html.escape(str(info.get('name', 'Unknown')))}</b>  <b>${html.escape(str(info.get('symbol', '???')))}</b>",
+        f"💎 <b>{name}</b>  •  <b>${symbol}</b>",
+        "",
         f"<code>{full_address}</code>",
         "",
-        f"├ Holders: <b>{_fmt_num(info.get('holders_count'))}</b>",
-        f"└ Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>",
+        f"┌  Holders  {holders_count}   •   Age  {age}",
+        f"└  LP  {lp}",
         "",
-        "<b>📊 Token Stats</b>",
-        f"├ 💰 Price: <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>",
-        f"├ 📊 MC: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>",
-        f"├ 📈 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
-        f"├ 💧 LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>",
-        f"├ {h1_emoji} 1H: <b>{html.escape(_fmt_pct(h1_value))}</b>",
-        f"└ {h24_emoji} 24H: <b>{html.escape(_fmt_pct(h24_value))}</b>",
+        "┌ Token Stats ─────────────────────┐",
+        f"│  Price       {price}",
+        f"│  Market Cap  {mc}",
+        f"│  Volume 24h  {vol}",
+        "│",
+        f"│  1H   {h1}    24H  {h24}",
+        "└──────────────────────────────────┘",
     ]
 
     links = _collect_links(report)
@@ -854,34 +851,30 @@ def format_token_report(
         link_bits = [f'<a href="{html.escape(url)}">{html.escape(label)}</a>' for label, url in links]
         lines += ["", " • ".join(link_bits)]
 
+    history_rows = scan_history or []
+    if history_rows:
+        row = history_rows[0]
+        scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
+        scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
+        lines += ["", f"Scanned by {scanner_name} • {scan_age} ago"]
+
     if show_info:
         lines += [
             "",
-            "<b>ℹ️ Token Info</b>",
-            f"├ Mintable: <b>{'Yes' if info.get('mintable') else 'No'}</b>",
-            f"└ FDV: <b>{html.escape(_fmt_usd(dex.get('fdv')))}</b>",
+            "<b>Token Info</b>",
+            f"Mintable: {'Yes' if info.get('mintable') else 'No'}",
+            f"FDV: {html.escape(_fmt_usd(dex.get('fdv')))}",
         ]
 
     holder_list = holders.get("holders", [])
     if holder_list and show_holders:
-        lines += ["", "<b>👥 Top Holders</b>"]
+        lines += ["", "<b>Top Holders</b>"]
         for i, h in enumerate(holder_list[:5], 1):
             pct = h.get("percentage")
             pct_str = f" ({pct:.1f}%)" if pct is not None else ""
             label = h.get("name") or str(h.get("address", ""))
             lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
 
-    history_rows = scan_history or []
-    if history_rows:
-        lines += ["", "<b>Scanned By</b>"]
-        row = history_rows[0]
-        scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
-        scan_price = html.escape(str(row.get("scan_price", "N/A")))
-        scan_mc = html.escape(str(row.get("scan_market_cap", "N/A")))
-        scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
-        lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
-
-    lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
     return "\n".join(lines)
 
 
