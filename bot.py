@@ -255,7 +255,10 @@ def _safe_image_url(report: dict) -> str | None:
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
     url = f"{DEXSCREENER_API}/{address}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+        async with session.get(
+            url,
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
             if resp.status != 200:
                 return None
             data = await resp.json()
@@ -560,6 +563,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         total_vol = sum((p.get("volume") or {}).get("h24", 0) for p in dex_pairs)
         total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in dex_pairs)
         best = dex_pairs[0]
+        dex_info = best.get("info") or {}
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
@@ -572,6 +576,8 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
             "total_liquidity_usd": total_liq,
+            "websites": dex_info.get("websites") or [],
+            "socials": dex_info.get("socials") or [],
         }
     else:
         report["errors"].append(
@@ -740,6 +746,40 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
     if address:
         links.append(("TV", f"https://tonviewer.com/{address}"))
         links.append(("GT", f"https://www.geckoterminal.com/ton/tokens/{address}"))
+
+    dex_websites = dex.get("websites") or []
+    for item in dex_websites:
+        if isinstance(item, dict):
+            url = _normalize_url(item.get("url"))
+            if url:
+                links.append(("WEB", url))
+
+    dex_socials = dex.get("socials") or []
+    for item in dex_socials:
+        if not isinstance(item, dict):
+            continue
+
+        platform = str(item.get("platform") or "").lower().strip()
+        handle = str(item.get("handle") or "").strip()
+        if not handle:
+            continue
+
+        if platform in ("twitter", "x"):
+            if handle.startswith("@"):
+                handle = handle[1:]
+            url = _normalize_url(f"https://x.com/{handle}")
+            if url:
+                links.append(("X", url))
+        elif platform == "telegram":
+            if handle.startswith("@"):
+                handle = handle[1:]
+            url = _normalize_url(f"https://t.me/{handle}")
+            if url:
+                links.append(("TG", url))
+        elif platform in ("website", "web"):
+            url = _normalize_url(handle)
+            if url:
+                links.append(("WEB", url))
 
     website = _normalize_url(_first_url(info.get("website")))
     telegram = _normalize_url(_first_url(info.get("telegram")))
