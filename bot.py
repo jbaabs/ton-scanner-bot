@@ -2,14 +2,6 @@
 TON Meme Token Scanner Bot — Single File Version
 ================================================
 A Telegram bot that scans TON meme tokens by contract address or ticker.
-
-Setup:
-  1. Get a bot token from @BotFather
-  2. Set the TELEGRAM_BOT_TOKEN environment variable
-  3. pip install aiogram aiohttp python-dotenv matplotlib
-  4. python bot.py
-
-Or deploy on Railway/Render (see README).
 """
 
 import os
@@ -143,6 +135,16 @@ def _safe_image_url(report: dict) -> str | None:
     if image_url.startswith("http://") or image_url.startswith("https://"):
         return image_url
     return None
+
+
+def _pretty_dex_name(name: str) -> str:
+    mapping = {
+        "dedust": "Dedust",
+        "stonfi": "STON.fi",
+        "ston.fi": "STON.fi",
+    }
+    key = str(name).strip().lower()
+    return mapping.get(key, str(name).strip().title())
 
 
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
@@ -690,7 +692,7 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
     if buys or sells:
         txn_bits.append(f"🟢{buys}/🔴{sells}")
     if dexes:
-        dexes_safe = ", ".join(html.escape(str(d)) for d in dexes)
+        dexes_safe = ", ".join(html.escape(_pretty_dex_name(d)) for d in dexes)
         txn_bits.append(f"{dexes_safe} ({pair_count} pair{'s' if pair_count != 1 else ''})")
     if txn_bits:
         lines.append("🔁 " + "  ·  ".join(txn_bits))
@@ -871,23 +873,24 @@ async def cmd_start(message: Message):
 @dp.message(F.text)
 async def handle_address(message: Message):
     text = message.text.strip()
+    status_msg = None
 
-    async with aiohttp.ClientSession() as session:
-        if is_valid_ton_address(text):
-            lookup_value = text
-        elif is_valid_ticker(text):
-            status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
-            resolved_address, error_text = await resolve_ticker_to_address(session, text)
-            if error_text:
-                await status_msg.edit_text(error_text)
+    try:
+        async with aiohttp.ClientSession() as session:
+            if is_valid_ton_address(text):
+                lookup_value = text
+                status_msg = await message.answer("Scanning token...")
+            elif is_valid_ticker(text):
+                status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
+                resolved_address, error_text = await resolve_ticker_to_address(session, text)
+                if error_text:
+                    await status_msg.edit_text(error_text)
+                    return
+                lookup_value = resolved_address
+                await status_msg.edit_text("Scanning token...")
+            else:
                 return
-            lookup_value = resolved_address
-        else:
-            return
 
-        status_msg = await message.answer("Scanning token...")
-
-        try:
             report = await scan_token(session, lookup_value)
 
             if not report.get("found"):
@@ -901,11 +904,13 @@ async def handle_address(message: Message):
             keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=has_chart)
             image_url = _safe_image_url(report)
 
-            if image_url:
+            if status_msg:
                 try:
                     await status_msg.delete()
                 except Exception:
                     pass
+
+            if image_url:
                 try:
                     await message.answer_photo(
                         photo=image_url,
@@ -919,18 +924,26 @@ async def handle_address(message: Message):
                         reply_markup=keyboard,
                     )
             else:
-                await status_msg.edit_text(
+                await message.answer(
                     result,
                     disable_web_page_preview=True,
                     reply_markup=keyboard,
                 )
 
-        except Exception as e:
-            logger.exception("Error scanning token")
+    except Exception as e:
+        logger.exception("Error scanning token")
+        if status_msg:
             try:
-                await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+                await status_msg.edit_text(
+                    f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later."
+                )
+                return
             except Exception:
-                await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+                pass
+
+        await message.answer(
+            f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later."
+        )
 
 
 @dp.callback_query(F.data.startswith("tg:"))
