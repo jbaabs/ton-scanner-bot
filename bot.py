@@ -3,21 +3,25 @@ import logging
 import re
 import html
 import os
+import tempfile
 
 import aiohttp
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, BotCommand
-
+from aiogram.types import Message
 from dotenv import load_dotenv
 
 import matplotlib.pyplot as plt
 import pandas as pd
-import tempfile
 
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --------------------------------------------------
+# Env variables
+# --------------------------------------------------
 load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -28,12 +32,19 @@ TONAPI_KEY = os.getenv("TONAPI_KEY")
 if not TONAPI_KEY:
     logger.warning("TONAPI_KEY environment variable is not set; TonAPI calls may fail")
 
+# --------------------------------------------------
+# Bot and dispatcher
+# --------------------------------------------------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --------------------------------------------------
+# Helpers: validation and data fetch
+# --------------------------------------------------
 def is_valid_ton_address(text: str) -> bool:
     pattern = r"^(EQ|UQ)[A-Za-z0-9_-]{46}$"
     return bool(re.fullmatch(pattern, text))
+
 
 async def fetch_tonapi_data(session: aiohttp.ClientSession, address: str) -> dict:
     url = f"https://tonapi.io/v2/accounts/{address}"
@@ -43,6 +54,7 @@ async def fetch_tonapi_data(session: aiohttp.ClientSession, address: str) -> dic
             return {}
         return await resp.json()
 
+
 async def fetch_dexscreener_data(session: aiohttp.ClientSession, address: str) -> dict:
     url = f"https://api.dexscreener.com/latest/dex/search?q={address}"
     async with session.get(url) as resp:
@@ -50,6 +62,7 @@ async def fetch_dexscreener_data(session: aiohttp.ClientSession, address: str) -
             return {}
         data = await resp.json()
         return data.get("pairs", [{}])[0] if data.get("pairs") else {}
+
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     tonapi_data = await fetch_tonapi_data(session, address)
@@ -66,12 +79,12 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     base_token = dex_data.get("baseToken", {})
     quote_token = dex_data.get("quoteToken", {})
     dex_name = dex_data.get("dexId", "unknown")
-    pair_age_days = dex_data.get("pairCreatedAt", 0)
+    pair_age_ms = dex_data.get("pairCreatedAt", 0)
 
-    if pair_age_days:
+    if pair_age_ms:
         from datetime import datetime, timezone
-        created_at_s = pair_age_days / 1000
-        age_seconds = (datetime.now(timezone.utc).timestamp() - created_at_s)
+        created_at_s = pair_age_ms / 1000
+        age_seconds = datetime.now(timezone.utc).timestamp() - created_at_s
         age_days = max(0, age_seconds / 86400)
     else:
         age_days = 0
@@ -90,6 +103,9 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         "age_days": age_days,
     }
 
+# --------------------------------------------------
+# Formatting report
+# --------------------------------------------------
 def format_token_report(report: dict) -> str:
     address = report["address"]
     balance_ton = report["balance_ton"]
@@ -146,11 +162,14 @@ def format_token_report(report: dict) -> str:
 
     return "\n".join(lines)
 
+# --------------------------------------------------
+# Chart generation
+# --------------------------------------------------
 async def fetch_price_history(session: aiohttp.ClientSession, token_address: str, days: int = 7):
     url = f"https://api.geckoterminal.com/api/v1/networks/ton/tokens/{token_address}/ohlcv/day"
     params = {
         "aggregate": 1,
-        "limit": days
+        "limit": days,
     }
     async with session.get(url, params=params) as resp:
         if resp.status != 200:
@@ -163,12 +182,13 @@ async def fetch_price_history(session: aiohttp.ClientSession, token_address: str
 
     df = pd.DataFrame(
         ohlcv_list,
-        columns=["timestamp", "open", "high", "low", "close", "volume"]
+        columns=["timestamp", "open", "high", "low", "close", "volume"],
     )
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
     return df
 
-def create_price_chart(df, token_address: str):
+
+def create_price_chart(df: pd.DataFrame, token_address: str) -> str:
     plt.figure(figsize=(12, 6))
     plt.plot(df["datetime"], df["close"], linewidth=2)
     plt.title(f"Token Chart: {token_address[:12]}...{token_address[-6:]}")
@@ -181,8 +201,10 @@ def create_price_chart(df, token_address: str):
     plt.savefig(tmp_file.name, dpi=200)
     plt.close()
     return tmp_file.name
-m
 
+# --------------------------------------------------
+# Message handler
+# --------------------------------------------------
 @dp.message(F.text)
 async def handle_address(message: Message):
     text = message.text.strip()
@@ -203,25 +225,26 @@ async def handle_address(message: Message):
             report = await scan_token(session, text)
             result = format_token_report(report)
 
-            # Try to build the chart
+            # Try to build chart
             try:
                 df = await fetch_price_history(session, text, days=7)
                 if df is not None and not df.empty:
                     chart_file = create_price_chart(df, text)
-            except Exception as chart_error:
+            except Exception:
                 logger.exception("Chart error")
 
-            # IMPORTANT: parse_mode="HTML" so <b>...</b> etc. are rendered
+            # Send report as HTML
             await status_msg.edit_text(
                 result,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
+            # Send chart if generated
             if chart_file and os.path.exists(chart_file):
                 await message.answer_photo(
                     photo=open(chart_file, "rb"),
-                    caption="Token chart (7D)"
+                    caption="Token chart (7D)",
                 )
 
     except Exception as e:
@@ -234,7 +257,9 @@ async def handle_address(message: Message):
         if chart_file and os.path.exists(chart_file):
             os.remove(chart_file)
 
-
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
 async def main():
     logger.info("Starting TON Meme Token Scanner bot...")
     await dp.start_polling(bot)
