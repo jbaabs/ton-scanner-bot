@@ -156,11 +156,5 @@ async def get_jetton_info(session: aiohttp.ClientSession, address: str) -> dict 
             timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
         ) as resp:
             if resp.status != 200:
-                return None
-            return await resp.json()
-    except (aiohttp.ClientError, TimeoutError):
-        return None
+                return 
 
-
-async def get_jetton_holders(session: aiohttp.ClientSession, address: str, limit: int = 10) -> dict | None:
-    url = f"{TONAPI_BASE}/jetto
