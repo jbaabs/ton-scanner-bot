@@ -52,7 +52,6 @@ REQUEST_TIMEOUT = 15
 REPORT_CACHE: dict[str, dict] = {}
 REPORT_CACHE_TTL = 60 * 60
 MAX_SCAN_HISTORY = 12
-SCAN_DEDUP_SECONDS = int(os.getenv("SCAN_DEDUP_SECONDS", "300"))
 
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
@@ -108,49 +107,38 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    existing = conn.execute(
+        """
+        SELECT id FROM scan_history
+        WHERE token_key = ?
+        ORDER BY scan_ts ASC, id ASC
+        LIMIT 1
+        """,
+        (token_key,),
+    ).fetchone()
 
-    existing = None
-    if scanner_id is not None:
-        existing = conn.execute(
-            """
-            SELECT id, scan_ts
-            FROM scan_history
-            WHERE token_key = ? AND scanner_id = ?
-            ORDER BY scan_ts DESC, id DESC
-            LIMIT 1
-            """,
-            (token_key, scanner_id),
-        ).fetchone()
+    if existing:
+        conn.close()
+        return
 
-    if existing and scan_ts - int(existing["scan_ts"]) < SCAN_DEDUP_SECONDS:
-        conn.execute(
-            """
-            UPDATE scan_history
-            SET scanner_name = ?, scan_price = ?, scan_market_cap = ?, scan_ts = ?
-            WHERE id = ?
-            """,
-            (scanner_name, scan_price, scan_market_cap, scan_ts, existing["id"]),
-        )
-    else:
-        conn.execute(
-            """
-            INSERT INTO scan_history (
-                token_key, token_address, token_symbol, scanner_id, scanner_name,
-                scan_price, scan_market_cap, scan_ts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                token_key,
-                str(report.get("address") or ""),
-                str((report.get("jetton_info") or {}).get("symbol") or ""),
-                scanner_id,
-                scanner_name,
-                scan_price,
-                scan_market_cap,
-                scan_ts,
-            ),
-        )
-
+    conn.execute(
+        """
+        INSERT INTO scan_history (
+            token_key, token_address, token_symbol, scanner_id, scanner_name,
+            scan_price, scan_market_cap, scan_ts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            token_key,
+            str(report.get("address") or ""),
+            str((report.get("jetton_info") or {}).get("symbol") or ""),
+            scanner_id,
+            scanner_name,
+            scan_price,
+            scan_market_cap,
+            scan_ts,
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -664,13 +652,13 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
 
     history_rows = scan_history or []
     if history_rows:
-        lines += ["", "<b>Scanned By</b>"]
-        for row in history_rows[:5]:
-            scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
-            scan_price = html.escape(str(row.get("scan_price", "N/A")))
-            scan_mc = html.escape(str(row.get("scan_market_cap", "N/A")))
-            scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
-            lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
+        lines += ["", "<b>First Scanned By</b>"]
+        row = history_rows[0]
+        scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
+        scan_price = html.escape(str(row.get("scan_price", "N/A")))
+        scan_mc = html.escape(str(row.get("scan_market_cap", "N/A")))
+        scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
+        lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
 
     lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
     return "\n".join(lines)
@@ -684,10 +672,7 @@ def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_cha
     row.append(InlineKeyboardButton(text="Info" if not show_info else "Hide Info", callback_data=f"tg:info:{key}"))
     row.append(InlineKeyboardButton(text="Holders" if not show_holders else "Hide Holders", callback_data=f"tg:holders:{key}"))
     builder.row(*row)
-    builder.row(
-        InlineKeyboardButton(text="RedoTrade", url=REDOTRADE_URL),
-        InlineKeyboardButton(text="DTrade", url=DTRADE_URL),
-    )
+    builder.row(InlineKeyboardButton(text="RedoTrade", url=REDOTRADE_URL), InlineKeyboardButton(text="DTrade", url=DTRADE_URL))
     return builder.as_markup()
 
 
@@ -709,18 +694,8 @@ async def _render_report_message(target_message: Message, key: str):
         return
     report = entry["report"]
     entry["scan_history"] = get_scan_history(report)
-    text = format_token_report(
-        report,
-        show_info=entry["show_info"],
-        show_holders=entry["show_holders"],
-        scan_history=entry["scan_history"],
-    )
-    keyboard = build_report_keyboard(
-        key,
-        entry["show_info"],
-        entry["show_holders"],
-        has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
-    )
+    text = format_token_report(report, show_info=entry["show_info"], show_holders=entry["show_holders"], scan_history=entry["scan_history"])
+    keyboard = build_report_keyboard(key, entry["show_info"], entry["show_holders"], has_chart=bool((report.get("dex_data") or {}).get("pair_address")))
     image_url = _safe_image_url(report)
     if image_url:
         try:
@@ -779,12 +754,7 @@ async def handle_address(message: Message):
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
             result = format_token_report(report, show_info=False, show_holders=False, scan_history=history)
-            keyboard = build_report_keyboard(
-                key,
-                show_info=False,
-                show_holders=False,
-                has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
-            )
+            keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=bool((report.get("dex_data") or {}).get("pair_address")))
             image_url = _safe_image_url(report)
 
             if status_msg:
@@ -832,18 +802,8 @@ async def handle_toggle(callback: CallbackQuery):
 
     if section == "back":
         entry["scan_history"] = get_scan_history(entry["report"])
-        text = format_token_report(
-            entry["report"],
-            show_info=entry["show_info"],
-            show_holders=entry["show_holders"],
-            scan_history=entry["scan_history"],
-        )
-        keyboard = build_report_keyboard(
-            key,
-            entry["show_info"],
-            entry["show_holders"],
-            has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")),
-        )
+        text = format_token_report(entry["report"], show_info=entry["show_info"], show_holders=entry["show_holders"], scan_history=entry["scan_history"])
+        keyboard = build_report_keyboard(key, entry["show_info"], entry["show_holders"], has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")))
         image_url = _safe_image_url(entry["report"])
         try:
             await callback.message.delete()
@@ -887,19 +847,12 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         return
 
     png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
-    media = InputMediaPhoto(
-        media=BufferedInputFile(png_bytes, filename="chart.png"),
-        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
-    )
+    media = InputMediaPhoto(media=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart")
     keyboard = build_chart_keyboard(key, timeframe)
     try:
         await callback.message.edit_media(media=media, reply_markup=keyboard)
     except Exception:
-        await callback.message.answer_photo(
-            photo=BufferedInputFile(png_bytes, filename="chart.png"),
-            caption=f"<b>{html.escape(str(symbol))}</b> price chart",
-            reply_markup=keyboard,
-        )
+        await callback.message.answer_photo(photo=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart", reply_markup=keyboard)
     entry["chart_tf"] = timeframe
     entry["ts"] = time.time()
 
@@ -931,10 +884,7 @@ async def handle_timeframe(callback: CallbackQuery):
         return
 
     png_bytes = build_candlestick_chart(ohlcv, symbol, CHART_TIMEFRAMES[timeframe]["label"])
-    media = InputMediaPhoto(
-        media=BufferedInputFile(png_bytes, filename="chart.png"),
-        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
-    )
+    media = InputMediaPhoto(media=BufferedInputFile(png_bytes, filename="chart.png"), caption=f"<b>{html.escape(str(symbol))}</b> price chart")
     keyboard = build_chart_keyboard(key, timeframe)
     try:
         await callback.message.edit_media(media=media, reply_markup=keyboard)
