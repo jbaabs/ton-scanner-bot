@@ -1,7 +1,7 @@
 """
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
-Keeps scanner entries across restarts and does not overwrite older scanned entries.
+Shows full contract address and uses 'Scanned By' heading.
 """
 
 import os
@@ -215,13 +215,6 @@ def _safe_image_url(report: dict) -> str | None:
     if image_url.startswith("http://") or image_url.startswith("https://"):
         return image_url
     return None
-
-
-def _short_addr(addr: str, start: int = 8, end: int = 6) -> str:
-    addr = str(addr or "")
-    if len(addr) <= start + end + 1:
-        return addr
-    return f"{addr[:start]}...{addr[-end:]}"
 
 
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
@@ -595,10 +588,11 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
+    full_address = html.escape(str(report.get("address", "")))
 
     lines = [
         f"<b>💎 {html.escape(str(info.get('name', 'Unknown')))}</b>  <b>${html.escape(str(info.get('symbol', '???')))}</b>",
-        f"<code>{html.escape(_short_addr(report.get('address', ''), 10, 8))}</code>",
+        f"<code>{full_address}</code>",
         "",
         f"├ Holders: <b>{_fmt_num(info.get('holders_count'))}</b>",
         f"└ Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>",
@@ -622,7 +616,7 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
             "",
             "<b>ℹ️ Token Info</b>",
             f"├ Mintable: <b>{'Yes' if info.get('mintable') else 'No'}</b>",
-            f"└ FDV: <b>{html.escape(_fmt_usd(dex.get('fdv')))}</b>"
+            f"└ FDV: <b>{html.escape(_fmt_usd(dex.get('fdv')))}</b>",
         ]
 
     holder_list = holders.get("holders", [])
@@ -631,12 +625,12 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
         for i, h in enumerate(holder_list[:5], 1):
             pct = h.get("percentage")
             pct_str = f" ({pct:.1f}%)" if pct is not None else ""
-            label = h.get("name") or _short_addr(h.get("address", ""), 6, 4)
+            label = h.get("name") or str(h.get("address", ""))
             lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
 
     history_rows = scan_history or []
     if history_rows:
-        lines += ["", "<b>🧑‍💻 User Scanner</b>"]
+        lines += ["", "<b>Scanned By</b>"]
         for row in history_rows[:5]:
             scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
             scan_price = html.escape(str(row.get("scan_price", "N/A")))
