@@ -9,6 +9,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BotCommand
 
+from dotenv import load_dotenv
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import tempfile
@@ -16,7 +18,15 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your bot token from @BotFather
+load_dotenv()
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN environment variable is not set")
+
+TONAPI_KEY = os.getenv("TONAPI_KEY")
+if not TONAPI_KEY:
+    logger.warning("TONAPI_KEY environment variable is not set; TonAPI calls may fail")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -27,7 +37,7 @@ def is_valid_ton_address(text: str) -> bool:
 
 async def fetch_tonapi_data(session: aiohttp.ClientSession, address: str) -> dict:
     url = f"https://tonapi.io/v2/accounts/{address}"
-    headers = {"Authorization": "Bearer YOUR_TONAPI_KEY_HERE"}  # Replace with your TonAPI key
+    headers = {"Authorization": f"Bearer {TONAPI_KEY}"} if TONAPI_KEY else {}
     async with session.get(url, headers=headers) as resp:
         if resp.status != 200:
             return {}
@@ -59,9 +69,9 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     pair_age_days = dex_data.get("pairCreatedAt", 0)
 
     if pair_age_days:
-        from datetime import datetime
+        from datetime import datetime, timezone
         created_at_s = pair_age_days / 1000
-        age_seconds = (datetime.utcnow().timestamp() - created_at_s)
+        age_seconds = (datetime.now(timezone.utc).timestamp() - created_at_s)
         age_days = max(0, age_seconds / 86400)
     else:
         age_days = 0
