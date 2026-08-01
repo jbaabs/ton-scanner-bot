@@ -1,7 +1,8 @@
 """
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
-Shows full contract address, uses Scanned By, and includes Refresh button.
+Shows full contract address, uses Scanned By, includes Refresh button,
+and keeps both original scan + latest refresh history.
 """
 
 import os
@@ -177,6 +178,27 @@ def get_scan_history(report: dict, limit: int = MAX_SCAN_HISTORY) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_first_scan(report: dict) -> dict | None:
+    token_key = _history_key(report)
+    if not token_key:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT scanner_id, scanner_name, scan_price, scan_market_cap, scan_ts
+        FROM scan_history
+        WHERE token_key = ?
+        ORDER BY scan_ts ASC, id ASC
+        LIMIT 1
+        """,
+        (token_key,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
@@ -681,6 +703,16 @@ def _fmt_scan_age(scan_ts: int | None) -> str:
     return f"{delta // 86400}d"
 
 
+def _fmt_username(message: Message) -> str:
+    user = message.from_user
+    if not user:
+        return DEFAULT_SCANNER_LABEL
+    if user.username:
+        return f"@{user.username}"
+    full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
+    return full_name or DEFAULT_SCANNER_LABEL
+
+
 def _fmt_username_from_user(user) -> str:
     if not user:
         return DEFAULT_SCANNER_LABEL
@@ -692,6 +724,17 @@ def _fmt_username_from_user(user) -> str:
     return full_name or DEFAULT_SCANNER_LABEL
 
 
+def _build_scanner_meta(message: Message, report: dict) -> dict:
+    dex = report.get("dex_data") or {}
+    return {
+        "scanner_name": _fmt_username(message),
+        "scanner_id": message.from_user.id if message.from_user else None,
+        "scan_price": _fmt_price(dex.get("price_usd")),
+        "scan_market_cap": _fmt_usd(dex.get("market_cap")),
+        "scan_ts": int(time.time()),
+    }
+
+
 def _build_scanner_meta_from_user(user, report: dict) -> dict:
     dex = report.get("dex_data") or {}
     return {
@@ -701,10 +744,6 @@ def _build_scanner_meta_from_user(user, report: dict) -> dict:
         "scan_market_cap": _fmt_usd(dex.get("market_cap")),
         "scan_ts": int(time.time()),
     }
-
-
-def _build_scanner_meta(message: Message, report: dict) -> dict:
-    return _build_scanner_meta_from_user(message.from_user, report)
 
 
 def _first_url(value) -> str | None:
@@ -881,15 +920,22 @@ def format_token_report(
             label = h.get("name") or str(h.get("address", ""))
             lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
 
-    history_rows = scan_history or []
-    if history_rows:
-        lines += ["", "<b>Scanned By</b>"]
-        row = history_rows[0]
-        scanner_name = html.escape(str(row.get("scanner_name", DEFAULT_SCANNER_LABEL)))
-        scan_price = html.escape(str(row.get("scan_price", "N/A")))
-        scan_mc = html.escape(str(row.get("scan_market_cap", "N/A")))
-        scan_age = html.escape(_fmt_scan_age(row.get("scan_ts")))
+    first_scan = get_first_scan(report)
+    latest_scan = (scan_history or [None])[0]
+
+    if first_scan:
+        lines += ["", "<b>🕰️ Scanned By</b>"]
+        scanner_name = html.escape(str(first_scan.get("scanner_name", DEFAULT_SCANNER_LABEL)))
+        scan_price = html.escape(str(first_scan.get("scan_price", "N/A")))
+        scan_mc = html.escape(str(first_scan.get("scan_market_cap", "N/A")))
+        scan_age = html.escape(_fmt_scan_age(first_scan.get("scan_ts")))
         lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
+
+    if latest_scan:
+        latest_price = html.escape(str(latest_scan.get("scan_price", "N/A")))
+        latest_mc = html.escape(str(latest_scan.get("scan_market_cap", "N/A")))
+        latest_age = html.escape(_fmt_scan_age(latest_scan.get("scan_ts")))
+        lines += ["", "<b>🔄 Last Refresh</b>", f"• <b>{latest_price}</b> | MC {latest_mc} | {latest_age} ago"]
 
     lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
     return "\n".join(lines)
@@ -900,26 +946,26 @@ def build_report_keyboard(key: str, show_info: bool, show_holders: bool, has_cha
     row = []
 
     if has_chart:
-        row.append(InlineKeyboardButton(text="Chart", callback_data=f"tg:chart:{key}"))
+        row.append(InlineKeyboardButton(text="📈 Chart", callback_data=f"tg:chart:{key}"))
 
-    row.append(InlineKeyboardButton(text="Refresh", callback_data=f"tg:refresh:{key}"))
+    row.append(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"tg:refresh:{key}"))
     row.append(
         InlineKeyboardButton(
-            text="Info" if not show_info else "Hide Info",
+            text="ℹ️ Info" if not show_info else "✖️ Info",
             callback_data=f"tg:info:{key}",
         )
     )
     row.append(
         InlineKeyboardButton(
-            text="Holders" if not show_holders else "Hide Holders",
+            text="👥 Holders" if not show_holders else "✖️ Holders",
             callback_data=f"tg:holders:{key}",
         )
     )
     builder.row(*row)
 
     builder.row(
-        InlineKeyboardButton(text="RedoTrade", url=REDOTRADE_URL),
-        InlineKeyboardButton(text="DTrade", url=DTRADE_URL),
+        InlineKeyboardButton(text="🟣 RedoTrade", url=REDOTRADE_URL),
+        InlineKeyboardButton(text="🔵 DTrade", url=DTRADE_URL),
     )
     return builder.as_markup()
 
