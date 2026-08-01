@@ -1,8 +1,7 @@
 """
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
-Shows full contract address, uses Scanned By, includes Refresh button,
-and keeps both original scan + latest refresh history.
+Shows full contract address, uses Scanned By, includes Refresh button.
 """
 
 import os
@@ -921,8 +920,6 @@ def format_token_report(
             lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
 
     first_scan = get_first_scan(report)
-    latest_scan = (scan_history or [None])[0]
-
     if first_scan:
         lines += ["", "<b>🕰️ Scanned By</b>"]
         scanner_name = html.escape(str(first_scan.get("scanner_name", DEFAULT_SCANNER_LABEL)))
@@ -930,12 +927,6 @@ def format_token_report(
         scan_mc = html.escape(str(first_scan.get("scan_market_cap", "N/A")))
         scan_age = html.escape(_fmt_scan_age(first_scan.get("scan_ts")))
         lines.append(f"• {scanner_name} — <b>{scan_price}</b> | MC {scan_mc} | {scan_age} ago")
-
-    if latest_scan:
-        latest_price = html.escape(str(latest_scan.get("scan_price", "N/A")))
-        latest_mc = html.escape(str(latest_scan.get("scan_market_cap", "N/A")))
-        latest_age = html.escape(_fmt_scan_age(latest_scan.get("scan_ts")))
-        lines += ["", "<b>🔄 Last Refresh</b>", f"• <b>{latest_price}</b> | MC {latest_mc} | {latest_age} ago"]
 
     lines += ["", "<i>DexScreener + TonAPI · Not financial advice</i>"]
     return "\n".join(lines)
