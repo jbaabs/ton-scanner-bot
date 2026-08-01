@@ -76,7 +76,7 @@ def _cache_report(report: dict) -> str:
         "show_info": False,
         "show_holders": False,
         "chart_tf": DEFAULT_CHART_TIMEFRAME,
-        "has_image": bool((report.get("jetton_info") or {}).get("image")),
+        "has_image": bool(_safe_image_url(report)),
         "ts": time.time(),
     }
     return key
@@ -124,6 +124,18 @@ def _raw_to_friendly(raw: str) -> str | None:
         return base64.urlsafe_b64encode(full).decode("ascii")
     except Exception:
         return None
+
+
+def _safe_image_url(report: dict) -> str | None:
+    image_url = (report.get("jetton_info") or {}).get("image")
+    if not image_url or not isinstance(image_url, str):
+        return None
+
+    image_url = image_url.strip()
+    if image_url.startswith("http://") or image_url.startswith("https://"):
+        return image_url
+
+    return None
 
 
 async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dict] | None:
@@ -727,7 +739,7 @@ async def _render_report_message(target_message: Message, key: str):
         entry["show_holders"],
         has_chart=has_chart,
     )
-    image_url = (report.get("jetton_info") or {}).get("image")
+    image_url = _safe_image_url(report)
 
     if image_url:
         try:
@@ -807,18 +819,25 @@ async def handle_address(message: Message):
         has_chart = bool((report.get("dex_data") or {}).get("pair_address"))
         result = format_token_report(report, show_info=False, show_holders=False)
         keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=has_chart)
-        image_url = (report.get("jetton_info") or {}).get("image")
+        image_url = _safe_image_url(report)
 
         if image_url:
             try:
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer_photo(
-                photo=image_url,
-                caption=result,
-                reply_markup=keyboard,
-            )
+            try:
+                await message.answer_photo(
+                    photo=image_url,
+                    caption=result,
+                    reply_markup=keyboard,
+                )
+            except Exception:
+                await message.answer(
+                    result,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard,
+                )
         else:
             await status_msg.edit_text(
                 result,
@@ -866,23 +885,27 @@ async def handle_toggle(callback: CallbackQuery):
             entry["show_holders"],
             has_chart=has_chart,
         )
-        image_url = (entry["report"].get("jetton_info") or {}).get("image")
+        image_url = _safe_image_url(entry["report"])
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
 
         if image_url:
             try:
-                await callback.message.delete()
+                await callback.message.answer_photo(
+                    photo=image_url,
+                    caption=text,
+                    reply_markup=keyboard,
+                )
             except Exception:
-                pass
-            await callback.message.answer_photo(
-                photo=image_url,
-                caption=text,
-                reply_markup=keyboard,
-            )
+                await callback.message.answer(
+                    text,
+                    disable_web_page_preview=True,
+                    reply_markup=keyboard,
+                )
         else:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
             await callback.message.answer(
                 text,
                 disable_web_page_preview=True,
