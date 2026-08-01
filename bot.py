@@ -1,7 +1,7 @@
 """
 TON Meme Token Scanner Bot — Single File Version
 ================================================
-A Telegram bot that scans TON meme tokens by contract address.
+A Telegram bot that scans TON meme tokens by contract address or ticker.
 
 Setup:
   1. Get a bot token from @BotFather
@@ -45,6 +45,7 @@ TONAPI_KEY = os.getenv("TONAPI_KEY", "")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
+DEXSCREENER_SEARCH_API = "https://api.dexscreener.com/latest/dex/search"
 TONAPI_BASE = "https://tonapi.io/v2"
 GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2"
 
@@ -66,6 +67,10 @@ logger = logging.getLogger("ton-scanner-bot")
 
 REPORT_CACHE: dict[str, dict] = {}
 REPORT_CACHE_TTL = 60 * 60
+
+ADDR_FRIENDLY_RE = re.compile(r"^[EU]Q[A-Za-z0-9_\-]{46}$")
+ADDR_RAW_RE = re.compile(r"^(0|[-1]):[0-9a-fA-F]{64}$")
+TICKER_RE = re.compile(r"^\$?[A-Za-z0-9]{2,15}$")
 
 
 def _cache_report(report: dict) -> str:
@@ -89,13 +94,17 @@ def _prune_report_cache():
         REPORT_CACHE.pop(k, None)
 
 
-ADDR_FRIENDLY_RE = re.compile(r"^[EU]Q[A-Za-z0-9_\-]{46}$")
-ADDR_RAW_RE = re.compile(r"^(0|[-1]):[0-9a-fA-F]{64}$")
-
-
 def is_valid_ton_address(text: str) -> bool:
     text = text.strip()
     return bool(ADDR_FRIENDLY_RE.match(text) or ADDR_RAW_RE.match(text))
+
+
+def is_valid_ticker(text: str) -> bool:
+    return bool(TICKER_RE.match(text.strip()))
+
+
+def normalize_ticker(text: str) -> str:
+    return text.strip().lstrip("$").upper()
 
 
 def _crc16(data: bytes) -> int:
@@ -130,11 +139,9 @@ def _safe_image_url(report: dict) -> str | None:
     image_url = (report.get("jetton_info") or {}).get("image")
     if not image_url or not isinstance(image_url, str):
         return None
-
     image_url = image_url.strip()
     if image_url.startswith("http://") or image_url.startswith("https://"):
         return image_url
-
     return None
 
 
@@ -152,6 +159,83 @@ async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dic
             return pairs
     except (aiohttp.ClientError, TimeoutError):
         return None
+
+
+async def search_dex_pairs(session: aiohttp.ClientSession, query: str) -> list[dict] | None:
+    try:
+        async with session.get(
+            DEXSCREENER_SEARCH_API,
+            params={"q": query},
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return data.get("pairs", [])
+    except (aiohttp.ClientError, TimeoutError):
+        return None
+
+
+def _is_ton_pair(pair: dict) -> bool:
+    chain_id = str(pair.get("chainId", "")).lower()
+    return chain_id == "ton"
+
+
+def _pair_symbol(pair: dict) -> str:
+    return str((pair.get("baseToken") or {}).get("symbol", "")).upper()
+
+
+def _pair_name(pair: dict) -> str:
+    return str((pair.get("baseToken") or {}).get("name", "")).upper()
+
+
+def _pair_liquidity(pair: dict) -> float:
+    try:
+        return float((pair.get("liquidity") or {}).get("usd", 0) or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _pair_volume(pair: dict) -> float:
+    try:
+        return float((pair.get("volume") or {}).get("h24", 0) or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+async def resolve_ticker_to_address(session: aiohttp.ClientSession, ticker_text: str) -> tuple[str | None, str | None]:
+    ticker = normalize_ticker(ticker_text)
+    pairs = await search_dex_pairs(session, ticker)
+    if pairs is None:
+        return None, "Ticker search failed. Please try again later."
+    if not pairs:
+        return None, f"No results found for ${ticker}."
+
+    ton_pairs = [p for p in pairs if _is_ton_pair(p)]
+    if not ton_pairs:
+        return None, f"No TON token found for ${ticker}."
+
+    exact_symbol = [p for p in ton_pairs if _pair_symbol(p) == ticker]
+    symbol_contains = [p for p in ton_pairs if ticker in _pair_symbol(p)]
+    name_contains = [p for p in ton_pairs if ticker in _pair_name(p)]
+
+    candidates = exact_symbol or symbol_contains or name_contains or ton_pairs
+    candidates.sort(
+        key=lambda p: (
+            _pair_symbol(p) != ticker,
+            -_pair_liquidity(p),
+            -_pair_volume(p),
+        )
+    )
+
+    best = candidates[0]
+    base_token = best.get("baseToken") or {}
+    address = base_token.get("address")
+
+    if not address:
+        return None, f"Found TON results for ${ticker}, but no contract address was available."
+
+    return address, None
 
 
 def _tonapi_headers() -> dict:
@@ -548,8 +632,7 @@ def format_token_report(report: dict, show_info: bool = False, show_holders: boo
         errors = "\n".join(f"- {e}" for e in report.get("errors", []))
         return (
             "Token not found.\n\n"
-            "Make sure you pasted the jetton master contract address "
-            "(starts with <b>EQ</b> or <b>UQ</b>).\n\n"
+            "Make sure you pasted the jetton master contract address or valid ticker.\n\n"
             f"Details:\n{errors}"
         )
 
@@ -706,7 +789,7 @@ def build_chart_keyboard(key: str, selected_tf: str):
 
     buttons = [
         InlineKeyboardButton(
-            text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]["label"]),
+            text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]['label']),
             callback_data=f"tf:{tf}:{key}",
         )
         for tf in CHART_TIMEFRAME_ORDER
@@ -776,18 +859,11 @@ dp = Dispatcher()
 async def cmd_start(message: Message):
     await message.answer(
         "<b>TON Meme Token Scanner</b>\n\n"
-        "Send me a TON jetton contract address (starts with <b>EQ</b> or <b>UQ</b>) "
-        "and I'll scan it instantly.\n\n"
-        "You'll get:\n"
-        "- Price & market cap\n"
-        "- Liquidity & volume\n"
-        "- Price changes (5m, 1h, 6h, 24h)\n"
-        "- Buy/sell transaction counts\n"
-        "- Holder count & top holders\n"
-        "- Verification status\n"
-        "- Mintable supply check\n"
-        "- Risk assessment\n\n"
-        "Example: <code>EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOTC</code>\n\n"
+        "Send me a TON jetton contract address or ticker.\n\n"
+        "Examples:\n"
+        "- <code>EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOTC</code>\n"
+        "- <code>$GRX6900</code>\n"
+        "- <code>GRX6900</code>\n\n"
         "Data: DexScreener + TonAPI | Not financial advice"
     )
 
@@ -796,61 +872,65 @@ async def cmd_start(message: Message):
 async def handle_address(message: Message):
     text = message.text.strip()
 
-    if not is_valid_ton_address(text):
-        await message.answer(
-            "Please send a valid TON contract address.\n\n"
-            "It should start with <b>EQ</b> or <b>UQ</b> "
-            "(e.g. <code>EQAvlWFDxGF2lXm67y4yzC17wYKD9A0guwPkMs1gOsM__NOTC</code>)"
-        )
-        return
-
-    status_msg = await message.answer("Scanning token...")
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            report = await scan_token(session, text)
-
-        if not report.get("found"):
-            result = format_token_report(report)
-            await status_msg.edit_text(result, disable_web_page_preview=True)
+    async with aiohttp.ClientSession() as session:
+        if is_valid_ton_address(text):
+            lookup_value = text
+        elif is_valid_ticker(text):
+            status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
+            resolved_address, error_text = await resolve_ticker_to_address(session, text)
+            if error_text:
+                await status_msg.edit_text(error_text)
+                return
+            lookup_value = resolved_address
+        else:
             return
 
-        key = _cache_report(report)
-        has_chart = bool((report.get("dex_data") or {}).get("pair_address"))
-        result = format_token_report(report, show_info=False, show_holders=False)
-        keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=has_chart)
-        image_url = _safe_image_url(report)
+        status_msg = await message.answer("Scanning token...")
 
-        if image_url:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            try:
-                await message.answer_photo(
-                    photo=image_url,
-                    caption=result,
-                    reply_markup=keyboard,
-                )
-            except Exception:
-                await message.answer(
+        try:
+            report = await scan_token(session, lookup_value)
+
+            if not report.get("found"):
+                result = format_token_report(report)
+                await status_msg.edit_text(result, disable_web_page_preview=True)
+                return
+
+            key = _cache_report(report)
+            has_chart = bool((report.get("dex_data") or {}).get("pair_address"))
+            result = format_token_report(report, show_info=False, show_holders=False)
+            keyboard = build_report_keyboard(key, show_info=False, show_holders=False, has_chart=has_chart)
+            image_url = _safe_image_url(report)
+
+            if image_url:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+                try:
+                    await message.answer_photo(
+                        photo=image_url,
+                        caption=result,
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    await message.answer(
+                        result,
+                        disable_web_page_preview=True,
+                        reply_markup=keyboard,
+                    )
+            else:
+                await status_msg.edit_text(
                     result,
                     disable_web_page_preview=True,
                     reply_markup=keyboard,
                 )
-        else:
-            await status_msg.edit_text(
-                result,
-                disable_web_page_preview=True,
-                reply_markup=keyboard,
-            )
 
-    except Exception as e:
-        logger.exception("Error scanning token")
-        try:
-            await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
-        except Exception:
-            await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+        except Exception as e:
+            logger.exception("Error scanning token")
+            try:
+                await status_msg.edit_text(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
+            except Exception:
+                await message.answer(f"Error scanning token: {html.escape(str(e))}\n\nPlease try again later.")
 
 
 @dp.callback_query(F.data.startswith("tg:"))
