@@ -91,6 +91,17 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scan_token_key ON scan_history(token_key, scan_ts DESC)"
     )
+    # One-time cleanup: remove any previously-stuck rows that were saved
+    # without price/market cap data (e.g. from a transient DEX API hiccup).
+    # These would otherwise permanently show as "N/A" in the Scanned By
+    # section since get_first_scan always returns the oldest row.
+    conn.execute(
+        """
+        DELETE FROM scan_history
+        WHERE (scan_price IS NULL OR scan_price = 'N/A')
+          AND (scan_market_cap IS NULL OR scan_market_cap = 'N/A')
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -114,6 +125,13 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
     scanner_name = scanner_meta.get("scanner_name")
     scan_price = scanner_meta.get("scan_price")
     scan_market_cap = scanner_meta.get("scan_market_cap")
+
+    # Skip persisting scans where price/market cap data wasn't available yet
+    # (e.g. a transient DEX API hiccup on the very first scan). Otherwise a
+    # single bad scan gets permanently "stuck" as the recorded first scan,
+    # showing N/A forever even once later scans have good data.
+    if (not scan_price or scan_price == "N/A") and (not scan_market_cap or scan_market_cap == "N/A"):
+        return
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
