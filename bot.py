@@ -2,6 +2,7 @@
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
 Shows full contract address, uses Scanned By, includes Refresh button.
+Adds bonding-curve display block for non-bonded TopBlast tokens.
 """
 
 import os
@@ -534,6 +535,69 @@ def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
     return {"holders": holders, "top_concentration": top_pct}
 
 
+def _fmt_gram(value) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        value = float(value)
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.1f}K"
+        if value.is_integer():
+            return f"{int(value)}"
+        return f"{value:.2f}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _calc_bonding_curve(collected, target) -> dict | None:
+    try:
+        collected = float(collected)
+        target = float(target)
+        if target <= 0:
+            return None
+    except (ValueError, TypeError):
+        return None
+
+    percent = max(0.0, min((collected / target) * 100.0, 100.0))
+    remaining = max(target - collected, 0.0)
+
+    return {
+        "collected_gram": collected,
+        "target_gram": target,
+        "remaining_gram": remaining,
+        "percent": percent,
+        "bonded": percent >= 100.0,
+    }
+
+
+def _progress_bar(percent: float | None, size: int = 12) -> str:
+    try:
+        percent = max(0.0, min(float(percent), 100.0))
+    except (ValueError, TypeError):
+        percent = 0.0
+
+    filled = round((percent / 100.0) * size)
+    return "█" * filled + "░" * (size - filled)
+
+
+async def get_topblast_bonding_curve(
+    session: aiohttp.ClientSession, address: str, symbol: str | None = None
+) -> dict | None:
+    # Placeholder hook for TopBlast non-bonded token data.
+    # Add the real TopBlast request here when you have the endpoint / response format.
+    # Expected return format:
+    # {
+    #     "collected_gram": 0,
+    #     "target_gram": 1550,
+    #     "remaining_gram": 1550,
+    #     "percent": 0.0,
+    #     "bonded": False,
+    # }
+    return None
+
+
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     jetton_info = await get_jetton_info(session, address)
     dex_pairs = await get_dex_data(session, address)
@@ -553,6 +617,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         "dex_data": None,
         "jetton_info": None,
         "holders": None,
+        "bonding_curve": None,
         "errors": [],
     }
 
@@ -609,6 +674,14 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         report["errors"].append(
             "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
         )
+
+    try:
+        symbol = (report.get("jetton_info") or {}).get("symbol")
+        bonding_curve = await get_topblast_bonding_curve(session, address, symbol=symbol)
+        if bonding_curve and not bonding_curve.get("bonded", False):
+            report["bonding_curve"] = bonding_curve
+    except Exception:
+        logger.exception("Error loading TopBlast bonding curve data")
 
     return report
 
@@ -863,6 +936,7 @@ def format_token_report(
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
+    bonding = report.get("bonding_curve") or {}
     full_address = html.escape(str(report.get("address", "")))
 
     h1_value = dex.get("price_change_1h")
@@ -896,6 +970,25 @@ def format_token_report(
         f"├ {h1_emoji} 1H: <b>{html.escape(_fmt_pct(h1_value))}</b>",
         f"└ {h24_emoji} 24H: <b>{html.escape(_fmt_pct(h24_value))}</b>",
     ]
+
+    if bonding and not bonding.get("bonded", False):
+        percent = bonding.get("percent")
+        bar = _progress_bar(percent, size=12)
+
+        progress_line = (
+            f"├ 🚀 Progress: <code>{html.escape(bar)}</code> <b>{percent:.1f}%</b>"
+            if percent is not None
+            else "├ 🚀 Progress: <b>N/A</b>"
+        )
+
+        lines += [
+            "",
+            "<b>🧨 Bonding Curve</b>",
+            progress_line,
+            f"├ 💰 Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))} GRAM</b>",
+            f"├ 🎯 Target: <b>{html.escape(_fmt_gram(bonding.get('target_gram')))} GRAM</b>",
+            f"└ ⏳ Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))} GRAM</b>",
+        ]
 
     links = _collect_links(report)
     if links:
