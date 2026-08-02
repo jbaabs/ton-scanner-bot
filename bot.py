@@ -189,7 +189,7 @@ def get_first_scan(report: dict) -> dict | None:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """
-        SELECT scanner_id, scanner_name, scan_price, scan_market_cap, scan_ts
+        SELECT id, scanner_id, scanner_name, scan_price, scan_market_cap, scan_ts
         FROM scan_history
         WHERE token_key = ?
         ORDER BY scan_ts ASC, id ASC
@@ -199,6 +199,54 @@ def get_first_scan(report: dict) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def _is_missing_value(value) -> bool:
+    return value is None or str(value).strip() in ("", "N/A")
+
+
+def backfill_first_scan_prices(row_id: int, scan_price: str, scan_market_cap: str) -> None:
+    """Patch a scan_history row that was saved before DexScreener had indexed the
+    pair yet (very new tokens), so the 'Scanned By' line stops showing N/A forever."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE scan_history SET scan_price = ?, scan_market_cap = ? WHERE id = ?",
+        (scan_price, scan_market_cap, row_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_first_scan_resolved(report: dict) -> dict | None:
+    """Like get_first_scan, but self-heals rows whose price/MC were N/A at save time
+    by filling them in from the current live report (and persists the fix)."""
+    first_scan = get_first_scan(report)
+    if not first_scan:
+        return None
+
+    price_missing = _is_missing_value(first_scan.get("scan_price"))
+    mc_missing = _is_missing_value(first_scan.get("scan_market_cap"))
+    if not (price_missing or mc_missing):
+        return first_scan
+
+    dex = report.get("dex_data") or {}
+    fresh_price = _fmt_price(dex.get("price_usd"))
+    fresh_mc = _fmt_usd(dex.get("market_cap"))
+
+    updated = False
+    if price_missing and not _is_missing_value(fresh_price):
+        first_scan["scan_price"] = fresh_price
+        updated = True
+    if mc_missing and not _is_missing_value(fresh_mc):
+        first_scan["scan_market_cap"] = fresh_mc
+        updated = True
+
+    if updated and first_scan.get("id") is not None:
+        backfill_first_scan_prices(
+            first_scan["id"], first_scan.get("scan_price"), first_scan.get("scan_market_cap")
+        )
+
+    return first_scan
 
 
 def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
@@ -301,19 +349,41 @@ async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dic
         return None
 
 
-async def search_dex_pairs(session: aiohttp.ClientSession, query: str) -> list[dict] | None:
-    try:
-        async with session.get(
-            DEXSCREENER_SEARCH_API,
-            params={"q": query},
-            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            return data.get("pairs", [])
-    except (aiohttp.ClientError, TimeoutError):
-        return None
+async def search_dex_pairs(session: aiohttp.ClientSession, query: str, retries: int = 2) -> list[dict] | None:
+    last_status = None
+    for attempt in range(retries + 1):
+        try:
+            async with session.get(
+                DEXSCREENER_SEARCH_API,
+                params={"q": query},
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (ton-scanner-bot)"},
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                last_status = resp.status
+                if resp.status == 429:
+                    # Rate-limited by DexScreener - back off briefly and retry.
+                    logger.warning("DexScreener search 429 for %r (attempt %s)", query, attempt + 1)
+                    if attempt < retries:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    return None
+                if resp.status != 200:
+                    logger.warning(
+                        "DexScreener search returned status %s for %r", resp.status, query
+                    )
+                    return None
+                data = await resp.json()
+                return data.get("pairs", [])
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(
+                "DexScreener search error for %r (attempt %s): %s", query, attempt + 1, e
+            )
+            if attempt < retries:
+                await asyncio.sleep(1.0 * (attempt + 1))
+                continue
+            return None
+    logger.warning("DexScreener search exhausted retries for %r, last_status=%s", query, last_status)
+    return None
 
 
 def _is_ton_pair(pair: dict) -> bool:
@@ -349,7 +419,7 @@ async def resolve_ticker_to_address(
     pairs = await search_dex_pairs(session, ticker)
 
     if pairs is None:
-        return None, "Ticker search failed. Please try again later."
+        return None, "DexScreener is rate-limiting ticker searches right now — please wait a few seconds and try again."
     if not pairs:
         return None, f"No results found for ${ticker}."
 
@@ -1187,7 +1257,7 @@ def format_token_report(
                 pct_display = html.escape(pct_str)
             lines.append(f"{i}. {pct_display}")
 
-    first_scan = get_first_scan(report)
+    first_scan = get_first_scan_resolved(report)
     if first_scan:
         lines += ["", "<b>🕰️ Scanned By</b>"]
         scanner_name = html.escape(str(first_scan.get("scanner_name", DEFAULT_SCANNER_LABEL)))
@@ -1317,6 +1387,9 @@ async def handle_address(message: Message):
                 lookup_value = resolved_address
                 await status_msg.edit_text("Scanning token...")
             else:
+                await message.answer(
+                    "Send a valid TON contract address (EQ.../UQ...) or a ticker like GRX6900 or $GRX6900."
+                )
                 return
 
             report = await scan_token(session, lookup_value)
