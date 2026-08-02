@@ -501,6 +501,174 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
     return buf.getvalue()
 
 
+def build_report_card(ohlcv: list, report: dict, timeframe_label: str) -> bytes:
+    """Composite scan card: header stats bar + candlestick chart in one PNG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    from datetime import datetime, timezone
+    from io import BytesIO
+
+    info = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
+
+    symbol = str(info.get("symbol") or "???")
+    name = str(info.get("name") or "Unknown")
+    age = _fmt_age(dex.get("pair_created_at"))
+
+    txns = dex.get("txns_24h") or {}
+    txns_total = (txns.get("buys") or 0) + (txns.get("sells") or 0)
+
+    h1 = dex.get("price_change_1h")
+    h6 = dex.get("price_change_6h")
+    h24 = dex.get("price_change_24h")
+
+    try:
+        headline_positive = float(h24) >= 0
+    except (TypeError, ValueError):
+        headline_positive = True
+
+    bg = "#0e0e12"
+    green = "#26a69a"
+    red = "#ef5350"
+    headline_color = green if headline_positive else red
+
+    times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
+    opens = [c[1] for c in ohlcv]
+    highs = [c[2] for c in ohlcv]
+    lows = [c[3] for c in ohlcv]
+    closes = [c[4] for c in ohlcv]
+
+    fig = plt.figure(figsize=(8, 5.6), dpi=150)
+    fig.patch.set_facecolor(bg)
+    gs = gridspec.GridSpec(3, 1, height_ratios=[0.65, 0.55, 3.3], hspace=0.12)
+
+    # --- Header row: symbol / name / age + 24h change badge ---
+    ax_head = fig.add_subplot(gs[0])
+    ax_head.set_facecolor(bg)
+    ax_head.axis("off")
+    ax_head.text(
+        0.01, 0.62, symbol, color="#e8e8ec", fontsize=19, fontweight="bold",
+        va="center", ha="left", transform=ax_head.transAxes,
+    )
+    ax_head.text(
+        0.01, 0.12, f"{name}  ·  {age}", color="#9a9aa5", fontsize=10,
+        va="center", ha="left", transform=ax_head.transAxes,
+    )
+    ax_head.text(
+        0.99, 0.5, _fmt_pct(h24), color=headline_color, fontsize=15, fontweight="bold",
+        va="center", ha="right", transform=ax_head.transAxes,
+        bbox=dict(
+            boxstyle="round,pad=0.45",
+            facecolor="#123028" if headline_positive else "#301416",
+            edgecolor="none",
+        ),
+    )
+
+    # --- Stats row: MCAP / LIQ / VOL / TXNS / 1H / 6H ---
+    ax_stats = fig.add_subplot(gs[1])
+    ax_stats.set_facecolor(bg)
+    ax_stats.axis("off")
+
+    stats = [
+        ("MCAP", _fmt_usd(dex.get("market_cap")), None),
+        ("LIQ", _fmt_usd(dex.get("liquidity_usd")), None),
+        ("VOL", _fmt_usd(dex.get("volume_24h")), None),
+        ("TXNS", f"{txns_total:,}" if txns_total else "N/A", None),
+        ("1H", _fmt_pct(h1), h1),
+        ("6H", _fmt_pct(h6), h6),
+    ]
+    n = len(stats)
+    for i, (label, value, change_val) in enumerate(stats):
+        x = (i + 0.5) / n
+        ax_stats.text(
+            x, 0.78, label, color="#7a7a85", fontsize=8.5,
+            ha="center", va="center", transform=ax_stats.transAxes,
+        )
+        value_color = "#e8e8ec"
+        if change_val is not None:
+            try:
+                value_color = green if float(change_val) >= 0 else red
+            except (TypeError, ValueError):
+                pass
+        ax_stats.text(
+            x, 0.22, value, color=value_color, fontsize=10.5, fontweight="bold",
+            ha="center", va="center", transform=ax_stats.transAxes,
+        )
+
+    # --- Candlestick chart row (reuses the same look as build_candlestick_chart) ---
+    ax = fig.add_subplot(gs[2])
+    ax.set_facecolor(bg)
+
+    for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
+        color = green if c >= o else red
+        ax.plot([i, i], [l, h], color=color, linewidth=1)
+        bottom = min(o, c)
+        height = abs(c - o) or max((h - l) * 0.01, h * 0.0005, 1e-12)
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.3, bottom),
+                0.6,
+                height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0,
+            )
+        )
+
+    tick_count = min(6, len(ohlcv))
+    tick_idx = (
+        [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)]
+        if tick_count > 1
+        else [0]
+    )
+    tick_idx = sorted(set(tick_idx))
+    fmt = "%H:%M" if timeframe_label in ("5m", "1H", "4H") else "%b %d"
+
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx], color="#e8e8ec", fontsize=8)
+    ax.tick_params(axis="y", colors="#e8e8ec", labelsize=8)
+    ax.yaxis.tick_right()
+    ax.grid(True, color="#2a2a33", linewidth=0.5)
+
+    for spine in ax.spines.values():
+        spine.set_color("#2a2a33")
+
+    fig.subplots_adjust(left=0.02, right=0.93, top=0.96, bottom=0.06)
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor=bg)
+    plt.close(fig)
+    return buf.getvalue()
+
+
+async def build_scan_photo(
+    session: aiohttp.ClientSession, report: dict
+) -> BufferedInputFile | None:
+    """Fetches OHLCV for the token's pool and renders the composite scan card.
+    Returns None if there's no pool/chart data, so callers can fall back to the
+    token logo image."""
+    dex = report.get("dex_data") or {}
+    pool_address = dex.get("pair_address")
+    if not pool_address:
+        return None
+
+    ohlcv = await get_ohlcv(session, pool_address, DEFAULT_CHART_TIMEFRAME)
+    if not ohlcv:
+        return None
+
+    try:
+        png_bytes = build_report_card(
+            ohlcv, report, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME]["label"]
+        )
+    except Exception:
+        logger.exception("Error building scan report card image")
+        return None
+
+    return BufferedInputFile(png_bytes, filename="chart.png")
+
+
 def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
     if not holders_data or not holders_data.get("addresses"):
         return {"holders": [], "top_concentration": None}
@@ -662,7 +830,9 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "market_cap": best.get("marketCap"),
             "fdv": best.get("fdv"),
             "price_change_1h": (best.get("priceChange") or {}).get("h1"),
+            "price_change_6h": (best.get("priceChange") or {}).get("h6"),
             "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+            "txns_24h": (best.get("txns") or {}).get("h24") or {},
             "pair_address": best.get("pairAddress"),
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
@@ -1174,6 +1344,7 @@ async def handle_address(message: Message):
                 show_holders=False,
                 has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
             )
+            chart_photo = await build_scan_photo(session, report)
             image_url = _safe_image_url(report)
 
             if status_msg:
@@ -1182,7 +1353,18 @@ async def handle_address(message: Message):
                 except Exception:
                     pass
 
-            if image_url:
+            if chart_photo:
+                try:
+                    await message.answer_photo(
+                        photo=chart_photo,
+                        caption=result,
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    logger.exception("Error sending chart card, falling back")
+                    chart_photo = None
+
+            if not chart_photo and image_url:
                 try:
                     await message.answer_photo(
                         photo=image_url,
@@ -1195,7 +1377,7 @@ async def handle_address(message: Message):
                         disable_web_page_preview=True,
                         reply_markup=keyboard,
                     )
-            else:
+            elif not chart_photo and not image_url:
                 await message.answer(
                     result,
                     disable_web_page_preview=True,
@@ -1254,6 +1436,30 @@ async def handle_toggle(callback: CallbackQuery):
             entry["scan_history"] = get_scan_history(fresh_report)
             entry["ts"] = time.time()
 
+            text = format_token_report(
+                fresh_report,
+                show_info=entry["show_info"],
+                show_holders=entry["show_holders"],
+                scan_history=entry["scan_history"],
+            )
+            keyboard = build_report_keyboard(
+                key,
+                entry["show_info"],
+                entry["show_holders"],
+                has_chart=bool((fresh_report.get("dex_data") or {}).get("pair_address")),
+            )
+
+            async with aiohttp.ClientSession() as session:
+                chart_photo = await build_scan_photo(session, fresh_report)
+
+            if chart_photo:
+                try:
+                    media = InputMediaPhoto(media=chart_photo, caption=text)
+                    await callback.message.edit_media(media=media, reply_markup=keyboard)
+                    return
+                except Exception:
+                    logger.exception("Error updating chart card on refresh, falling back")
+
             await _render_report_message(callback.message, key)
             return
         except Exception:
@@ -1282,10 +1488,26 @@ async def handle_toggle(callback: CallbackQuery):
         )
         image_url = _safe_image_url(entry["report"])
 
+        async with aiohttp.ClientSession() as session:
+            chart_photo = await build_scan_photo(session, entry["report"])
+
         try:
             await callback.message.delete()
         except Exception:
             pass
+
+        if chart_photo:
+            try:
+                await callback.message.answer_photo(
+                    photo=chart_photo,
+                    caption=text,
+                    reply_markup=keyboard,
+                )
+                await callback.answer()
+                return
+            except Exception:
+                logger.exception("Error sending chart card on back, falling back")
+                chart_photo = None
 
         if image_url:
             try:
