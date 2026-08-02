@@ -10,6 +10,7 @@ import re
 import html
 import time
 import uuid
+import json
 import asyncio
 import base64
 import struct
@@ -53,6 +54,32 @@ NANO = 1_000_000_000
 REDOTRADE_URL = os.getenv("REDOTRADE_URL", "https://t.me/redotrade?start=XgWwrQ0D")
 DTRADE_URL = os.getenv("DTRADE_URL", "https://t.me/dtrade?start=203XZgXX1X")
 DEFAULT_SCANNER_LABEL = os.getenv("DEFAULT_SCANNER_LABEL", "Scanner")
+
+# --- Custom emoji (Telegram Premium / Fragment username required to render) ---
+# Populate CUSTOM_EMOJI_MAP_JSON with the output of extract_emoji_pack.py, e.g.:
+#   {"flag": "5379772067680437939", "money": "5361541227144878472", ...}
+# Any key left unset just falls back to the plain unicode emoji below, so the
+# bot keeps working even before you've configured real custom emoji IDs.
+try:
+    CUSTOM_EMOJI_IDS: dict = json.loads(os.getenv("CUSTOM_EMOJI_MAP_JSON", "{}"))
+except json.JSONDecodeError:
+    CUSTOM_EMOJI_IDS = {}
+
+_EMOJI_FALLBACK = {
+    "flag": "🚩", "money": "💰", "chart": "📈", "drop": "💧",
+    "people": "👥", "bars": "📊", "buy": "🟢", "sell": "🔴",
+    "swap": "🔁", "rocket": "🚀", "link": "🔗",
+}
+
+
+def emoji_tag(key: str) -> str:
+    """Return a <tg-emoji> HTML tag if a custom_emoji_id is configured for
+    this key, otherwise just the plain fallback emoji character."""
+    fallback = _EMOJI_FALLBACK.get(key, "")
+    custom_id = CUSTOM_EMOJI_IDS.get(key)
+    if custom_id:
+        return f'<tg-emoji emoji-id="{custom_id}">{fallback}</tg-emoji>'
+    return fallback
 
 CHART_TIMEFRAMES = {
     "5m": {"timeframe": "minute", "aggregate": 5, "limit": 48, "label": "5m"},
@@ -98,8 +125,62 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scan_token_key ON scan_history(token_key, scan_ts DESC)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ath_tracker (
+            token_key TEXT PRIMARY KEY,
+            ath_value REAL NOT NULL,
+            ath_ts INTEGER NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
+
+
+def update_and_get_ath(token_key: str, current_value: float | None) -> tuple[float | None, float | None]:
+    """
+    Persists a running all-time-high FDV per token, keyed off whatever this bot
+    has observed since it started tracking that token (there is no free public
+    API that returns full historical ATH for arbitrary TON jettons, so this is
+    an honest 'ATH since first scanned' rather than a lifetime ATH).
+    Returns (ath_value, pct_change_from_ath).
+    """
+    if not token_key or current_value is None:
+        return None, None
+    try:
+        current_value = float(current_value)
+    except (ValueError, TypeError):
+        return None, None
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT ath_value FROM ath_tracker WHERE token_key = ?", (token_key,)
+    ).fetchone()
+
+    if row is None:
+        conn.execute(
+            "INSERT INTO ath_tracker (token_key, ath_value, ath_ts) VALUES (?, ?, ?)",
+            (token_key, current_value, now),
+        )
+        conn.commit()
+        conn.close()
+        return current_value, 0.0
+
+    ath_value = float(row["ath_value"])
+    if current_value > ath_value:
+        conn.execute(
+            "UPDATE ath_tracker SET ath_value = ?, ath_ts = ? WHERE token_key = ?",
+            (current_value, now, token_key),
+        )
+        conn.commit()
+        ath_value = current_value
+    conn.close()
+
+    pct_from_ath = ((current_value - ath_value) / ath_value * 100) if ath_value else 0.0
+    return ath_value, pct_from_ath
 
 
 def _history_key(report: dict) -> str:
@@ -996,10 +1077,16 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "pair_address": best.get("pairAddress"),
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
+            "dex_id": best.get("dexId"),
             "total_liquidity_usd": total_liq,
             "websites": dex_info.get("websites") or [],
             "socials": dex_info.get("socials") or [],
         }
+
+        token_key = _history_key(report)
+        ath_basis = best.get("fdv") or best.get("marketCap")
+        ath_value, ath_pct = update_and_get_ath(token_key, ath_basis)
+        report["ath"] = {"value": ath_value, "pct_from_ath": ath_pct}
     else:
         report["errors"].append(
             "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
@@ -1065,6 +1152,27 @@ def _fmt_num(value) -> str:
         return f"{float(value):,.0f}"
     except (ValueError, TypeError):
         return "N/A"
+
+
+def _estimate_buy_sell_volume(volume_24h, buys, sells) -> tuple[float, float]:
+    """
+    DexScreener's public pair endpoint only returns total 24h volume plus buy
+    and sell TRANSACTION COUNTS, not a buy/sell dollar split. This apportions
+    total volume by trade count as an estimate — labelled 'Est.' wherever it's
+    displayed so it isn't presented as exact data.
+    """
+    try:
+        volume_24h = float(volume_24h or 0)
+        buys = int(buys or 0)
+        sells = int(sells or 0)
+    except (ValueError, TypeError):
+        return 0.0, 0.0
+    total_txns = buys + sells
+    if total_txns == 0 or volume_24h == 0:
+        return 0.0, 0.0
+    buy_vol = volume_24h * (buys / total_txns)
+    sell_vol = volume_24h - buy_vol
+    return buy_vol, sell_vol
 
 
 def _fmt_pct(value) -> str:
@@ -1290,20 +1398,45 @@ def format_token_report(
     h1_emoji = "💎" if h1_positive else "🩸"
     h24_emoji = "💎" if h24_positive else "🩸"
 
+    name = html.escape(str(info.get("name", "Unknown")))
+    symbol = html.escape(str(info.get("symbol", "???")))
+    pair_symbol = html.escape(str(dex.get("dex_id") or "").upper())
+
+    txns_24h = dex.get("txns_24h") or {}
+    buys = txns_24h.get("buys") or 0
+    sells = txns_24h.get("sells") or 0
+    buy_vol, sell_vol = _estimate_buy_sell_volume(dex.get("volume_24h"), buys, sells)
+
+    ath = report.get("ath") or {}
+    ath_value = ath.get("value")
+    ath_pct = ath.get("pct_from_ath")
+
     lines = [
-        f"<b>💎 {html.escape(str(info.get('name', 'Unknown')))}</b>  <b>${html.escape(str(info.get('symbol', '???')))}</b>",
+        f"{emoji_tag('flag')} <b>{name}</b>  <b>${symbol}</b>",
         f"<code>{full_address}</code>",
         "",
-        f"├ Holders: <b>{_fmt_num(info.get('holders_count'))}</b>",
-        f"└ Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>",
+        f"{emoji_tag('link')} <b>${symbol}</b>" + (f" · {pair_symbol}" if pair_symbol else ""),
         "",
-        "<b>📊 Token Stats</b>",
-        f"├ 💰 Price: <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>",
-        f"├ 📊 MC: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>",
-        f"├ 📈 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
-        f"├ 💧 LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>",
+        f"{emoji_tag('money')} Price · <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>   "
+        f"{emoji_tag('chart')} FDV · <b>{html.escape(_fmt_usd(dex.get('fdv')))}</b>",
+        "",
+        f"{emoji_tag('drop')} LIQ · <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>   "
+        f"{emoji_tag('people')} Holders · <b>{_fmt_num(info.get('holders_count'))}</b>",
+        "",
+        f"{emoji_tag('bars')} 24 Volume · <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
+        f"{emoji_tag('buy')} Buy · <b>{html.escape(_fmt_usd(buy_vol))}</b>*   "
+        f"{emoji_tag('sell')} Sell · <b>{html.escape(_fmt_usd(sell_vol))}</b>*",
+        "",
+        f"{emoji_tag('swap')} 24h Txns · <b>{_fmt_num(buys + sells)}</b>   "
+        f"⬆️ {buys}   ⬇️ {sells}",
+        "",
+        f"{emoji_tag('rocket')} ATH · <b>{html.escape(_fmt_usd(ath_value))}</b>"
+        + (f" | {html.escape(_fmt_pct(ath_pct))}" if ath_pct is not None else ""),
+        "",
         f"├ {h1_emoji} 1H: <b>{html.escape(_fmt_pct(h1_value))}</b>",
         f"└ {h24_emoji} 24H: <b>{html.escape(_fmt_pct(h24_value))}</b>",
+        "",
+        "<i>*Buy/Sell are estimated from the buy/sell transaction-count split — DexScreener doesn't expose an exact $ split.</i>",
     ]
 
     if bonding and not bonding.get("bonded", False):
