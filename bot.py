@@ -1008,9 +1008,14 @@ def format_token_report(
         lines += ["", "<b>👥 Top Holders</b>"]
         for i, h in enumerate(holder_list[:5], 1):
             pct = h.get("percentage")
-            pct_str = f" ({pct:.1f}%)" if pct is not None else ""
-            label = h.get("name") or str(h.get("address", ""))
-            lines.append(f"{i}. {html.escape(str(label))}{html.escape(pct_str)}")
+            pct_str = f"{pct:.2f}%" if pct is not None else "N/A"
+            address = str(h.get("address", "")).strip()
+            if address:
+                wallet_url = f"https://tonviewer.com/{address}"
+                pct_display = f'<a href="{html.escape(wallet_url)}">{html.escape(pct_str)}</a>'
+            else:
+                pct_display = html.escape(pct_str)
+            lines.append(f"{i}. {pct_display}")
 
     first_scan = get_first_scan(report)
     if first_scan:
