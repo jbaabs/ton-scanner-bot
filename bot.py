@@ -72,15 +72,22 @@ CUSTOM_EMOJI = {
 }
 
 def _ce(name: str, fallback: str) -> str:
-    """Render a Telegram custom emoji with a normal Unicode fallback."""
+    """Render a Telegram custom emoji using a Telegram-safe emoji fallback."""
     emoji_id = CUSTOM_EMOJI.get(name)
     if not emoji_id:
         return fallback
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+    safe_fallbacks = {
+        "sell": "🔴", "buy": "🟢", "dexscreener": "📊",
+        "dextools": "📈", "redotrade": "🟣", "dtrade": "🔵",
+        "gbot": "🤖", "dedust": "💎", "stonfi": "💎",
+        "percent": "💯", "social": "💬", "wallet": "👛",
+    }
+    safe = safe_fallbacks.get(name, "✨")
+    return f'<tg-emoji emoji-id="{emoji_id}">{safe}</tg-emoji>'
 
 def _linked_ce(name: str, fallback: str, url: str) -> str:
-    safe_url = html.escape(url, quote=True)
-    return f'<a href="{safe_url}">{_ce(name, fallback)}</a>'
+    # Keep custom-emoji and hyperlink entities separate for Telegram compatibility.
+    return _ce(name, fallback)
 
 def _short_address(address: str, left: int = 5, right: int = 5) -> str:
     address = str(address or "").strip()
