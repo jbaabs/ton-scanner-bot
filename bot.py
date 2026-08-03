@@ -565,7 +565,7 @@ def format_grx_stats(report: dict) -> str:
         "",
         "<i>GRX Stats improve as GRX collects more snapshots of the token.</i>",
     ]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
@@ -664,13 +664,37 @@ def _to_raw_address(address: str) -> str | None:
     return None
 
 
-def _safe_image_url(report: dict) -> str | None:
-    image_url = (report.get("jetton_info") or {}).get("image")
-    if not image_url or not isinstance(image_url, str):
+def _normalize_image_url(value) -> str | None:
+    if not value or not isinstance(value, str):
         return None
-    image_url = image_url.strip()
-    if image_url.startswith("http://") or image_url.startswith("https://"):
-        return image_url
+    url = value.strip()
+    if not url:
+        return None
+    if url.startswith("ipfs://"):
+        return "https://ipfs.io/ipfs/" + url[7:].lstrip("/")
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return None
+
+
+def _safe_image_url(report: dict) -> str | None:
+    # Prefer TonAPI metadata, then fall back to DexScreener artwork.  A fair
+    # number of TON tokens have no usable TonAPI image but do have DexScreener
+    # artwork, so relying on only one source caused missing icons.
+    info = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
+    candidates = [
+        info.get("image"),
+        dex.get("image_url"),
+        dex.get("open_graph"),
+        dex.get("header_image"),
+    ]
+    for candidate in candidates:
+        url = _normalize_image_url(candidate)
+        if url:
+            return url
     return None
 
 
@@ -960,9 +984,9 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # Header / identity.
     axh = fig.add_axes([0.06, 0.82, 0.88, 0.13]); axh.axis("off")
-    axh.text(0.12, 0.78, symbol, color=text, fontsize=23, fontweight="bold", va="center")
-    axh.text(0.12, 0.47, f"{name}  ·  {age}", color=muted, fontsize=10, va="center")
-    axh.text(0.12, 0.14, "GRX SCAN  /  TON INTELLIGENCE", color=blue, fontsize=8.5, fontweight="bold", va="center")
+    axh.text(0.135, 0.78, symbol, color=text, fontsize=23, fontweight="bold", va="center")
+    axh.text(0.135, 0.47, f"{name}  ·  {age}", color=muted, fontsize=10, va="center")
+    axh.text(0.135, 0.14, "GRX SCAN  /  TON INTELLIGENCE", color=blue, fontsize=8.5, fontweight="bold", va="center")
     h24 = dex.get("price_change_24h")
     try: pos24 = float(h24) >= 0
     except Exception: pos24 = True
@@ -974,8 +998,23 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         from PIL import Image
         import numpy as np
         if token_icon_bytes:
+            from PIL import ImageOps, ImageDraw
             token_img = Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
-            axt = fig.add_axes([0.065, 0.858, 0.075, 0.075], zorder=10); axt.imshow(np.asarray(token_img)); axt.axis("off")
+            # Preserve the whole token artwork instead of stretching/cropping it.
+            # This handles both round coin icons and wide wordmark-style images.
+            tile_size = 220
+            pad = 18
+            tile = Image.new("RGBA", (tile_size, tile_size), (13, 20, 34, 255))
+            usable = tile_size - (pad * 2)
+            contained = ImageOps.contain(token_img, (usable, usable), method=Image.Resampling.LANCZOS)
+            x = (tile_size - contained.width) // 2
+            y = (tile_size - contained.height) // 2
+            tile.alpha_composite(contained, (x, y))
+            mask = Image.new("L", (tile_size, tile_size), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, tile_size-1, tile_size-1), radius=44, fill=255)
+            tile.putalpha(mask)
+            axt = fig.add_axes([0.055, 0.848, 0.092, 0.092], zorder=10)
+            axt.imshow(np.asarray(tile)); axt.axis("off")
         logo_img = Image.open(BytesIO(base64.b64decode(GRX_LOGO_B64))).convert("RGBA")
         axl = fig.add_axes([0.875, 0.855, 0.075, 0.075], zorder=10); axl.imshow(np.asarray(logo_img)); axl.axis("off")
     except Exception:
@@ -1320,6 +1359,9 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "total_liquidity_usd": total_liq,
             "websites": dex_info.get("websites") or [],
             "socials": dex_info.get("socials") or [],
+            "image_url": dex_info.get("imageUrl") or dex_info.get("image_url"),
+            "header_image": dex_info.get("header"),
+            "open_graph": dex_info.get("openGraph"),
         }
     else:
         report["errors"].append(
