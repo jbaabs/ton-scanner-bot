@@ -664,37 +664,13 @@ def _to_raw_address(address: str) -> str | None:
     return None
 
 
-def _normalize_image_url(value) -> str | None:
-    if not value or not isinstance(value, str):
-        return None
-    url = value.strip()
-    if not url:
-        return None
-    if url.startswith("ipfs://"):
-        return "https://ipfs.io/ipfs/" + url[7:].lstrip("/")
-    if url.startswith("//"):
-        return "https:" + url
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    return None
-
-
 def _safe_image_url(report: dict) -> str | None:
-    # Prefer TonAPI metadata, then fall back to DexScreener artwork.  A fair
-    # number of TON tokens have no usable TonAPI image but do have DexScreener
-    # artwork, so relying on only one source caused missing icons.
-    info = report.get("jetton_info") or {}
-    dex = report.get("dex_data") or {}
-    candidates = [
-        info.get("image"),
-        dex.get("image_url"),
-        dex.get("open_graph"),
-        dex.get("header_image"),
-    ]
-    for candidate in candidates:
-        url = _normalize_image_url(candidate)
-        if url:
-            return url
+    image_url = (report.get("jetton_info") or {}).get("image")
+    if not image_url or not isinstance(image_url, str):
+        return None
+    image_url = image_url.strip()
+    if image_url.startswith("http://") or image_url.startswith("https://"):
+        return image_url
     return None
 
 
@@ -943,149 +919,180 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
 
 
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None) -> bytes:
-    """Render the complete GRX scanner as a single premium visual card."""
+    """Composite scan card: header stats bar + candlestick chart in one PNG."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyBboxPatch
+    import matplotlib.gridspec as gridspec
     from datetime import datetime, timezone
     from io import BytesIO
 
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
-    holders = report.get("holders") or {}
+
     symbol = str(info.get("symbol") or "???")
     name = str(info.get("name") or "Unknown")
     age = _fmt_age(dex.get("pair_created_at"))
 
     txns = dex.get("txns_24h") or {}
-    buys, sells = int(txns.get("buys") or 0), int(txns.get("sells") or 0)
-    total = buys + sells
-    buy_pct = (buys / total * 100) if total else 0
-    top10 = holders.get("top_concentration")
+    txns_total = (txns.get("buys") or 0) + (txns.get("sells") or 0)
 
-    bg, panel, panel2 = "#070b13", "#0d1422", "#101a2b"
-    blue, blue2, text, muted = "#3da9ff", "#72c4ff", "#f4f7fb", "#8492a6"
-    green, red, grid = "#27d7b0", "#ff5d6c", "#1b2940"
-
-    fig = plt.figure(figsize=(8, 8.7), dpi=150, facecolor=bg)
-
-    # Outer premium frame.
-    frame = fig.add_axes([0.015, 0.015, 0.97, 0.97])
-    frame.axis("off")
-    frame.add_patch(FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0.012,rounding_size=0.028",
-                                   transform=frame.transAxes, facecolor=bg, edgecolor=blue, linewidth=1.5))
-    frame.add_patch(FancyBboxPatch((0.018, 0.795), 0.964, 0.18, boxstyle="round,pad=0.008,rounding_size=0.02",
-                                   transform=frame.transAxes, facecolor=panel, edgecolor=grid, linewidth=0.8))
-    frame.add_patch(FancyBboxPatch((0.018, 0.325), 0.964, 0.455, boxstyle="round,pad=0.008,rounding_size=0.02",
-                                   transform=frame.transAxes, facecolor=panel, edgecolor=grid, linewidth=0.8))
-    frame.add_patch(FancyBboxPatch((0.018, 0.035), 0.964, 0.275, boxstyle="round,pad=0.008,rounding_size=0.02",
-                                   transform=frame.transAxes, facecolor=panel2, edgecolor=grid, linewidth=0.8))
-
-    # Header / identity.
-    axh = fig.add_axes([0.06, 0.82, 0.88, 0.13]); axh.axis("off")
-    axh.text(0.135, 0.78, symbol, color=text, fontsize=23, fontweight="bold", va="center")
-    axh.text(0.135, 0.47, f"{name}  ·  {age}", color=muted, fontsize=10, va="center")
-    axh.text(0.135, 0.14, "GRX SCAN  /  TON INTELLIGENCE", color=blue, fontsize=8.5, fontweight="bold", va="center")
+    h1 = dex.get("price_change_1h")
+    h6 = dex.get("price_change_6h")
     h24 = dex.get("price_change_24h")
-    try: pos24 = float(h24) >= 0
-    except Exception: pos24 = True
-    axh.text(0.84, 0.50, _fmt_pct(h24), color=green if pos24 else red, fontsize=14, fontweight="bold",
-             ha="center", va="center", bbox=dict(boxstyle="round,pad=.45", facecolor="#10243a", edgecolor=grid))
 
-    # Token + GRX logo overlays.
+    try:
+        headline_positive = float(h24) >= 0
+    except (TypeError, ValueError):
+        headline_positive = True
+
+    bg = "#0e0e12"
+    green = "#26a69a"
+    red = "#ef5350"
+    headline_color = "#4db8ff" if headline_positive else red
+
+    times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
+    opens = [c[1] for c in ohlcv]
+    highs = [c[2] for c in ohlcv]
+    lows = [c[3] for c in ohlcv]
+    closes = [c[4] for c in ohlcv]
+
+    fig = plt.figure(figsize=(8, 5.6), dpi=150)
+    fig.patch.set_facecolor(bg)
+    gs = gridspec.GridSpec(3, 1, height_ratios=[0.65, 0.55, 3.3], hspace=0.12)
+
+    # --- Header row: symbol / name / age + 24h change badge ---
+    ax_head = fig.add_subplot(gs[0])
+    ax_head.set_facecolor(bg)
+    ax_head.axis("off")
+    ax_head.text(
+        0.01, 0.62, symbol, color="#e8e8ec", fontsize=19, fontweight="bold",
+        va="center", ha="left", transform=ax_head.transAxes,
+    )
+    ax_head.text(
+        0.01, 0.12, f"{name}  ·  {age}", color="#9a9aa5", fontsize=10,
+        va="center", ha="left", transform=ax_head.transAxes,
+    )
+    ax_head.text(
+        0.72, 0.90, "GRX SCAN", color="#4db8ff", fontsize=7.5, fontweight="bold",
+        va="center", ha="center", transform=ax_head.transAxes, alpha=0.9,
+    )
+    ax_head.text(
+        0.99, 0.5, _fmt_pct(h24), color=headline_color, fontsize=15, fontweight="bold",
+        va="center", ha="right", transform=ax_head.transAxes,
+        bbox=dict(
+            boxstyle="round,pad=0.45",
+            facecolor="#102b46" if headline_positive else "#301416",
+            edgecolor="none",
+        ),
+    )
+
+    # --- Stats row: MCAP / LIQ / VOL / TXNS / 1H / 6H ---
+    ax_stats = fig.add_subplot(gs[1])
+    ax_stats.set_facecolor(bg)
+    ax_stats.axis("off")
+
+    stats = [
+        ("MCAP", _fmt_usd(dex.get("market_cap")), None),
+        ("LIQ", _fmt_usd(dex.get("liquidity_usd")), None),
+        ("VOL", _fmt_usd(dex.get("volume_24h")), None),
+        ("TXNS", f"{txns_total:,}" if txns_total else "N/A", None),
+        ("1H", _fmt_pct(h1), h1),
+        ("6H", _fmt_pct(h6), h6),
+    ]
+    n = len(stats)
+    for i, (label, value, change_val) in enumerate(stats):
+        x = (i + 0.5) / n
+        ax_stats.text(
+            x, 0.78, label, color="#7a7a85", fontsize=8.5,
+            ha="center", va="center", transform=ax_stats.transAxes,
+        )
+        value_color = "#e8e8ec"
+        if change_val is not None:
+            try:
+                value_color = green if float(change_val) >= 0 else red
+            except (TypeError, ValueError):
+                pass
+        ax_stats.text(
+            x, 0.22, value, color=value_color, fontsize=10.5, fontweight="bold",
+            ha="center", va="center", transform=ax_stats.transAxes,
+        )
+
+    # --- Candlestick chart row (reuses the same look as build_candlestick_chart) ---
+    ax = fig.add_subplot(gs[2])
+    ax.set_facecolor(bg)
+
+    for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
+        color = green if c >= o else red
+        ax.plot([i, i], [l, h], color=color, linewidth=1)
+        bottom = min(o, c)
+        height = abs(c - o) or max((h - l) * 0.01, h * 0.0005, 1e-12)
+        ax.add_patch(
+            plt.Rectangle(
+                (i - 0.3, bottom),
+                0.6,
+                height,
+                facecolor=color,
+                edgecolor=color,
+                linewidth=0,
+            )
+        )
+
+    tick_count = min(6, len(ohlcv))
+    tick_idx = (
+        [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)]
+        if tick_count > 1
+        else [0]
+    )
+    tick_idx = sorted(set(tick_idx))
+    fmt = "%H:%M" if timeframe_label in ("5m", "1H", "4H") else "%b %d"
+
+    ax.set_xticks(tick_idx)
+    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx], color="#e8e8ec", fontsize=8)
+    ax.tick_params(axis="y", colors="#e8e8ec", labelsize=8)
+    ax.yaxis.tick_right()
+    ax.grid(True, color="#2a2a33", linewidth=0.5)
+
+    for spine in ax.spines.values():
+        spine.set_color("#2a2a33")
+
+    # --- GRX branding overlays ---
     try:
         from PIL import Image
+        from io import BytesIO as _BytesIO
         import numpy as np
+
+        logo_img = Image.open(_BytesIO(base64.b64decode(GRX_LOGO_B64))).convert("RGBA")
+        logo_ax = fig.add_axes([0.855, 0.845, 0.105, 0.105], anchor="NE", zorder=10)
+        logo_ax.imshow(np.asarray(logo_img))
+        logo_ax.axis("off")
+
         if token_icon_bytes:
-            from PIL import ImageOps, ImageDraw
-            token_img = Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
-            # Preserve the whole token artwork instead of stretching/cropping it.
-            # This handles both round coin icons and wide wordmark-style images.
-            tile_size = 220
-            pad = 18
-            tile = Image.new("RGBA", (tile_size, tile_size), (13, 20, 34, 255))
-            usable = tile_size - (pad * 2)
-            contained = ImageOps.contain(token_img, (usable, usable), method=Image.Resampling.LANCZOS)
-            x = (tile_size - contained.width) // 2
-            y = (tile_size - contained.height) // 2
-            tile.alpha_composite(contained, (x, y))
-            mask = Image.new("L", (tile_size, tile_size), 0)
-            ImageDraw.Draw(mask).rounded_rectangle((0, 0, tile_size-1, tile_size-1), radius=44, fill=255)
-            tile.putalpha(mask)
-            axt = fig.add_axes([0.055, 0.848, 0.092, 0.092], zorder=10)
-            axt.imshow(np.asarray(tile)); axt.axis("off")
-        logo_img = Image.open(BytesIO(base64.b64decode(GRX_LOGO_B64))).convert("RGBA")
-        axl = fig.add_axes([0.875, 0.855, 0.075, 0.075], zorder=10); axl.imshow(np.asarray(logo_img)); axl.axis("off")
+            token_img = Image.open(_BytesIO(token_icon_bytes)).convert("RGBA")
+            token_ax = fig.add_axes([0.012, 0.84, 0.105, 0.105], zorder=10)
+            token_ax.imshow(np.asarray(token_img))
+            token_ax.axis("off")
+            # Shift title right so it doesn't collide with the token icon.
+            for txt in ax_head.texts[:2]:
+                x, y = txt.get_position()
+                txt.set_position((max(x, 0.13), y))
     except Exception:
-        logger.debug("GRX/token icon render failed", exc_info=True)
+        logger.debug("Could not render one of the GRX card image overlays", exc_info=True)
 
-    # KPI strip.
-    axk = fig.add_axes([0.055, 0.785, 0.89, 0.055]); axk.axis("off")
-    kpis = [
-        ("PRICE", _fmt_price(dex.get("price_usd"))),
-        ("MCAP", _fmt_usd(dex.get("market_cap"))),
-        ("LIQUIDITY", _fmt_usd(dex.get("liquidity_usd"))),
-        ("VOLUME", _fmt_usd(dex.get("volume_24h"))),
-        ("HOLDERS", _fmt_num(info.get("holders_count"))),
-    ]
-    for i,(lab,val) in enumerate(kpis):
-        x=(i+.5)/len(kpis)
-        axk.text(x,.70,lab,color=muted,fontsize=7.5,ha="center",fontweight="bold")
-        axk.text(x,.10,val,color=text,fontsize=10.5,ha="center",fontweight="bold")
+    # Thin GRX-blue frame ties the header/chart into one branded card.
+    try:
+        from matplotlib.patches import Rectangle as _FrameRect
+        fig.add_artist(_FrameRect((0.006, 0.008), 0.988, 0.984, transform=fig.transFigure,
+                                  fill=False, edgecolor="#249dff", linewidth=1.4, alpha=0.65))
+    except Exception:
+        pass
 
-    # Integrated candlestick chart.
-    ax = fig.add_axes([0.07, 0.365, 0.86, 0.385], facecolor=panel)
-    times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
-    opens=[c[1] for c in ohlcv]; highs=[c[2] for c in ohlcv]; lows=[c[3] for c in ohlcv]; closes=[c[4] for c in ohlcv]
-    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
-        col=green if c>=o else red
-        ax.plot([i,i],[l,h],color=col,linewidth=.9,alpha=.9)
-        bottom=min(o,c); height=abs(c-o) or max((h-l)*.01,h*.0005,1e-12)
-        ax.add_patch(plt.Rectangle((i-.31,bottom),.62,height,facecolor=col,edgecolor=col,linewidth=0))
-    tick_count=min(6,len(ohlcv)); idx=[round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0]
-    idx=sorted(set(idx)); fmt="%H:%M" if timeframe_label in ("5m","1H","4H") else "%b %d"
-    ax.set_xticks(idx); ax.set_xticklabels([times[i].strftime(fmt) for i in idx],color=muted,fontsize=7)
-    ax.tick_params(axis="y",colors=muted,labelsize=7,length=0); ax.tick_params(axis="x",length=0); ax.yaxis.tick_right()
-    ax.grid(True,color=grid,linewidth=.55,alpha=.8)
-    for sp in ax.spines.values(): sp.set_color(grid)
-    ax.text(.01,.97,f"{timeframe_label} PRICE ACTION",transform=ax.transAxes,color=blue2,fontsize=8,fontweight="bold",va="top")
+    fig.subplots_adjust(left=0.02, right=0.93, top=0.96, bottom=0.06)
 
-    # Intelligence footer — information that used to clutter the Telegram caption.
-    axf = fig.add_axes([0.06, 0.065, 0.88, 0.225]); axf.axis("off")
-    h1=dex.get("price_change_1h")
-    try: h1col=green if float(h1)>=0 else red
-    except Exception: h1col=text
-    axf.text(.00,.88,"MARKET PULSE",color=blue,fontsize=9,fontweight="bold")
-    axf.text(.00,.65,"BUY PRESSURE",color=muted,fontsize=7.5,fontweight="bold")
-    axf.text(.00,.48,f"{buy_pct:.0f}%",color=green if buy_pct>=50 else red,fontsize=18,fontweight="bold")
-    axf.text(.25,.65,"1H MOVE",color=muted,fontsize=7.5,fontweight="bold")
-    axf.text(.25,.48,_fmt_pct(h1),color=h1col,fontsize=18,fontweight="bold")
-    axf.text(.50,.65,"TOP 10",color=muted,fontsize=7.5,fontweight="bold")
-    axf.text(.50,.48,f"{top10:.2f}%" if top10 is not None else "N/A",color=text,fontsize=18,fontweight="bold")
-    axf.text(.75,.65,"TXNS 24H",color=muted,fontsize=7.5,fontweight="bold")
-    axf.text(.75,.48,f"{total:,}" if total else "N/A",color=text,fontsize=18,fontweight="bold")
-
-    first=get_first_scan_resolved(report)
-    if first:
-        first_mc=str(first.get("scan_market_cap") or "N/A")
-        current=_fmt_usd(dex.get("market_cap"))
-        # Reuse compact parser locally for performance.
-        def _pv(v):
-            t=str(v).replace("$","").replace(",","").strip().upper(); m=1
-            if t.endswith("K"): m,t=1000,t[:-1]
-            elif t.endswith("M"): m,t=1000000,t[:-1]
-            try:return float(t)*m
-            except:return None
-        perf=_pct_change(_as_float(dex.get("market_cap")),_pv(first_mc))
-        caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL)
-        axf.text(.00,.17,"FIRST CALL",color=muted,fontsize=7.5,fontweight="bold")
-        axf.text(.00,.01,f"{caller}   {first_mc}  →  {current}   {_fmt_pct(perf) if perf is not None else 'N/A'}",
-                 color=text,fontsize=10,fontweight="bold")
-    else:
-        axf.text(.00,.08,"GRX is collecting first-call intelligence for this token.",color=muted,fontsize=9)
-
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor=bg)
+    plt.close(fig)
+    return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
@@ -1339,6 +1346,27 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in dex_pairs)
         best = dex_pairs[0]
         dex_info = best.get("info") or {}
+
+        # DexScreener does not always attach socials/websites to the highest-liquidity
+        # pair. Merge metadata from every TON pair so X/Telegram/website links are
+        # much less likely to disappear from the scan.
+        merged_websites = []
+        merged_socials = []
+        seen_websites = set()
+        seen_socials = set()
+        for pair in dex_pairs:
+            pair_info = pair.get("info") or {}
+            for website in pair_info.get("websites") or []:
+                marker = repr(website)
+                if marker not in seen_websites:
+                    merged_websites.append(website)
+                    seen_websites.add(marker)
+            for social in pair_info.get("socials") or []:
+                marker = repr(social)
+                if marker not in seen_socials:
+                    merged_socials.append(social)
+                    seen_socials.add(marker)
+
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
@@ -1357,11 +1385,8 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
             "total_liquidity_usd": total_liq,
-            "websites": dex_info.get("websites") or [],
-            "socials": dex_info.get("socials") or [],
-            "image_url": dex_info.get("imageUrl") or dex_info.get("image_url"),
-            "header_image": dex_info.get("header"),
-            "open_graph": dex_info.get("openGraph"),
+            "websites": merged_websites,
+            "socials": merged_socials,
         }
     else:
         report["errors"].append(
