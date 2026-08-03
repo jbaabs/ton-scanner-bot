@@ -565,7 +565,7 @@ def format_grx_stats(report: dict) -> str:
         "",
         "<i>GRX Stats improve as GRX collects more snapshots of the token.</i>",
     ]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
@@ -974,6 +974,10 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         va="center", ha="left", transform=ax_head.transAxes,
     )
     ax_head.text(
+        0.72, 0.90, "GRX SCAN", color="#4db8ff", fontsize=7.5, fontweight="bold",
+        va="center", ha="center", transform=ax_head.transAxes, alpha=0.9,
+    )
+    ax_head.text(
         0.99, 0.5, _fmt_pct(h24), color=headline_color, fontsize=15, fontweight="bold",
         va="center", ha="right", transform=ax_head.transAxes,
         bbox=dict(
@@ -1074,6 +1078,14 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
                 txt.set_position((max(x, 0.13), y))
     except Exception:
         logger.debug("Could not render one of the GRX card image overlays", exc_info=True)
+
+    # Thin GRX-blue frame ties the header/chart into one branded card.
+    try:
+        from matplotlib.patches import Rectangle as _FrameRect
+        fig.add_artist(_FrameRect((0.006, 0.008), 0.988, 0.984, transform=fig.transFigure,
+                                  fill=False, edgecolor="#249dff", linewidth=1.4, alpha=0.65))
+    except Exception:
+        pass
 
     fig.subplots_adjust(left=0.02, right=0.93, top=0.96, bottom=0.06)
 
@@ -1334,6 +1346,27 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in dex_pairs)
         best = dex_pairs[0]
         dex_info = best.get("info") or {}
+
+        # DexScreener does not always attach socials/websites to the highest-liquidity
+        # pair. Merge metadata from every TON pair so X/Telegram/website links are
+        # much less likely to disappear from the scan.
+        merged_websites = []
+        merged_socials = []
+        seen_websites = set()
+        seen_socials = set()
+        for pair in dex_pairs:
+            pair_info = pair.get("info") or {}
+            for website in pair_info.get("websites") or []:
+                marker = repr(website)
+                if marker not in seen_websites:
+                    merged_websites.append(website)
+                    seen_websites.add(marker)
+            for social in pair_info.get("socials") or []:
+                marker = repr(social)
+                if marker not in seen_socials:
+                    merged_socials.append(social)
+                    seen_socials.add(marker)
+
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
@@ -1352,8 +1385,8 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
             "total_liquidity_usd": total_liq,
-            "websites": dex_info.get("websites") or [],
-            "socials": dex_info.get("socials") or [],
+            "websites": merged_websites,
+            "socials": merged_socials,
         }
     else:
         report["errors"].append(
