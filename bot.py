@@ -145,6 +145,16 @@ IMAGE_CACHE: dict[str, tuple[float, bytes]] = {}
 IMAGE_CACHE_TTL = 60 * 60
 CHART_POOL_CACHE: dict[str, tuple[float, str]] = {}
 CHART_POOL_CACHE_TTL = 5 * 60
+REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
+FAST_MARKET_CACHE: dict[str, tuple[float, list]] = {}
+FAST_MARKET_CACHE_TTL = 2.0
+
+def _refresh_lock(key: str) -> asyncio.Lock:
+    lock = REFRESH_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        REFRESH_LOCKS[key] = lock
+    return lock
 
 def _ttl_get(cache: dict, key, ttl: float):
     item = cache.get(key)
@@ -1832,6 +1842,56 @@ def _flatten_source_hint(value) -> list[str]:
     return [str(value or "")]
 
 
+
+async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) -> dict:
+    """Refresh volatile market fields while preserving slower metadata/holder data."""
+    address = str(old_report.get("address") or "").strip()
+    if not address:
+        return old_report
+
+    # Explicit refresh gets near-live DexScreener data; tiny cache only coalesces duplicate taps.
+    cached = _ttl_get(FAST_MARKET_CACHE, address, FAST_MARKET_CACHE_TTL)
+    if cached is None:
+        pairs = await get_dex_data(session, address)
+        if not pairs:
+            info = old_report.get("jetton_info") or {}
+            alt = str(info.get("address") or "").strip()
+            pairs = await get_dex_data(session, alt) if alt else None
+        if pairs:
+            _ttl_put(FAST_MARKET_CACHE, address, pairs)
+    else:
+        pairs = cached
+
+    if not pairs:
+        return old_report
+
+    fresh = dict(old_report)
+    old_dex = dict(old_report.get("dex_data") or {})
+    best = pairs[0]
+    total_vol = sum((p.get("volume") or {}).get("h24", 0) for p in pairs)
+    total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in pairs)
+    txns = best.get("txns") or {}
+    h24tx = txns.get("h24") or {}
+
+    old_dex.update({
+        "price_usd": best.get("priceUsd"),
+        "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+        "total_liquidity_usd": total_liq,
+        "volume_24h": total_vol,
+        "market_cap": best.get("marketCap") or best.get("fdv"),
+        "fdv": best.get("fdv"),
+        "price_change_1h": (best.get("priceChange") or {}).get("h1"),
+        "price_change_6h": (best.get("priceChange") or {}).get("h6"),
+        "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+        "txns_24h": {"buys": h24tx.get("buys", 0), "sells": h24tx.get("sells", 0)},
+        "pair_address": best.get("pairAddress") or old_dex.get("pair_address"),
+        "pair_created_at": best.get("pairCreatedAt") or old_dex.get("pair_created_at"),
+        "dex_id": best.get("dexId") or old_dex.get("dex_id"),
+    })
+    fresh["dex_data"] = old_dex
+    fresh["found"] = True
+    return fresh
+
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     jetton_info = await get_jetton_info(session, address)
     dex_pairs = await get_dex_data(session, address)
@@ -2836,61 +2896,77 @@ async def handle_toggle(callback: CallbackQuery):
             await callback.answer("No token address found to refresh.", show_alert=True)
             return
 
-        await callback.answer("Refreshing price...")
+        lock = _refresh_lock(key)
+        if lock.locked():
+            await callback.answer("Already refreshing…")
+            return
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                fresh_report = await scan_token(session, address)
+        await callback.answer("Refreshing…")
 
-            if not fresh_report.get("found"):
-                await callback.answer("Couldn't refresh token data right now.", show_alert=True)
+        async with lock:
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=8),
+                    connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300),
+                ) as session:
+                    # Fast path updates only volatile market data.
+                    fresh_report = await fast_refresh_report(session, entry["report"])
+
+                    if not fresh_report.get("found"):
+                        await callback.answer("Couldn't refresh token data right now.", show_alert=True)
+                        return
+
+                    # Preserve scanner identity/history and slow-changing holder/ATH metadata.
+                    scanner_meta = entry.get("scanner_meta") or _build_scanner_meta_from_user(
+                        callback.from_user, fresh_report
+                    )
+                    entry["report"] = fresh_report
+                    entry["scanner_meta"] = scanner_meta
+                    entry["has_image"] = bool(_safe_image_url(fresh_report))
+                    entry["ts"] = time.time()
+
+                    text_out = (
+                        format_grx_stats(fresh_report)
+                        if entry.get("show_stats")
+                        else format_token_report(
+                            fresh_report,
+                            show_info=False,
+                            show_holders=entry["show_holders"],
+                            scan_history=entry.get("scan_history") or [],
+                        )
+                    )
+                    keyboard = build_report_keyboard(
+                        key,
+                        False,
+                        entry["show_holders"],
+                        has_chart=bool((fresh_report.get("dex_data") or {}).get("pair_address")),
+                        show_stats=entry.get("show_stats", False),
+                    )
+
+                    # Force only the live 1m dashboard candles fresh; other timeframes remain cached.
+                    dex_now = fresh_report.get("dex_data") or {}
+                    live_pool = dex_now.get("chart_pair_address") or dex_now.get("pair_address")
+                    if live_pool:
+                        for ck in list(OHLCV_CACHE):
+                            if live_pool in ck and "1m" in ck:
+                                OHLCV_CACHE.pop(ck, None)
+
+                    chart_photo = await build_scan_photo(session, fresh_report, bot=callback.bot)
+
+                if chart_photo:
+                    try:
+                        media = InputMediaPhoto(media=chart_photo, caption=text_out)
+                        await callback.message.edit_media(media=media, reply_markup=keyboard)
+                        return
+                    except Exception:
+                        logger.exception("Error updating fast refresh card, falling back")
+
+                await _render_report_message(callback.message, key)
                 return
-
-            scanner_meta = _build_scanner_meta_from_user(callback.from_user, fresh_report)
-            save_scan_history(fresh_report, scanner_meta)
-            save_token_snapshot(fresh_report)
-
-            entry["report"] = fresh_report
-            entry["scanner_meta"] = scanner_meta
-            entry["has_image"] = bool(_safe_image_url(fresh_report))
-            entry["scan_history"] = get_scan_history(fresh_report)
-            entry["ts"] = time.time()
-
-            text = (
-                format_grx_stats(fresh_report)
-                if entry.get("show_stats")
-                else format_token_report(
-                    fresh_report,
-                    show_info=False,
-                    show_holders=entry["show_holders"],
-                    scan_history=entry["scan_history"],
-                )
-            )
-            keyboard = build_report_keyboard(
-                key,
-                False,
-                entry["show_holders"],
-                has_chart=bool((fresh_report.get("dex_data") or {}).get("pair_address")),
-                show_stats=entry.get("show_stats", False),
-            )
-
-            async with aiohttp.ClientSession() as session:
-                chart_photo = await build_scan_photo(session, fresh_report, bot=callback.bot)
-
-            if chart_photo:
-                try:
-                    media = InputMediaPhoto(media=chart_photo, caption=text)
-                    await callback.message.edit_media(media=media, reply_markup=keyboard)
-                    return
-                except Exception:
-                    logger.exception("Error updating chart card on refresh, falling back")
-
-            await _render_report_message(callback.message, key)
-            return
-        except Exception:
-            logger.exception("Error refreshing token report")
-            await callback.answer("Refresh failed. Try again in a moment.", show_alert=True)
-            return
+            except Exception:
+                logger.exception("Error in fast token refresh")
+                await callback.answer("Refresh failed. Try again in a moment.", show_alert=True)
+                return
 
     if section == "alert":
         symbol=str((entry["report"].get("jetton_info") or {}).get("symbol") or "Token")
