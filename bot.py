@@ -26,7 +26,6 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,
-    CopyTextButton,
     BufferedInputFile,
     InputMediaPhoto,
     ReplyParameters,
@@ -67,7 +66,7 @@ CUSTOM_EMOJI = {
     "dtrade": "5188545889156769764",
     "gbot": "5393374541655352818",
     "dedust": "5391224493911876583",
-    "stonfi": "5388852301869916327",
+    "stonfi": "6255601767631822279",
     "percent": "5366387582802369247",
     "social": "5366198685845729399",
     "wallet": "5363914626532677595",
@@ -2369,20 +2368,6 @@ def build_report_keyboard(
 ):
     builder = InlineKeyboardBuilder()
 
-    # Token name button — tapping it copies the contract address to clipboard.
-    entry = REPORT_CACHE.get(key) or {}
-    report = entry.get("report") or {}
-    token_ca = str(report.get("address") or "").strip()
-    token_info = report.get("jetton_info") or {}
-    token_symbol = str(token_info.get("symbol") or "Token").strip()
-    if token_ca:
-        builder.row(
-            InlineKeyboardButton(
-                text=token_symbol,
-                copy_text=CopyTextButton(text=token_ca),
-            )
-        )
-
     # Primary action — full-width GRX Stats row.
     builder.row(
         InlineKeyboardButton(
@@ -2409,6 +2394,10 @@ def build_report_keyboard(
     )
 
     # Open each trading bot directly on the token currently being scanned.
+    entry = REPORT_CACHE.get(key) or {}
+    report = entry.get("report") or {}
+    token_ca = str(report.get("address") or "").strip()
+
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
     gbot_url = GBOT_URL
