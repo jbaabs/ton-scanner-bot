@@ -556,6 +556,12 @@ def format_grx_stats(report: dict) -> str:
         f"<i>{name}</i>",
         "",
         f"📊 5m Volume: <b>{_fmt_signal_change(vol_change)}</b>",
+        *(
+            [f"🚀 Since available history: <b>{_fmt_pct((dex.get('gecko_price_changes') or {}).get('price_change_available'))}</b>"]
+            if (dex.get("gecko_price_changes") or {}).get("price_change_available") is not None
+            and ((dex.get("gecko_price_changes") or {}).get("available_history_hours") or 999) < 24
+            else []
+        ),
         f"{_ce('holders', '👥')} Holders 10m: <b>{('+' if holder_delta is not None and holder_delta >= 0 else '') + str(holder_delta) if holder_delta is not None else 'Collecting data'}</b>",
         f"🐋 Top 10 10m: <b>{(f'{top_delta:+.2f} pts' if top_delta is not None else 'Collecting data')}</b>",
         f"{_ce('buy', '🟢')} Buy Pressure 5m: <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'N/A')}</b>",
@@ -850,6 +856,80 @@ async def get_ohlcv(
     except (aiohttp.ClientError, TimeoutError):
         return None
 
+
+
+async def get_gecko_price_changes(
+    session: aiohttp.ClientSession, pool_address: str
+) -> dict:
+    """Calculate 1H/6H/24H changes independently from GeckoTerminal hourly OHLCV.
+
+    This deliberately does not trust DexScreener's priceChange fields. For a pool
+    younger than the requested window, the period is left unavailable rather than
+    presenting a partial move as a full 24H move.
+    """
+    url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/hour"
+    params = {"aggregate": 1, "limit": 30, "currency": "usd"}
+    try:
+        async with session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
+            if resp.status != 200:
+                return {}
+            data = await resp.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return {}
+
+    candles = (data.get("data") or {}).get("attributes", {}).get("ohlcv_list") or []
+    if not candles:
+        return {}
+
+    candles = sorted(candles, key=lambda c: int(c[0]))
+    try:
+        latest_ts = int(candles[-1][0])
+        current = float(candles[-1][4])
+    except (TypeError, ValueError, IndexError):
+        return {}
+    if current <= 0:
+        return {}
+
+    def change_for(hours: int):
+        target = latest_ts - hours * 3600
+        # Require actual history reaching the requested window. This prevents a
+        # 2-hour-old pool from being labelled as a complete 24H move.
+        if int(candles[0][0]) > target:
+            return None
+        eligible = [c for c in candles if int(c[0]) <= target]
+        if not eligible:
+            return None
+        try:
+            old = float(eligible[-1][4])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if old <= 0:
+            return None
+        return ((current / old) - 1.0) * 100.0
+
+    result = {
+        "price_change_1h": change_for(1),
+        "price_change_6h": change_for(6),
+        "price_change_24h": change_for(24),
+        "price_change_source": "geckoterminal_ohlcv",
+    }
+
+    # Also expose the move across all available hourly history. Useful to GRX
+    # Stats for young pools without falsely calling it a full 24H move.
+    try:
+        first_close = float(candles[0][4])
+        if first_close > 0:
+            result["price_change_available"] = ((current / first_close) - 1.0) * 100.0
+            result["available_history_hours"] = max(
+                0.0, (latest_ts - int(candles[0][0])) / 3600.0
+            )
+    except (TypeError, ValueError, IndexError):
+        pass
+    return result
 
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
     import matplotlib
@@ -1367,6 +1447,28 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         report["errors"].append(
             "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
         )
+
+    # Cross-check headline percentage changes against independent GeckoTerminal
+    # OHLCV. Keep DexScreener as fallback only when Gecko lacks a complete window.
+    if report.get("dex_data"):
+        pool_address = (report["dex_data"] or {}).get("pair_address")
+        if pool_address:
+            try:
+                gecko_changes = await get_gecko_price_changes(session, pool_address)
+                report["dex_data"]["gecko_price_changes"] = gecko_changes
+                for field in ("price_change_1h", "price_change_6h", "price_change_24h"):
+                    value = gecko_changes.get(field)
+                    if value is not None:
+                        report["dex_data"][field] = value
+                report["dex_data"]["price_change_source"] = (
+                    gecko_changes.get("price_change_source")
+                    if any(gecko_changes.get(k) is not None for k in (
+                        "price_change_1h", "price_change_6h", "price_change_24h"
+                    ))
+                    else "dexscreener_fallback"
+                )
+            except Exception:
+                logger.exception("Error calculating GeckoTerminal price changes")
 
     try:
         symbol = (report.get("jetton_info") or {}).get("symbol")
