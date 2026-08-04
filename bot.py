@@ -1335,11 +1335,13 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         from PIL import Image
         _raw_wm = grx_watermark_bytes or base64.b64decode(GRX_WATERMARK_B64)
         _wm = Image.open(BytesIO(_raw_wm)).convert("RGBA")
+        # Wide GRAMX6900 wordmark: centred, subtle and not stretched.
+        # The sticker's transparent canvas lets the black/white logo sit naturally behind price action.
         ax.imshow(
             _wm,
-            extent=(0.27, 0.73, 0.18, 0.82),
+            extent=(0.23, 0.77, 0.30, 0.70),
             transform=ax.transAxes,
-            alpha=0.10 if grx_watermark_bytes else 0.055,
+            alpha=0.085 if grx_watermark_bytes else 0.045,
             aspect="auto",
             interpolation="lanczos",
             zorder=0,
@@ -1431,11 +1433,13 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         from PIL import Image
         _raw_wm = grx_watermark_bytes or base64.b64decode(GRX_WATERMARK_B64)
         _wm = Image.open(BytesIO(_raw_wm)).convert("RGBA")
+        # Wide GRAMX6900 wordmark: centred, subtle and not stretched.
+        # The sticker's transparent canvas lets the black/white logo sit naturally behind price action.
         ax.imshow(
             _wm,
-            extent=(0.27, 0.73, 0.18, 0.82),
+            extent=(0.23, 0.77, 0.30, 0.70),
             transform=ax.transAxes,
-            alpha=0.10 if grx_watermark_bytes else 0.055,
+            alpha=0.085 if grx_watermark_bytes else 0.045,
             aspect="auto",
             interpolation="lanczos",
             zorder=0,
