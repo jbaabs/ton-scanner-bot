@@ -936,6 +936,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     txns_total = buys + sells
     buy_pressure = (buys / txns_total * 100.0) if txns_total else 0.0
     h1 = dex.get("price_change_1h")
+    h6 = dex.get("price_change_6h")
     h24 = dex.get("price_change_24h")
     top10 = holders.get("top_concentration")
 
@@ -1022,17 +1023,21 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     fig.text(.055,.704,f'{timeframe_label} PRICE ACTION',color=blue,fontsize=8,fontweight='bold')
 
     # Bottom panels: Market Pulse + First Called By
-    rounded_panel(.025,.055,.64,.24)
-    rounded_panel(.68,.055,.295,.24)
-    fig.text(.05,.265,'MARKET PULSE',color=blue,fontsize=9,fontweight='bold')
-    pulse=[('BUY PRESSURE',f'{buy_pressure:.0f}%',green),('1H MOVE',_fmt_pct(h1),h1_color),
-           ('TOP 10',f'{top10:.2f}%' if top10 is not None else 'N/A',text),('TXNS 24H',f'{txns_total:,}',text)]
-    for i,(lab,val,col) in enumerate(pulse):
-        x=.105+i*.145
-        fig.text(x,.205,lab,color=muted,fontsize=6.8,fontweight='bold',ha='center')
-        fig.text(x,.16,val,color=col,fontsize=13,fontweight='bold',ha='center')
+    # V5 layout preserved; only these two panels are restyled.
+    rounded_panel(.025,.055,.49,.24)
+    rounded_panel(.53,.055,.445,.24)
 
-    fig.text(.827,.265,'FIRST CALLED BY',color=blue,fontsize=9,fontweight='bold',ha='center')
+    # Market Pulse — vertical 1H / 6H / 24H layout
+    fig.text(.05,.265,'MARKET PULSE',color=blue,fontsize=9,fontweight='bold',ha='left')
+    pulse_rows=[('1H',h1),('6H',h6),('24H',h24)]
+    pulse_y=[.215,.165,.115]
+    for (lab,val), y in zip(pulse_rows,pulse_y):
+        col = green if (val is not None and val >= 0) else red if val is not None else muted
+        fig.text(.055,y,lab,color=muted,fontsize=10.5,ha='left',va='center')
+        fig.text(.49,y,_fmt_pct(val),color=col,fontsize=11.5,ha='right',va='center')
+
+    # First Called By — caller on top, then MCAP THEN / MCAP NOW / PERFORMANCE
+    fig.text(.555,.265,'FIRST CALLED BY',color=blue,fontsize=9,fontweight='bold',ha='left')
     first=get_first_scan_resolved(report)
     if first:
         caller=str(first.get('scanner_name') or DEFAULT_SCANNER_LABEL)
@@ -1047,13 +1052,19 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         perf=_pct_change(now_val,then_val) if then_val else None
         perf_txt=_fmt_pct(perf) if perf is not None else 'N/A'
         perf_col=green if (perf is not None and perf>=0) else red
-        fig.text(.827,.222,caller,color=text,fontsize=9.5,fontweight='bold',ha='center')
-        fig.text(.755,.175,'MCAP THEN',color=muted,fontsize=6.5,ha='center'); fig.text(.9,.175,'NOW',color=muted,fontsize=6.5,ha='center')
-        fig.text(.755,.137,then_txt,color=text,fontsize=9,fontweight='bold',ha='center')
-        fig.text(.9,.137,_fmt_usd(now_val),color=text,fontsize=9,fontweight='bold',ha='center')
-        fig.text(.9,.095,perf_txt,color=perf_col,fontsize=10,fontweight='bold',ha='center')
+        fig.text(.555,.222,'☎',color=muted,fontsize=10,ha='left',va='center')
+        fig.text(.585,.222,caller,color=blue,fontsize=10.5,ha='left',va='center')
+        caller_rows=[
+            ('MCAP THEN',then_txt,text),
+            ('MCAP NOW',_fmt_usd(now_val),text),
+            ('PERFORMANCE',perf_txt,perf_col),
+        ]
+        caller_y=[.175,.135,.095]
+        for (lab,val,col), y in zip(caller_rows,caller_y):
+            fig.text(.555,y,lab,color=muted,fontsize=7.5,ha='left',va='center')
+            fig.text(.95,y,val,color=col,fontsize=10,ha='right',va='center')
     else:
-        fig.text(.827,.17,'First scan',color=muted,fontsize=10,ha='center')
+        fig.text(.555,.18,'First scan',color=muted,fontsize=10,ha='left')
 
     buf=BytesIO(); fig.savefig(buf,format='png',facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
