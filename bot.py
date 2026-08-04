@@ -919,180 +919,149 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
 
 
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None) -> bytes:
-    """Composite scan card: header stats bar + candlestick chart in one PNG."""
+    """Render the complete GRX scan dashboard as a single branded image."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
+    from matplotlib.patches import FancyBboxPatch
     from datetime import datetime, timezone
     from io import BytesIO
 
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
-
+    holders = report.get("holders") or {}
     symbol = str(info.get("symbol") or "???")
     name = str(info.get("name") or "Unknown")
     age = _fmt_age(dex.get("pair_created_at"))
 
     txns = dex.get("txns_24h") or {}
-    txns_total = (txns.get("buys") or 0) + (txns.get("sells") or 0)
-
+    buys = int(txns.get("buys") or 0)
+    sells = int(txns.get("sells") or 0)
+    txns_total = buys + sells
+    buy_pressure = (buys / txns_total * 100.0) if txns_total else 0.0
     h1 = dex.get("price_change_1h")
-    h6 = dex.get("price_change_6h")
     h24 = dex.get("price_change_24h")
+    top10 = holders.get("top_concentration")
 
-    try:
-        headline_positive = float(h24) >= 0
-    except (TypeError, ValueError):
-        headline_positive = True
+    bg = "#070b12"
+    panel = "#0c1627"
+    panel2 = "#0a1321"
+    blue = "#249dff"
+    text = "#f3f6fb"
+    muted = "#8795aa"
+    green = "#20d7ad"
+    red = "#ff5d6c"
 
-    bg = "#0e0e12"
-    green = "#26a69a"
-    red = "#ef5350"
-    headline_color = "#4db8ff" if headline_positive else red
+    def fnum(v):
+        try: return float(v)
+        except (TypeError, ValueError): return None
+
+    h24n = fnum(h24)
+    h1n = fnum(h1)
+    change_color = green if (h24n is not None and h24n >= 0) else red
+    h1_color = green if (h1n is not None and h1n >= 0) else red
 
     times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
-    opens = [c[1] for c in ohlcv]
-    highs = [c[2] for c in ohlcv]
-    lows = [c[3] for c in ohlcv]
-    closes = [c[4] for c in ohlcv]
+    opens = [c[1] for c in ohlcv]; highs = [c[2] for c in ohlcv]
+    lows = [c[3] for c in ohlcv]; closes = [c[4] for c in ohlcv]
 
-    fig = plt.figure(figsize=(8, 5.6), dpi=150)
-    fig.patch.set_facecolor(bg)
-    gs = gridspec.GridSpec(3, 1, height_ratios=[0.65, 0.55, 3.3], hspace=0.12)
+    fig = plt.figure(figsize=(8, 8.25), dpi=150, facecolor=bg)
 
-    # --- Header row: symbol / name / age + 24h change badge ---
-    ax_head = fig.add_subplot(gs[0])
-    ax_head.set_facecolor(bg)
-    ax_head.axis("off")
-    ax_head.text(
-        0.01, 0.62, symbol, color="#e8e8ec", fontsize=19, fontweight="bold",
-        va="center", ha="left", transform=ax_head.transAxes,
-    )
-    ax_head.text(
-        0.01, 0.12, f"{name}  ·  {age}", color="#9a9aa5", fontsize=10,
-        va="center", ha="left", transform=ax_head.transAxes,
-    )
-    ax_head.text(
-        0.72, 0.90, "GRX SCAN", color="#4db8ff", fontsize=7.5, fontweight="bold",
-        va="center", ha="center", transform=ax_head.transAxes, alpha=0.9,
-    )
-    ax_head.text(
-        0.99, 0.5, _fmt_pct(h24), color=headline_color, fontsize=15, fontweight="bold",
-        va="center", ha="right", transform=ax_head.transAxes,
-        bbox=dict(
-            boxstyle="round,pad=0.45",
-            facecolor="#102b46" if headline_positive else "#301416",
-            edgecolor="none",
-        ),
-    )
+    def rounded_panel(x, y, w, h, radius=0.018):
+        patch = FancyBboxPatch((x,y), w,h, transform=fig.transFigure,
+            boxstyle=f"round,pad=0.004,rounding_size={radius}",
+            facecolor=panel, edgecolor=blue, linewidth=0.75, alpha=0.98, zorder=-5)
+        fig.add_artist(patch)
 
-    # --- Stats row: MCAP / LIQ / VOL / TXNS / 1H / 6H ---
-    ax_stats = fig.add_subplot(gs[1])
-    ax_stats.set_facecolor(bg)
-    ax_stats.axis("off")
+    # Header
+    rounded_panel(.025,.855,.95,.12)
+    icon_left = .045
+    title_left = .155 if token_icon_bytes else .055
+    fig.text(title_left,.935,symbol,color=text,fontsize=19,fontweight='bold',ha='left',va='center')
+    fig.text(title_left,.895,f"{name}  •  {age}",color=muted,fontsize=9.5,ha='left',va='center')
+    fig.text(.785,.932,_fmt_pct(h24),color=change_color,fontsize=14,fontweight='bold',ha='center',va='center',
+             bbox=dict(boxstyle='round,pad=.38',facecolor='#151c2a',edgecolor='#27364c',linewidth=.7))
+    fig.text(.785,.892,'24H',color=muted,fontsize=8,ha='center',va='center')
 
-    stats = [
-        ("MCAP", _fmt_usd(dex.get("market_cap")), None),
-        ("LIQ", _fmt_usd(dex.get("liquidity_usd")), None),
-        ("VOL", _fmt_usd(dex.get("volume_24h")), None),
-        ("TXNS", f"{txns_total:,}" if txns_total else "N/A", None),
-        ("1H", _fmt_pct(h1), h1),
-        ("6H", _fmt_pct(h6), h6),
-    ]
-    n = len(stats)
-    for i, (label, value, change_val) in enumerate(stats):
-        x = (i + 0.5) / n
-        ax_stats.text(
-            x, 0.78, label, color="#7a7a85", fontsize=8.5,
-            ha="center", va="center", transform=ax_stats.transAxes,
-        )
-        value_color = "#e8e8ec"
-        if change_val is not None:
-            try:
-                value_color = green if float(change_val) >= 0 else red
-            except (TypeError, ValueError):
-                pass
-        ax_stats.text(
-            x, 0.22, value, color=value_color, fontsize=10.5, fontweight="bold",
-            ha="center", va="center", transform=ax_stats.transAxes,
-        )
-
-    # --- Candlestick chart row (reuses the same look as build_candlestick_chart) ---
-    ax = fig.add_subplot(gs[2])
-    ax.set_facecolor(bg)
-
-    for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
-        color = green if c >= o else red
-        ax.plot([i, i], [l, h], color=color, linewidth=1)
-        bottom = min(o, c)
-        height = abs(c - o) or max((h - l) * 0.01, h * 0.0005, 1e-12)
-        ax.add_patch(
-            plt.Rectangle(
-                (i - 0.3, bottom),
-                0.6,
-                height,
-                facecolor=color,
-                edgecolor=color,
-                linewidth=0,
-            )
-        )
-
-    tick_count = min(6, len(ohlcv))
-    tick_idx = (
-        [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)]
-        if tick_count > 1
-        else [0]
-    )
-    tick_idx = sorted(set(tick_idx))
-    fmt = "%H:%M" if timeframe_label in ("5m", "1H", "4H") else "%b %d"
-
-    ax.set_xticks(tick_idx)
-    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx], color="#e8e8ec", fontsize=8)
-    ax.tick_params(axis="y", colors="#e8e8ec", labelsize=8)
-    ax.yaxis.tick_right()
-    ax.grid(True, color="#2a2a33", linewidth=0.5)
-
-    for spine in ax.spines.values():
-        spine.set_color("#2a2a33")
-
-    # --- GRX branding overlays ---
+    # Logos/icons
     try:
         from PIL import Image
         from io import BytesIO as _BytesIO
         import numpy as np
-
-        logo_img = Image.open(_BytesIO(base64.b64decode(GRX_LOGO_B64))).convert("RGBA")
-        logo_ax = fig.add_axes([0.855, 0.845, 0.105, 0.105], anchor="NE", zorder=10)
-        logo_ax.imshow(np.asarray(logo_img))
-        logo_ax.axis("off")
-
+        logo_img = Image.open(_BytesIO(base64.b64decode(GRX_LOGO_B64))).convert('RGBA')
+        la = fig.add_axes([.875,.875,.075,.075], zorder=10); la.imshow(np.asarray(logo_img)); la.axis('off')
         if token_icon_bytes:
-            token_img = Image.open(_BytesIO(token_icon_bytes)).convert("RGBA")
-            token_ax = fig.add_axes([0.012, 0.84, 0.105, 0.105], zorder=10)
-            token_ax.imshow(np.asarray(token_img))
-            token_ax.axis("off")
-            # Shift title right so it doesn't collide with the token icon.
-            for txt in ax_head.texts[:2]:
-                x, y = txt.get_position()
-                txt.set_position((max(x, 0.13), y))
+            ti = Image.open(_BytesIO(token_icon_bytes)).convert('RGBA')
+            # contain rather than stretch/crop
+            ti.thumbnail((220,220), Image.Resampling.LANCZOS)
+            canvas = Image.new('RGBA',(240,240),(8,18,34,255))
+            canvas.alpha_composite(ti,((240-ti.width)//2,(240-ti.height)//2))
+            ia=fig.add_axes([icon_left,.875,.085,.085],zorder=10); ia.imshow(np.asarray(canvas)); ia.axis('off')
     except Exception:
-        logger.debug("Could not render one of the GRX card image overlays", exc_info=True)
+        logger.debug('GRX header image render failed', exc_info=True)
 
-    # Thin GRX-blue frame ties the header/chart into one branded card.
-    try:
-        from matplotlib.patches import Rectangle as _FrameRect
-        fig.add_artist(_FrameRect((0.006, 0.008), 0.988, 0.984, transform=fig.transFigure,
-                                  fill=False, edgecolor="#249dff", linewidth=1.4, alpha=0.65))
-    except Exception:
-        pass
+    # KPI strip
+    rounded_panel(.025,.745,.95,.095)
+    kpis=[('PRICE',_fmt_price(dex.get('price_usd'))),('MCAP',_fmt_usd(dex.get('market_cap'))),
+          ('LIQUIDITY',_fmt_usd(dex.get('liquidity_usd'))),('VOLUME 24H',_fmt_usd(dex.get('volume_24h'))),
+          ('HOLDERS',_fmt_num(info.get('holders_count')))]
+    for i,(lab,val) in enumerate(kpis):
+        x=.12+i*.19
+        fig.text(x,.805,lab,color=muted,fontsize=7.5,fontweight='bold',ha='center')
+        fig.text(x,.77,val,color=text,fontsize=11,fontweight='bold',ha='center')
 
-    fig.subplots_adjust(left=0.02, right=0.93, top=0.96, bottom=0.06)
+    # Chart panel
+    rounded_panel(.025,.315,.95,.415)
+    ax=fig.add_axes([.055,.35,.87,.335],facecolor=panel2)
+    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
+        col=green if c>=o else red
+        ax.plot([i,i],[l,h],color=col,linewidth=.8)
+        bottom=min(o,c); height=abs(c-o) or max((h-l)*.01,h*.0005,1e-12)
+        ax.add_patch(plt.Rectangle((i-.3,bottom),.6,height,facecolor=col,edgecolor=col,linewidth=0))
+    tick_count=min(6,len(ohlcv))
+    idx=[round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0]
+    idx=sorted(set(idx)); fmt='%H:%M' if timeframe_label in ('5m','1H','4H') else '%b %d'
+    ax.set_xticks(idx); ax.set_xticklabels([times[i].strftime(fmt) for i in idx],color=muted,fontsize=7)
+    ax.tick_params(axis='y',colors=muted,labelsize=7); ax.yaxis.tick_right()
+    ax.grid(True,color='#17263a',linewidth=.5,alpha=.8)
+    for sp in ax.spines.values(): sp.set_color('#1c314a')
+    fig.text(.055,.704,f'{timeframe_label} PRICE ACTION',color=blue,fontsize=8,fontweight='bold')
 
-    buf = BytesIO()
-    fig.savefig(buf, format="png", facecolor=bg)
-    plt.close(fig)
-    return buf.getvalue()
+    # Bottom panels: Market Pulse + First Called By
+    rounded_panel(.025,.055,.64,.24)
+    rounded_panel(.68,.055,.295,.24)
+    fig.text(.05,.265,'MARKET PULSE',color=blue,fontsize=9,fontweight='bold')
+    pulse=[('BUY PRESSURE',f'{buy_pressure:.0f}%',green),('1H MOVE',_fmt_pct(h1),h1_color),
+           ('TOP 10',f'{top10:.2f}%' if top10 is not None else 'N/A',text),('TXNS 24H',f'{txns_total:,}',text)]
+    for i,(lab,val,col) in enumerate(pulse):
+        x=.105+i*.145
+        fig.text(x,.205,lab,color=muted,fontsize=6.8,fontweight='bold',ha='center')
+        fig.text(x,.16,val,color=col,fontsize=13,fontweight='bold',ha='center')
+
+    fig.text(.827,.265,'FIRST CALLED BY',color=blue,fontsize=9,fontweight='bold',ha='center')
+    first=get_first_scan_resolved(report)
+    if first:
+        caller=str(first.get('scanner_name') or DEFAULT_SCANNER_LABEL)
+        then_txt=str(first.get('scan_market_cap') or 'N/A')
+        def parse_usd(t):
+            t=str(t or '').replace('$','').replace(',','').strip().upper(); m=1
+            if t.endswith('K'): m,t=1000,t[:-1]
+            elif t.endswith('M'): m,t=1000000,t[:-1]
+            try:return float(t)*m
+            except:return None
+        then_val=parse_usd(then_txt); now_val=fnum(dex.get('market_cap'))
+        perf=_pct_change(now_val,then_val) if then_val else None
+        perf_txt=_fmt_pct(perf) if perf is not None else 'N/A'
+        perf_col=green if (perf is not None and perf>=0) else red
+        fig.text(.827,.222,caller,color=text,fontsize=9.5,fontweight='bold',ha='center')
+        fig.text(.755,.175,'MCAP THEN',color=muted,fontsize=6.5,ha='center'); fig.text(.9,.175,'NOW',color=muted,fontsize=6.5,ha='center')
+        fig.text(.755,.137,then_txt,color=text,fontsize=9,fontweight='bold',ha='center')
+        fig.text(.9,.137,_fmt_usd(now_val),color=text,fontsize=9,fontweight='bold',ha='center')
+        fig.text(.9,.095,perf_txt,color=perf_col,fontsize=10,fontweight='bold',ha='center')
+    else:
+        fig.text(.827,.17,'First scan',color=muted,fontsize=10,ha='center')
+
+    buf=BytesIO(); fig.savefig(buf,format='png',facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
@@ -1739,37 +1708,6 @@ def format_token_report(
     if link_parts:
         lines += ["", " • ".join(link_parts)]
 
-    first = get_first_scan_resolved(report)
-    if first:
-        scanner_name_raw = str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL)
-        scanner_name = html.escape(scanner_name_raw)
-        scanner_id = first.get("scanner_id")
-        if scanner_id:
-            scanner_name = f'<a href="tg://user?id={int(scanner_id)}">{scanner_name}</a>'
-
-        def parse_compact_usd(text):
-            t = str(text or "").replace("$", "").replace(",", "").strip().upper()
-            mult = 1
-            if t.endswith("K"):
-                mult, t = 1_000, t[:-1]
-            elif t.endswith("M"):
-                mult, t = 1_000_000, t[:-1]
-            try:
-                return float(t) * mult
-            except ValueError:
-                return None
-
-        first_mc_text = str(first.get("scan_market_cap") or "N/A")
-        first_mc_value = parse_compact_usd(first_mc_text)
-        current_mc = _as_float(dex.get("market_cap"))
-        performance = _pct_change(current_mc, first_mc_value)
-        performance_text = _fmt_pct(performance) if performance is not None else "N/A"
-
-        lines += [
-            "",
-            f"📞 First called by {scanner_name} • MC <b>{html.escape(first_mc_text)}</b> • now <b>{html.escape(_fmt_usd(current_mc))}</b> • <b>{html.escape(performance_text)}</b>",
-        ]
-
     lines += ["", "<i>GRX Scan · TON intelligence · Not financial advice</i>"]
     return "\n".join(lines)
 
@@ -2266,7 +2204,7 @@ async def handle_timeframe(callback: CallbackQuery):
 
 async def main():
     init_db()
-    logger.info("Starting TON Meme Token Scanner bot...")
+    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V3")
     await dp.start_polling(bot)
 
 
