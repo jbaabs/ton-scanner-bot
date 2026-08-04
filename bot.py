@@ -982,7 +982,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
     tick_count=min(6,len(ohlcv))
     tick_idx=([round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0])
     tick_idx=sorted(set(tick_idx))
-    fmt="%H:%M" if timeframe_label in ("5m","1H","4H") else "%b %d"
+    fmt="%H:%M" if timeframe_label in ("1m","5m","1H","4H") else "%b %d"
     ax.set_xticks(tick_idx)
     ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx],color=muted,fontsize=8)
     ax.tick_params(axis="y",colors=muted,labelsize=8)
@@ -1105,7 +1105,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ax.add_patch(plt.Rectangle((i-.3,bottom),.6,height,facecolor=col,edgecolor=col,linewidth=0))
     tick_count=min(6,len(ohlcv))
     idx=[round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0]
-    idx=sorted(set(idx)); fmt='%H:%M' if timeframe_label in ('5m','1H','4H') else '%b %d'
+    idx=sorted(set(idx)); fmt='%H:%M' if timeframe_label in ('1m','5m','1H','4H') else '%b %d'
     ax.set_xticks(idx); ax.set_xticklabels([times[i].strftime(fmt) for i in idx],color=muted,fontsize=7)
     ax.tick_params(axis='y',colors=muted,labelsize=7); ax.yaxis.tick_right()
     ax.grid(True,color='#17263a',linewidth=.5,alpha=.8)
@@ -1183,7 +1183,7 @@ async def build_scan_photo(
 
     # Main scanner card: always render 5-minute candles.
     # The separate Chart button keeps its own selectable 5m / 1H / 4H / 1D state.
-    main_scan_timeframe = "5m"
+    main_scan_timeframe = "1m"
     ohlcv = await get_ohlcv(session, pool_address, main_scan_timeframe)
     if not ohlcv:
         return None
