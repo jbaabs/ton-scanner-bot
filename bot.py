@@ -2007,12 +2007,30 @@ def _centred_token_title(symbol: str, name: str, suffix: str = "", width: int = 
 
 
 def _launchpad_name(report: dict) -> str:
+    """Detect launchpad from bonding data first, then token metadata/description."""
     launchpad = str((report.get("bonding_curve") or {}).get("launchpad") or "").lower()
-    return {
+    mapped = {
         "topblast": "TopBlast",
         "uranus": "Uranus / X1000",
+        "x1000": "X1000",
         "groypfi": "GroypFi",
-    }.get(launchpad, "N/A")
+    }.get(launchpad)
+    if mapped:
+        return mapped
+
+    info = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
+    haystack = " ".join(str(v or "") for v in (
+        info.get("description"), info.get("website"), info.get("telegram"), info.get("twitter"),
+        dex.get("description"), dex.get("dex_url"),
+    )).lower()
+    if "topblast" in haystack:
+        return "TopBlast"
+    if "x1000" in haystack or "uranus" in haystack:
+        return "Uranus / X1000"
+    if "groyp" in haystack:
+        return "GroypFi"
+    return "N/A"
 
 
 def _dex_name(report: dict) -> str:
@@ -2028,8 +2046,6 @@ def _creator_details(report: dict) -> tuple[str | None, float | None]:
     """Best-effort creator/admin wallet + current holding from loaded holder data."""
     info = report.get("jetton_info") or {}
     creator = str(info.get("admin_address") or "").strip() or None
-    # TonAPI can expose the zero/null admin address for immutable jettons.
-    # That is not a real creator wallet and should never be shown as the dev.
     if not creator or re.fullmatch(r"0:[0]+", creator):
         return None, None
     for holder in (report.get("holders") or {}).get("holders") or []:
@@ -2039,22 +2055,28 @@ def _creator_details(report: dict) -> tuple[str | None, float | None]:
 
 
 def _best_description(report: dict) -> str:
+    """Return a clean human description, stripping URLs/deployment boilerplate."""
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
     value = info.get("description") or dex.get("description")
     if not value:
-        return "No description is currently available from the connected token sources."
-    text = re.sub(r"\\s+", " ", str(value)).strip()
-    return text[:700] + ("…" if len(text) > 700 else "")
+        return "No description currently available."
+    text = str(value).replace("\\n", "\n")
+    # Remove raw links and common launchpad deployment boilerplate from About.
+    text = re.sub(r"https?://\\S+", "", text, flags=re.I)
+    text = re.sub(r"\\|?\\s*Deployed\\s+from\\s+(?:topblast\\.lol|x1000\\.finance|uranus\\S*)", "", text, flags=re.I)
+    text = re.sub(r"\\s+", " ", text).strip(" |-")
+    return (text[:500] + "…") if len(text) > 500 else text
 
 
 def format_token_info(report: dict) -> str:
-    """Compact in-message Info view. Socials intentionally stay on the main scan only."""
+    """Clean same-message Info view; socials stay on the main scan."""
     dex = report.get("dex_data") or {}
     address = str(report.get("address") or "").strip()
     creator, creator_holding = _creator_details(report)
     launchpad = _launchpad_name(report)
     dex_name = _dex_name(report)
+    description = _best_description(report)
 
     creator_line = "N/A"
     if creator:
@@ -2062,23 +2084,25 @@ def format_token_info(report: dict) -> str:
         creator_line = f'<a href="{html.escape(wallet_url, quote=True)}">{html.escape(_short_address(creator, 6, 6))}</a>'
 
     holding_text = f"{creator_holding:.2f}%" if creator_holding is not None else "N/A"
+    status = "Holding" if creator_holding is not None and creator_holding > 0 else "N/A"
 
     sources = []
     if address:
-        sources.append(f'<a href="https://www.geckoterminal.com/ton/tokens/{html.escape(address, quote=True)}">GT</a>')
+        a = html.escape(address, quote=True)
+        sources.append(f'<a href="https://www.geckoterminal.com/ton/tokens/{a}">GT</a>')
     ds_url = _normalize_url(dex.get("dex_url"))
     if ds_url:
         sources.append(f'<a href="{html.escape(ds_url, quote=True)}">DS</a>')
-    launch_key = str((report.get("bonding_curve") or {}).get("launchpad") or "").lower()
-    if address and launch_key == "topblast":
+    if address and launchpad == "TopBlast":
         sources.append(f'<a href="https://topblast.lol/token/{html.escape(address, quote=True)}">TopBlast</a>')
-    elif address and launch_key == "uranus":
+    elif address and ("X1000" in launchpad or "Uranus" in launchpad):
         sources.append(f'<a href="https://x1000.finance/tokens/{html.escape(address, quote=True)}">X1000</a>')
 
+    # IMPORTANT: use actual newline characters here. Never literal backslash-n text.
     lines = [
         "<b>ℹ️ Token Info</b>",
         "",
-        f"<b>Description:</b> {html.escape(_best_description(report))}",
+        f"<b>Description:</b> {html.escape(description)}",
         "",
         f"🏷 <b>Launchpad:</b> {html.escape(launchpad)}",
         f"💎 <b>DEX:</b> {html.escape(dex_name)}",
@@ -2088,13 +2112,13 @@ def format_token_info(report: dict) -> str:
         "<b>👤 Dev</b>",
         f"<b>Holding:</b> {html.escape(holding_text)}",
         "<b>Sold:</b> N/A",
-        "<b>Status:</b> " + ("Holding" if creator_holding and creator_holding > 0 else "N/A"),
+        f"<b>Status:</b> {html.escape(status)}",
         "",
         "<b>Description / About</b>",
-        html.escape(_best_description(report)),
+        html.escape(description),
     ]
     if sources:
-        lines += ["", "<b>Sources:</b> " + " · ".join(sources)]
+        lines.extend(["", "<b>Sources:</b> " + " · ".join(sources)])
     return "\n".join(lines)
 
 
