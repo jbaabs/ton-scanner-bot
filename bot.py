@@ -74,6 +74,11 @@ CUSTOM_EMOJI = {
     "holders": "5364342783232481866",
     "liquidity": "5363840130324927385",
     "age": "5366367898967253063",
+    "uranus": "6294313725209877707",
+    "gram": "6151926179138904505",
+    "coingecko": "6256011039360426071",
+    "groypfi": "6305307926659605381",
+    "topblast": "6118187720675173301",
 }
 
 def _ce(name: str, fallback: str) -> str:
@@ -87,7 +92,8 @@ def _ce(name: str, fallback: str) -> str:
         "gbot": "🤖", "dedust": "💎", "stonfi": "💎",
         "percent": "💯", "social": "💬", "wallet": "👛",
         "price": "💰", "mcap": "📈", "holders": "👥",
-        "liquidity": "💧", "age": "🌱",
+        "liquidity": "💧", "age": "🌱", "uranus": "🪐", "gram": "💎",
+        "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀",
     }
     safe = safe_fallbacks.get(name, "✨")
     return f'<tg-emoji emoji-id="{emoji_id}">{safe}</tg-emoji>'
@@ -1320,6 +1326,17 @@ async def get_topblast_bonding_curve(
 
     item = items[0]
     extra = item.get("memecoin_extra_details") or {}
+    # Preserve source metadata returned by DeDust. Different memepad frontends
+    # can share the same underlying DeDust curve, so classification is based on
+    # explicit URLs/source text when available rather than guessing from curve data.
+    source_blob = " ".join(
+        str(v or "") for v in (
+            item.get("website"), item.get("url"), item.get("source"),
+            item.get("platform"), item.get("launcher"), item.get("launchpad"),
+            extra.get("website"), extra.get("url"), extra.get("source"),
+            extra.get("platform"), extra.get("launcher"), extra.get("launchpad"),
+        )
+    ).lower()
     collected_nano = extra.get("curve_ton_collected")
     target_nano = extra.get("curve_ton_max")
 
@@ -1343,6 +1360,12 @@ async def get_topblast_bonding_curve(
     if extra.get("migration_date"):
         bonding["bonded"] = True
 
+    if "topblast" in source_blob:
+        bonding["launchpad"] = "topblast"
+    elif "groyp" in source_blob:
+        bonding["launchpad"] = "groypfi"
+    elif "uranus" in source_blob or "x1000.finance" in source_blob:
+        bonding["launchpad"] = "uranus"
     return bonding
 
 
@@ -1759,6 +1782,38 @@ def _holder_icon_name(report: dict, holder: dict) -> str:
         return "stonfi"
     return "wallet"
 
+
+def _launchpad_emoji(report: dict) -> str:
+    bonding = report.get("bonding_curve") or {}
+    launchpad = str(bonding.get("launchpad") or "").lower()
+    if launchpad == "uranus":
+        return _ce("uranus", "🪐")
+    if launchpad == "groypfi":
+        return _ce("groypfi", "🟣")
+    if launchpad == "topblast":
+        return _ce("topblast", "🚀")
+    return ""
+
+
+def _coingecko_url(report: dict) -> str | None:
+    """Return a real CoinGecko link only when token metadata already exposes one."""
+    dex = report.get("dex_data") or {}
+    info = report.get("jetton_info") or {}
+    candidates = []
+    for item in dex.get("websites") or []:
+        if isinstance(item, dict):
+            candidates.append(item.get("url"))
+    candidates.extend([
+        _first_url(info.get("website")),
+        info.get("coingecko"),
+        info.get("coin_gecko"),
+    ])
+    for candidate in candidates:
+        url = _normalize_url(candidate)
+        if url and "coingecko.com" in url.lower():
+            return url
+    return None
+
 def format_token_report(
     report: dict,
     show_info: bool = False,
@@ -1785,8 +1840,11 @@ def format_token_report(
     buy_pct = (buys / total_txns * 100.0) if total_txns else 0.0
     sell_pct = (sells / total_txns * 100.0) if total_txns else 0.0
 
+    launch_emoji = _launchpad_emoji(report)
+    title_suffix = f" {launch_emoji}" if launch_emoji else ""
+
     lines = [
-        f"<b>{symbol} • {name}</b>",
+        f"<b>{symbol} • {name}</b>{title_suffix}",
         f"<code>{html.escape(address)}</code>",
         "",
         f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
@@ -1805,7 +1863,7 @@ def format_token_report(
             "",
             "<b>🧨 Bonding Curve</b>",
             f"<code>{html.escape(_progress_bar(percent, size=10))}</code> <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
-            f"Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))} GRAM</b> • Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))} GRAM</b>",
+            f"Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} • Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')}",
         ]
 
     if show_holders:
@@ -1828,6 +1886,9 @@ def format_token_report(
                     lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
 
     links = _collect_links(report)
+    cg_url = _coingecko_url(report)
+    if cg_url:
+        links.append(("CG", cg_url))
     link_parts = []
     seen_labels = set()
     for label, url in links:
@@ -1847,6 +1908,9 @@ def format_token_report(
         elif label == "WEB" and "WEB" not in seen_labels:
             link_parts.append(f"🌐 <a href=\"{safe_url}\">Website</a>")
             seen_labels.add("WEB")
+        elif label == "CG" and "CG" not in seen_labels:
+            link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">CoinGecko</a>")
+            seen_labels.add("CG")
     if link_parts:
         lines += ["", " • ".join(link_parts)]
 
