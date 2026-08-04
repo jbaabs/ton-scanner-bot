@@ -137,6 +137,32 @@ DEFAULT_CHART_TIMEFRAME = "1m"
 REQUEST_TIMEOUT = 15
 REPORT_CACHE: dict[str, dict] = {}
 REPORT_CACHE_TTL = 60 * 60
+
+# Lightweight hot caches: reduce repeated API/image work while keeping market data fresh.
+OHLCV_CACHE: dict[tuple, tuple[float, list]] = {}
+OHLCV_CACHE_TTL = 12
+IMAGE_CACHE: dict[str, tuple[float, bytes]] = {}
+IMAGE_CACHE_TTL = 60 * 60
+CHART_POOL_CACHE: dict[str, tuple[float, str]] = {}
+CHART_POOL_CACHE_TTL = 5 * 60
+
+def _ttl_get(cache: dict, key, ttl: float):
+    item = cache.get(key)
+    if not item:
+        return None
+    ts, value = item
+    if time.time() - ts > ttl:
+        cache.pop(key, None)
+        return None
+    return value
+
+def _ttl_put(cache: dict, key, value):
+    cache[key] = (time.time(), value)
+    # Keep these tiny caches bounded on long-running workers.
+    if len(cache) > 600:
+        oldest = sorted(cache.items(), key=lambda kv: kv[1][0])[:100]
+        for old_key, _ in oldest:
+            cache.pop(old_key, None)
 MAX_SCAN_HISTORY = 12
 DUPLICATE_SCAN_COOLDOWN = int(os.getenv("DUPLICATE_SCAN_COOLDOWN", "600"))
 ALERT_CHECK_SECONDS = max(30, int(os.getenv("ALERT_CHECK_SECONDS", "60")))
@@ -1082,6 +1108,11 @@ async def get_ohlcv(
     GeckoTerminal does not support every arbitrary aggregate. In particular,
     30-minute and 4-day views are built from supported 15m and 1d candles.
     """
+    cache_key = (str(pool_address or ""), str(timeframe_key), str(token_address or ""))
+    cached = _ttl_get(OHLCV_CACHE, cache_key, OHLCV_CACHE_TTL)
+    if cached:
+        return cached
+
     requested = CHART_TIMEFRAMES.get(
         timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME]
     )
@@ -1146,13 +1177,23 @@ async def get_ohlcv(
 
     # Keep the visible chart clean and consistent.
     display_limit = requested.get("limit", 60)
-    return candles[-display_limit:] if candles else None
+    result = candles[-display_limit:] if candles else None
+    if result:
+        _ttl_put(OHLCV_CACHE, cache_key, result)
+    return result
 
 
 async def select_chart_pool(
     session: aiohttp.ClientSession, dex_pairs: list[dict], fallback_pool: str | None, token_address: str | None = None
 ) -> tuple[str | None, list | None]:
     """Choose the materially-liquid TON pool with the best usable 1m history."""
+    pool_cache_key = str(token_address or fallback_pool or "")
+    cached_pool = _ttl_get(CHART_POOL_CACHE, pool_cache_key, CHART_POOL_CACHE_TTL) if pool_cache_key else None
+    if cached_pool:
+        cached_candles = await get_ohlcv(session, cached_pool, "1m", token_address)
+        if cached_candles:
+            return cached_pool, cached_candles
+
     ton_pairs = [p for p in (dex_pairs or []) if _is_ton_pair(p) and p.get("pairAddress")]
     if not ton_pairs:
         if not fallback_pool:
@@ -1189,6 +1230,8 @@ async def select_chart_pool(
 
     if best_candles is None and fallback_pool:
         best_candles = await get_ohlcv(session, fallback_pool, "1m", token_address)
+    if best_pool and best_candles and pool_cache_key:
+        _ttl_put(CHART_POOL_CACHE, pool_cache_key, best_pool)
     return best_pool, best_candles
 
 
@@ -1496,11 +1539,16 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
     if not url:
         return None
+    cached = _ttl_get(IMAGE_CACHE, url, IMAGE_CACHE_TTL)
+    if cached:
+        return cached
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
             if resp.status != 200:
                 return None
             data = await resp.read()
+            if data:
+                _ttl_put(IMAGE_CACHE, url, data)
             return data if data else None
     except Exception:
         return None
@@ -1553,25 +1601,23 @@ async def build_scan_photo(
     # Main scanner card: render true 1-minute candles from the best usable pool.
     # The separate Chart button keeps its selectable timeframe state.
     main_scan_timeframe = "1m"
-    chart_pool, ohlcv, chart_source = await get_routed_chart_data(
-        session, report, main_scan_timeframe
-    )
+    chart_task = asyncio.create_task(get_routed_chart_data(session, report, main_scan_timeframe))
+    icon_task = asyncio.create_task(_download_image_bytes(session, _safe_image_url(report)))
+    (chart_pool, ohlcv, chart_source), token_icon = await asyncio.gather(chart_task, icon_task)
     if chart_pool:
         dex["chart_pair_address"] = chart_pool
     dex["chart_source"] = chart_source
     if not ohlcv:
         return None
 
-    token_icon = await _download_image_bytes(session, _safe_image_url(report))
-    grx_watermark = await _get_grx_sticker_watermark_bytes(bot)
-
     try:
-        png_bytes = build_report_card(
+        png_bytes = await asyncio.to_thread(
+            build_report_card,
             ohlcv,
             report,
             CHART_TIMEFRAMES[main_scan_timeframe]["label"],
-            token_icon_bytes=token_icon,
-            grx_watermark_bytes=grx_watermark,
+            token_icon,
+            None,
         )
     except Exception:
         logger.exception("Error building GRX scan report card image")
@@ -2944,12 +2990,13 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     async with aiohttp.ClientSession() as icon_session:
         token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
 
-    png_bytes = build_candlestick_chart(
+    png_bytes = await asyncio.to_thread(
+        build_candlestick_chart,
         ohlcv,
         symbol,
         CHART_TIMEFRAMES[timeframe]["label"],
-        token_icon_bytes=token_icon,
-        grx_watermark_bytes=await _get_grx_sticker_watermark_bytes(callback.bot),
+        token_icon,
+        None,
     )
 
     media = InputMediaPhoto(
@@ -3091,12 +3138,13 @@ async def handle_timeframe(callback: CallbackQuery):
     async with aiohttp.ClientSession() as icon_session:
         token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
 
-    png_bytes = build_candlestick_chart(
+    png_bytes = await asyncio.to_thread(
+        build_candlestick_chart,
         ohlcv,
         symbol,
         CHART_TIMEFRAMES[timeframe]["label"],
-        token_icon_bytes=token_icon,
-        grx_watermark_bytes=await _get_grx_sticker_watermark_bytes(callback.bot),
+        token_icon,
+        None,
     )
 
     media = InputMediaPhoto(
