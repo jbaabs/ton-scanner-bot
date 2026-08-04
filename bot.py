@@ -1448,8 +1448,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
     else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
 
-    # Compact adaptive stat cards. Each border hugs its content instead of filling half the image.
-    # Width grows automatically for longer values, while both columns remain visually uniform.
+    # Auto-fit stat cards aligned to the exact same two-column split as
+    # MARKET PULSE / FIRST CALLED BY above.
     rows=[
       (("PRICE",_fmt_price_compact(dex.get("price_usd")),text),("1H CHANGE",_fmt_pct(h1),pc(h1))),
       (("MARKET CAP",_fmt_usd(dex.get("market_cap")),text),("24H CHANGE",_fmt_pct(h24),pc(h24))),
@@ -1459,23 +1459,34 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
       (("HOLDERS",_fmt_num(info.get("holders_count")),text),("TOP 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
     ]
 
-    def stat_card_width(label, value):
-        # Figure-relative estimate based on the longest line. Clamp prevents overflow.
-        chars=max(len(str(label)),len(str(value)))
-        return min(.405,max(.205,.115 + chars*.0175))
+    # Estimate the rendered text width and give it only a small amount of padding.
+    # The card grows only when its own label/value needs more room.
+    def stat_card_width(label, value, value_fs):
+        label_w = .0080 * len(str(label)) + .025
+        value_w = (.0091 * len(str(value)) * (value_fs / 12.0)) + .025
+        return min(.455, max(.145, label_w, value_w))
 
     top=.425; bottom=.025; gap=.009; rh=(top-bottom-gap*5)/6
+
+    # Match the split above: left starts at .025, right starts at .51.
+    left_x=.025
+    right_x=.51
+
     for r,(left,right) in enumerate(rows):
         y=top-(r+1)*rh-r*gap
-        for side,(label,val,col) in enumerate((left,right)):
-            cw=stat_card_width(label,val)
-            x=.035 if side==0 else .965-cw
-            box(x,y,cw,rh,fc=cell,ec=line,lw=.72,r=.009)
-            pad=min(.018,cw*.06)
-            fig.text(x+pad,y+rh*.69,label,color=muted,fontsize=8.4,fontweight="bold",
-                     ha="left",va="center")
+        for x,(label,val,col) in ((left_x,left),(right_x,right)):
             value_len=len(str(val))
             fs=12.8 if value_len<=10 else 11.8 if value_len<=14 else 10.8
+            cw=stat_card_width(label,val,fs)
+
+            # Never allow a card to cross the centre split or right dashboard edge.
+            max_w=(.49-x) if x==left_x else (.975-x)
+            cw=min(cw,max_w)
+
+            box(x,y,cw,rh,fc=cell,ec=line,lw=.72,r=.009)
+            pad=.014
+            fig.text(x+pad,y+rh*.69,label,color=muted,fontsize=8.4,fontweight="bold",
+                     ha="left",va="center")
             fig.text(x+pad,y+rh*.30,val,color=col,fontsize=fs,fontweight="bold",
                      ha="left",va="center")
 
