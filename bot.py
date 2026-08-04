@@ -1716,7 +1716,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
+    # Crop the unused lower canvas left behind by the compact 3x2 stat grid.
+    # Keep a small margin beneath the cards rather than stretching them vertically.
+    from matplotlib.transforms import Bbox
+    crop = Bbox.from_extents(0, fig.get_figheight() * .155, fig.get_figwidth(), fig.get_figheight())
+    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=crop,pad_inches=0); plt.close(fig); return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
