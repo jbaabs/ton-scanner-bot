@@ -121,12 +121,16 @@ def _custom_icon_button(text: str, url: str, emoji_name: str | None = None):
     return InlineKeyboardButton(**kwargs)
 
 CHART_TIMEFRAMES = {
-    "5m": {"timeframe": "minute", "aggregate": 5, "limit": 48, "label": "5m"},
+    "1m": {"timeframe": "minute", "aggregate": 1, "limit": 60, "label": "1m"},
+    "5m": {"timeframe": "minute", "aggregate": 5, "limit": 60, "label": "5m"},
+    "15m": {"timeframe": "minute", "aggregate": 15, "limit": 60, "label": "15m"},
+    "30m": {"timeframe": "minute", "aggregate": 30, "limit": 60, "label": "30m"},
     "1h": {"timeframe": "hour", "aggregate": 1, "limit": 48, "label": "1H"},
     "4h": {"timeframe": "hour", "aggregate": 4, "limit": 42, "label": "4H"},
     "1d": {"timeframe": "day", "aggregate": 1, "limit": 30, "label": "1D"},
+    "4d": {"timeframe": "day", "aggregate": 4, "limit": 30, "label": "4D"},
 }
-CHART_TIMEFRAME_ORDER = ["5m", "1h", "4h", "1d"]
+CHART_TIMEFRAME_ORDER = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "4d"]
 DEFAULT_CHART_TIMEFRAME = "1h"
 REQUEST_TIMEOUT = 15
 REPORT_CACHE: dict[str, dict] = {}
@@ -1956,15 +1960,24 @@ def build_report_keyboard(
 
 def build_chart_keyboard(key: str, selected_tf: str):
     builder = InlineKeyboardBuilder()
-    builder.row(
-        *[
-            InlineKeyboardButton(
-                text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]["label"]),
-                callback_data=f"tf:{tf}:{key}",
-            )
-            for tf in CHART_TIMEFRAME_ORDER
-        ]
-    )
+
+    # Two clean timeframe rows:
+    # 1m  5m  15m  30m
+    # 1H  4H  1D   4D
+    for timeframe_row in (
+        ["1m", "5m", "15m", "30m"],
+        ["1h", "4h", "1d", "4d"],
+    ):
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=(f"• {CHART_TIMEFRAMES[tf]['label']} •" if tf == selected_tf else CHART_TIMEFRAMES[tf]["label"]),
+                    callback_data=f"tf:{tf}:{key}",
+                )
+                for tf in timeframe_row
+            ]
+        )
+
     builder.row(InlineKeyboardButton(text="◂ Back", callback_data=f"tg:back:{key}"))
     return builder.as_markup()
 
