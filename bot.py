@@ -1274,6 +1274,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
     from datetime import datetime, timezone
     from io import BytesIO
 
@@ -1287,6 +1288,13 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     move_col=green if move>=0 else red
 
     fig=plt.figure(figsize=(8,5.0),dpi=150,facecolor=bg)
+    mini_mark=fig.text(.945,.94,"GRX SCAN",color="#f8f8fb",fontsize=10.5,
+        fontweight="black",fontstyle="italic",family="DejaVu Sans",ha="right",va="center")
+    mini_mark.set_path_effects([
+        pe.Stroke(linewidth=2.4,foreground="#020307"),
+        pe.Stroke(linewidth=.7,foreground="#8c46ff"),
+        pe.Normal(),
+    ])
     title_x=.055
     if token_icon_bytes:
         try:
@@ -1333,6 +1341,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
     from matplotlib.patches import FancyBboxPatch
     from datetime import datetime, timezone
     from io import BytesIO
@@ -1355,8 +1364,13 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
-    fig.text(.035,.972,"GRX",color=purple,fontsize=18,fontweight="bold",va="center")
-    fig.text(.122,.972,"SCAN",color=text,fontsize=18,fontweight="bold",va="center")
+    wordmark=fig.text(.035,.972,"GRX SCAN",color="#f8f8fb",fontsize=20.5,
+        fontweight="black",fontstyle="italic",family="DejaVu Sans",ha="left",va="center")
+    wordmark.set_path_effects([
+        pe.Stroke(linewidth=4.0,foreground="#020307"),
+        pe.Stroke(linewidth=1.15,foreground=purple),
+        pe.Normal(),
+    ])
     fig.text(.965,.972,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
