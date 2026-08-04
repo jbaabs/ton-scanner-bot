@@ -1506,8 +1506,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "website": social_candidates.get("website"),
             "telegram": social_candidates.get("telegram"),
             "twitter": social_candidates.get("twitter"),
-            "description": metadata.get("description") or metadata.get("about"),
-            "admin_address": (jetton_info.get("admin") or {}).get("address") if isinstance(jetton_info.get("admin"), dict) else jetton_info.get("admin"),
             "total_supply": jetton_info.get("total_supply"),
             "mintable": jetton_info.get("mintable"),
             "verification": jetton_info.get("verification", "none"),
@@ -1566,8 +1564,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
             "image_url": dex_info.get("imageUrl"),
-            "description": dex_info.get("description") or dex_info.get("header"),
-            "labels": best.get("labels") or [],
             "total_liquidity_usd": total_liq,
             "websites": merged_websites,
             "socials": merged_socials,
@@ -2006,122 +2002,6 @@ def _centred_token_title(symbol: str, name: str, suffix: str = "", width: int = 
     return (" " * pad) + f"<b>{visible}</b>{suffix}"
 
 
-def _launchpad_name(report: dict) -> str:
-    """Detect launchpad from bonding data first, then token metadata/description."""
-    launchpad = str((report.get("bonding_curve") or {}).get("launchpad") or "").lower()
-    mapped = {
-        "topblast": "TopBlast",
-        "uranus": "Uranus / X1000",
-        "x1000": "X1000",
-        "groypfi": "GroypFi",
-    }.get(launchpad)
-    if mapped:
-        return mapped
-
-    info = report.get("jetton_info") or {}
-    dex = report.get("dex_data") or {}
-    haystack = " ".join(str(v or "") for v in (
-        info.get("description"), info.get("website"), info.get("telegram"), info.get("twitter"),
-        dex.get("description"), dex.get("dex_url"),
-    )).lower()
-    if "topblast" in haystack:
-        return "TopBlast"
-    if "x1000" in haystack or "uranus" in haystack:
-        return "Uranus / X1000"
-    if "groyp" in haystack:
-        return "GroypFi"
-    return "N/A"
-
-
-def _dex_name(report: dict) -> str:
-    dex_id = str((report.get("dex_data") or {}).get("dex_id") or "").lower()
-    if "dedust" in dex_id:
-        return "DeDust"
-    if "ston" in dex_id:
-        return "STON.fi"
-    return dex_id or "N/A"
-
-
-def _creator_details(report: dict) -> tuple[str | None, float | None]:
-    """Best-effort creator/admin wallet + current holding from loaded holder data."""
-    info = report.get("jetton_info") or {}
-    creator = str(info.get("admin_address") or "").strip() or None
-    if not creator or re.fullmatch(r"0:[0]+", creator):
-        return None, None
-    for holder in (report.get("holders") or {}).get("holders") or []:
-        if _same_ton_address(creator, holder.get("address")):
-            return creator, holder.get("percentage")
-    return creator, None
-
-
-def _best_description(report: dict) -> str:
-    """Return a clean human description, stripping URLs/deployment boilerplate."""
-    info = report.get("jetton_info") or {}
-    dex = report.get("dex_data") or {}
-    value = info.get("description") or dex.get("description")
-    if not value:
-        return "No description currently available."
-    text = str(value).replace("\\n", "\n")
-    # Remove raw links and common launchpad deployment boilerplate from About.
-    text = re.sub(r"https?://\\S+", "", text, flags=re.I)
-    text = re.sub(r"\\|?\\s*Deployed\\s+from\\s+(?:topblast\\.lol|x1000\\.finance|uranus\\S*)", "", text, flags=re.I)
-    text = re.sub(r"\\s+", " ", text).strip(" |-")
-    return (text[:500] + "…") if len(text) > 500 else text
-
-
-def format_token_info(report: dict) -> str:
-    """Clean same-message Info view; socials stay on the main scan."""
-    dex = report.get("dex_data") or {}
-    address = str(report.get("address") or "").strip()
-    creator, creator_holding = _creator_details(report)
-    launchpad = _launchpad_name(report)
-    dex_name = _dex_name(report)
-    description = _best_description(report)
-
-    creator_line = "N/A"
-    if creator:
-        wallet_url = f"https://tonviewer.com/{creator}"
-        creator_line = f'<a href="{html.escape(wallet_url, quote=True)}">{html.escape(_short_address(creator, 6, 6))}</a>'
-
-    holding_text = f"{creator_holding:.2f}%" if creator_holding is not None else "N/A"
-    status = "Holding" if creator_holding is not None and creator_holding > 0 else "N/A"
-
-    sources = []
-    if address:
-        a = html.escape(address, quote=True)
-        sources.append(f'<a href="https://www.geckoterminal.com/ton/tokens/{a}">GT</a>')
-    ds_url = _normalize_url(dex.get("dex_url"))
-    if ds_url:
-        sources.append(f'<a href="{html.escape(ds_url, quote=True)}">DS</a>')
-    if address and launchpad == "TopBlast":
-        sources.append(f'<a href="https://topblast.lol/token/{html.escape(address, quote=True)}">TopBlast</a>')
-    elif address and ("X1000" in launchpad or "Uranus" in launchpad):
-        sources.append(f'<a href="https://x1000.finance/tokens/{html.escape(address, quote=True)}">X1000</a>')
-
-    # IMPORTANT: use actual newline characters here. Never literal backslash-n text.
-    lines = [
-        "<b>ℹ️ Token Info</b>",
-        "",
-        f"<b>Description:</b> {html.escape(description)}",
-        "",
-        f"🏷 <b>Launchpad:</b> {html.escape(launchpad)}",
-        f"💎 <b>DEX:</b> {html.escape(dex_name)}",
-        f"📅 <b>Created:</b> {html.escape(_fmt_age(dex.get('pair_created_at')))}",
-        f"👤 <b>Creator:</b> {creator_line}",
-        "",
-        "<b>👤 Dev</b>",
-        f"<b>Holding:</b> {html.escape(holding_text)}",
-        "<b>Sold:</b> N/A",
-        f"<b>Status:</b> {html.escape(status)}",
-        "",
-        "<b>Description / About</b>",
-        html.escape(description),
-    ]
-    if sources:
-        lines.extend(["", "<b>Sources:</b> " + " · ".join(sources)])
-    return "\n".join(lines)
-
-
 def format_token_report(
     report: dict,
     show_info: bool = False,
@@ -2131,9 +2011,6 @@ def format_token_report(
     if not report.get("found"):
         errors = "\n".join(f"- {e}" for e in report.get("errors", []))
         return f"Token not found.\n\nDetails:\n{errors}"
-
-    if show_info:
-        return format_token_info(report)
 
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
@@ -2275,14 +2152,6 @@ def build_report_keyboard(
     )
     builder.row(*row)
 
-    # Info opens inside the same Telegram message; Back restores the scan.
-    builder.row(
-        InlineKeyboardButton(
-            text="◂ Back to Scan" if show_info else "ℹ️ Info",
-            callback_data=f"tg:info:{key}",
-        )
-    )
-
     # Open each trading bot directly on the token currently being scanned.
     entry = REPORT_CACHE.get(key) or {}
     report = entry.get("report") or {}
@@ -2350,14 +2219,14 @@ async def _render_report_message(target_message: Message, key: str):
         if entry.get("show_stats")
         else format_token_report(
             report,
-            show_info=entry.get("show_info", False),
+            show_info=False,
             show_holders=entry["show_holders"],
             scan_history=entry["scan_history"],
         )
     )
     keyboard = build_report_keyboard(
         key,
-        entry.get("show_info", False),
+        False,
         entry["show_holders"],
         has_chart=bool((report.get("dex_data") or {}).get("pair_address")),
         show_stats=entry.get("show_stats", False),
@@ -2369,12 +2238,12 @@ async def _render_report_message(target_message: Message, key: str):
             await target_message.edit_caption(caption=text, reply_markup=keyboard)
             return
         except Exception:
-            logger.exception("Failed to edit report photo caption")
+            pass
 
     try:
         await target_message.edit_text(text, disable_web_page_preview=True, reply_markup=keyboard)
     except Exception:
-        logger.exception("Failed to edit report message text")
+        pass
 
 
 if not TELEGRAM_BOT_TOKEN:
@@ -2591,14 +2460,14 @@ async def handle_toggle(callback: CallbackQuery):
                 if entry.get("show_stats")
                 else format_token_report(
                     fresh_report,
-                    show_info=entry.get("show_info", False),
+                    show_info=False,
                     show_holders=entry["show_holders"],
                     scan_history=entry["scan_history"],
                 )
             )
             keyboard = build_report_keyboard(
                 key,
-                entry.get("show_info", False),
+                False,
                 entry["show_holders"],
                 has_chart=bool((fresh_report.get("dex_data") or {}).get("pair_address")),
                 show_stats=entry.get("show_stats", False),
@@ -2629,7 +2498,6 @@ async def handle_toggle(callback: CallbackQuery):
 
     if section == "back":
         entry["show_stats"] = False
-        entry["show_info"] = False
         entry["scan_history"] = get_scan_history(entry["report"])
         text = format_token_report(
             entry["report"],
@@ -2657,28 +2525,17 @@ async def handle_toggle(callback: CallbackQuery):
         await callback.answer("Couldn't restore the scan card. Please refresh the token.", show_alert=True)
         return
 
-    if section == "info":
-        # Acknowledge the button immediately so Telegram does not leave it spinning
-        # while the existing scan message is being edited.
-        await callback.answer()
-        entry["show_info"] = not entry.get("show_info", False)
-        entry["show_stats"] = False
-        entry["show_holders"] = False
-    elif section == "stats":
-        entry["show_info"] = False
+    if section == "stats":
         entry["show_stats"] = not entry.get("show_stats", False)
         # Keep the stats view focused; holders are part of the scanner view.
         if entry["show_stats"]:
             entry["show_holders"] = False
     elif section == "holders":
-        entry["show_info"] = False
         entry["show_stats"] = False
         entry["show_holders"] = not entry["show_holders"]
 
     await _render_report_message(callback.message, key)
-    # Info was acknowledged before rendering to prevent Telegram's loading spinner.
-    if section != "info":
-        await callback.answer()
+    await callback.answer()
 
 
 async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
