@@ -693,12 +693,34 @@ def _to_raw_address(address: str) -> str | None:
 
 
 def _safe_image_url(report: dict) -> str | None:
-    image_url = (report.get("jetton_info") or {}).get("image")
-    if not image_url or not isinstance(image_url, str):
+    """Return the first usable token image from our metadata fallback chain."""
+    candidates = [
+        (report.get("jetton_info") or {}).get("image"),          # TonAPI metadata
+        (report.get("dex_data") or {}).get("image_url"),        # DexScreener pair info
+        report.get("gecko_image_url"),                           # GeckoTerminal token metadata
+    ]
+    for image_url in candidates:
+        if isinstance(image_url, str):
+            image_url = image_url.strip()
+            if image_url.startswith(("http://", "https://")):
+                return image_url
+    return None
+
+
+async def get_gecko_token_image(session: aiohttp.ClientSession, address: str) -> str | None:
+    """Fetch a token icon from GeckoTerminal when TonAPI/DexScreener lack one."""
+    url = f"{GECKOTERMINAL_BASE}/networks/ton/tokens/{address}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            attrs = ((data.get("data") or {}).get("attributes") or {})
+            image_url = attrs.get("image_url")
+            if isinstance(image_url, str) and image_url.strip().startswith(("http://", "https://")):
+                return image_url.strip()
+    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
         return None
-    image_url = image_url.strip()
-    if image_url.startswith("http://") or image_url.startswith("https://"):
-        return image_url
     return None
 
 
@@ -1541,6 +1563,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "dex_id": str(best.get("dexId") or "").lower(),
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
+            "image_url": dex_info.get("imageUrl"),
             "total_liquidity_usd": total_liq,
             "websites": merged_websites,
             "socials": merged_socials,
@@ -1549,6 +1572,14 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         report["errors"].append(
             "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
         )
+
+    # Token-image fallback: TonAPI -> DexScreener -> GeckoTerminal.  Only make
+    # the Gecko request when the first two providers did not supply an image.
+    if not _safe_image_url(report):
+        try:
+            report["gecko_image_url"] = await get_gecko_token_image(session, address)
+        except Exception:
+            logger.debug("GeckoTerminal token image lookup failed", exc_info=True)
 
     # Cross-check headline percentage changes against independent GeckoTerminal
     # OHLCV. Keep DexScreener as fallback only when Gecko lacks a complete window.
@@ -2253,9 +2284,9 @@ async def handle_address(message: Message):
                 lookup_value = resolved_address
                 await status_msg.edit_text("Scanning token...")
             else:
-                await message.answer(
-                    "Send a valid TON contract address (EQ.../UQ...) or a ticker like GRX6900 or $GRX6900."
-                )
+                # Ignore ordinary conversation in both private chats and groups.
+                # The scanner only reacts to a full TON CA or a single ticker-like
+                # word (e.g. GRX6900 / $GRX6900). Commands are handled separately.
                 return
 
             duplicate_key = str(lookup_value or "").strip()
