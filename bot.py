@@ -2361,7 +2361,7 @@ async def cmd_start(message: Message):
     )
 
 
-@dp.message(F.text)
+@dp.message(F.text & ~F.text.startswith("/"))
 async def handle_address(message: Message):
     text = message.text.strip()
     pending = PENDING_ALERT_INPUT.get(message.from_user.id) if message.from_user else None
@@ -2756,19 +2756,54 @@ async def cancel_alert_input(message: Message):
     if message.from_user: PENDING_ALERT_INPUT.pop(message.from_user.id,None)
     await message.answer("Alert setup cancelled.")
 
-@dp.message(Command("watchlist"))
+@dp.message(Command("wl", ignore_case=True))
 async def show_watchlist(message: Message):
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory=sqlite3.Row; watches=conn.execute("SELECT * FROM token_watches WHERE user_id=? ORDER BY created_ts DESC",(message.from_user.id,)).fetchall(); alerts=conn.execute("SELECT * FROM token_alerts WHERE user_id=? AND active=1 ORDER BY created_ts DESC",(message.from_user.id,)).fetchall()
-    lines=["⭐ <b>Your GRX Watchlist</b>"]
+        conn.row_factory = sqlite3.Row
+        watches = conn.execute(
+            "SELECT * FROM token_watches WHERE user_id=? ORDER BY created_ts DESC",
+            (message.from_user.id,),
+        ).fetchall()
+
+    lines = ["⭐ <b>Your GRX Watchlist</b>"]
     if watches:
-        lines += [f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · <code>{html.escape(r['token_address'])}</code>" for r in watches]
-    else: lines.append("No watched tokens yet.")
-    lines.append("\n🔔 <b>Active Alerts</b>")
+        lines += [
+            f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · <code>{html.escape(r['token_address'])}</code>"
+            for r in watches
+        ]
+    else:
+        lines.append("No watched tokens yet.")
+
+    await message.answer("\n".join(lines))
+
+
+@dp.message(Command("al", ignore_case=True))
+async def show_alert_list(message: Message):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        alerts = conn.execute(
+            "SELECT * FROM token_alerts WHERE user_id=? AND active=1 ORDER BY created_ts DESC",
+            (message.from_user.id,),
+        ).fetchall()
+
+    lines = ["🔔 <b>Your GRX Alerts</b>"]
     if alerts:
-        labels={"price_above":"Price ↑","price_below":"Price ↓","mcap_above":"MCap ↑","mcap_below":"MCap ↓","new_ath":"New ATH"}
-        for r in alerts: lines.append(f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · {labels.get(r['alert_type'],r['alert_type'])}{(' '+_money(r['threshold'])) if r['threshold'] else ''}")
-    else: lines.append("No active alerts.")
+        labels = {
+            "price_above": "Price ↑",
+            "price_below": "Price ↓",
+            "mcap_above": "MCap ↑",
+            "mcap_below": "MCap ↓",
+            "new_ath": "New ATH",
+        }
+        for r in alerts:
+            threshold = (" " + _money(r["threshold"])) if r["threshold"] else ""
+            lines.append(
+                f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · "
+                f"{labels.get(r['alert_type'], r['alert_type'])}{threshold}"
+            )
+    else:
+        lines.append("No active alerts.")
+
     await message.answer("\n".join(lines))
 
 @dp.callback_query(F.data.startswith("tf:"))
