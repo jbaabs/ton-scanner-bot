@@ -2050,12 +2050,16 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
     else:
         pairs = cached
 
-    if not pairs:
-        return old_report
-
     fresh = dict(old_report)
     old_dex = dict(old_report.get("dex_data") or {})
-    best = pairs[0]
+
+    # Pre-migration launchpad tokens may legitimately have no normal DEX pair.
+    # Keep their existing market snapshot and still refresh the curve below.
+    if not pairs:
+        pairs = []
+        best = {}
+    else:
+        best = pairs[0]
     active_pool = old_dex.get("chart_pair_address") or best.get("pairAddress") or old_dex.get("pair_address")
     _register_live_pool(active_pool)
     recent_buys, recent_sells = _live_swap_counts(active_pool, 30) if active_pool else (0, 0)
@@ -2064,22 +2068,52 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
     txns = best.get("txns") or {}
     h24tx = txns.get("h24") or {}
 
-    old_dex.update({
-        "price_usd": best.get("priceUsd"),
-        "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
-        "total_liquidity_usd": total_liq,
-        "volume_24h": total_vol,
-        "market_cap": best.get("marketCap") or best.get("fdv"),
-        "fdv": best.get("fdv"),
-        "price_change_1h": (best.get("priceChange") or {}).get("h1"),
-        "price_change_6h": (best.get("priceChange") or {}).get("h6"),
-        "price_change_24h": (best.get("priceChange") or {}).get("h24"),
-        "txns_24h": {"buys": h24tx.get("buys", 0) + recent_buys, "sells": h24tx.get("sells", 0) + recent_sells},
-        "pair_address": best.get("pairAddress") or old_dex.get("pair_address"),
-        "pair_created_at": best.get("pairCreatedAt") or old_dex.get("pair_created_at"),
-        "dex_id": best.get("dexId") or old_dex.get("dex_id"),
-    })
+    if best:
+        old_dex.update({
+            "price_usd": best.get("priceUsd") or old_dex.get("price_usd"),
+            "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+            "total_liquidity_usd": total_liq,
+            "volume_24h": total_vol,
+            "market_cap": best.get("marketCap") or best.get("fdv") or old_dex.get("market_cap"),
+            "fdv": best.get("fdv") or old_dex.get("fdv"),
+            "price_change_1h": (best.get("priceChange") or {}).get("h1"),
+            "price_change_6h": (best.get("priceChange") or {}).get("h6"),
+            "price_change_24h": (best.get("priceChange") or {}).get("h24"),
+            "txns_24h": {"buys": h24tx.get("buys", 0) + recent_buys, "sells": h24tx.get("sells", 0) + recent_sells},
+            "pair_address": best.get("pairAddress") or old_dex.get("pair_address"),
+            "pair_created_at": best.get("pairCreatedAt") or old_dex.get("pair_created_at"),
+            "dex_id": best.get("dexId") or old_dex.get("dex_id"),
+        })
     fresh["dex_data"] = old_dex
+
+    # Manual Refresh must also refresh launchpad/bonding state. Previously the
+    # fast path refreshed only DEX fields, so a TopBlast token could remain at
+    # e.g. 66.7% indefinitely even while the curve was actively progressing.
+    old_bonding = old_report.get("bonding_curve") or {}
+    if old_bonding and not old_bonding.get("bonded", False):
+        try:
+            info = fresh.get("jetton_info") or {}
+            symbol = info.get("symbol")
+            canonical = (
+                info.get("metadata", {}).get("address")
+                if isinstance(info.get("metadata"), dict) else None
+            )
+            source_hints = []
+            for value in (
+                info.get("website"), info.get("telegram"), info.get("twitter"),
+                old_dex.get("dex_url"), old_dex.get("websites"), old_dex.get("socials"),
+                old_bonding.get("launchpad_url"), old_bonding.get("source"),
+            ):
+                source_hints.extend(_flatten_source_hint(value))
+
+            live_bonding = await get_topblast_bonding_curve(
+                session, canonical or address, symbol=symbol, source_hints=source_hints
+            )
+            if live_bonding:
+                fresh["bonding_curve"] = live_bonding
+        except Exception:
+            logger.exception("Fast refresh: live bonding-curve update failed")
+
     fresh["found"] = True
     return fresh
 
