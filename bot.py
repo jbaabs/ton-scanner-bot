@@ -43,6 +43,29 @@ DB_PATH = os.getenv("SCAN_DB_PATH", "scan_history.db")
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 DEXSCREENER_SEARCH_API = "https://api.dexscreener.com/latest/dex/search"
 TONAPI_BASE = "https://tonapi.io/v2"
+TON_STREAM_WS = os.getenv("TON_STREAM_WS", "wss://tonapi.io/streaming/v2/ws")
+LIVE_STREAM_ENABLED = os.getenv("GRX_LIVE_STREAM", "1") == "1"
+LIVE_POOL_ADDRESSES: set[str] = set()
+LIVE_POOL_LAST_EVENT: dict[str, float] = {}
+LIVE_POOL_EVENT_COUNT: dict[str, int] = {}
+LIVE_STREAM_RESUBSCRIBE = asyncio.Event()
+LIVE_STREAM_CONNECTED = False
+LIVE_SWAPS: dict[str, list[dict]] = {}
+LIVE_SWAP_MAX_PER_POOL = 800
+
+def _record_live_swap(pool: str, *, ts: int, price=None, amount_in=None, amount_out=None, side=None, source="ton"):
+    if not pool: return
+    b=LIVE_SWAPS.setdefault(pool,[])
+    b.append({"ts":int(ts or time.time()),"price":price,"amount_in":amount_in,"amount_out":amount_out,"side":side,"source":source})
+    if len(b)>LIVE_SWAP_MAX_PER_POOL: del b[:-LIVE_SWAP_MAX_PER_POOL]
+    _invalidate_live_pool_caches(pool)
+
+def _live_swap_counts(pool: str, seconds: int=30):
+    cutoff=time.time()-seconds; buys=sells=0
+    for s in LIVE_SWAPS.get(pool,()):
+        if s.get("ts",0)<cutoff: continue
+        buys += s.get("side")=="buy"; sells += s.get("side")=="sell"
+    return buys,sells
 GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2"
 # Public, unauthenticated DeDust backend. This is the same backend that powers
 # x1000.finance's "Uranus" memepad AND topblast.lol (both are dedust_v3_memepad
@@ -1598,7 +1621,6 @@ async def get_routed_chart_data(
         source = "geckoterminal" if candles else "unavailable"
     return pool, candles, source
 
-
 async def build_scan_photo(
     session: aiohttp.ClientSession, report: dict, bot=None
 ) -> BufferedInputFile | None:
@@ -1868,6 +1890,9 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
     fresh = dict(old_report)
     old_dex = dict(old_report.get("dex_data") or {})
     best = pairs[0]
+    active_pool = old_dex.get("chart_pair_address") or best.get("pairAddress") or old_dex.get("pair_address")
+    _register_live_pool(active_pool)
+    recent_buys, recent_sells = _live_swap_counts(active_pool, 30) if active_pool else (0, 0)
     total_vol = sum((p.get("volume") or {}).get("h24", 0) for p in pairs)
     total_liq = sum((p.get("liquidity") or {}).get("usd", 0) for p in pairs)
     txns = best.get("txns") or {}
@@ -1883,7 +1908,7 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
         "price_change_1h": (best.get("priceChange") or {}).get("h1"),
         "price_change_6h": (best.get("priceChange") or {}).get("h6"),
         "price_change_24h": (best.get("priceChange") or {}).get("h24"),
-        "txns_24h": {"buys": h24tx.get("buys", 0), "sells": h24tx.get("sells", 0)},
+        "txns_24h": {"buys": h24tx.get("buys", 0) + recent_buys, "sells": h24tx.get("sells", 0) + recent_sells},
         "pair_address": best.get("pairAddress") or old_dex.get("pair_address"),
         "pair_created_at": best.get("pairCreatedAt") or old_dex.get("pair_created_at"),
         "dex_id": best.get("dexId") or old_dex.get("dex_id"),
@@ -1891,6 +1916,250 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
     fresh["dex_data"] = old_dex
     fresh["found"] = True
     return fresh
+
+
+def _register_live_pool(pool_address: str | None) -> None:
+    """Register a DEX pool for low-latency TON streaming updates."""
+    if not pool_address:
+        return
+    pool = str(pool_address).strip()
+    if not pool or pool in LIVE_POOL_ADDRESSES:
+        return
+    LIVE_POOL_ADDRESSES.add(pool)
+    # Keep the subscription bounded for long-running public bots.
+    if len(LIVE_POOL_ADDRESSES) > 250:
+        oldest = min(
+            LIVE_POOL_ADDRESSES,
+            key=lambda p: LIVE_POOL_LAST_EVENT.get(p, 0.0),
+        )
+        LIVE_POOL_ADDRESSES.discard(oldest)
+        LIVE_POOL_LAST_EVENT.pop(oldest, None)
+        LIVE_POOL_EVENT_COUNT.pop(oldest, None)
+    LIVE_STREAM_RESUBSCRIBE.set()
+
+
+def _invalidate_live_pool_caches(pool_address: str) -> None:
+    """Immediately invalidate cached candles for a pool after on-chain activity."""
+    pool = str(pool_address).strip()
+    if not pool:
+        return
+    LIVE_POOL_LAST_EVENT[pool] = time.time()
+    LIVE_POOL_EVENT_COUNT[pool] = LIVE_POOL_EVENT_COUNT.get(pool, 0) + 1
+
+    # OHLCV cache keys contain pool address; remove every timeframe for this pool.
+    for key in list(OHLCV_CACHE):
+        try:
+            if pool in str(key):
+                OHLCV_CACHE.pop(key, None)
+        except Exception:
+            pass
+
+    # Force the next market refresh to go back upstream rather than reuse a tiny cache.
+    for key in list(FAST_MARKET_CACHE):
+        FAST_MARKET_CACHE.pop(key, None)
+
+
+async def _send_live_subscription(ws) -> None:
+    addresses = list(LIVE_POOL_ADDRESSES)
+    if not addresses:
+        return
+    await ws.send_json({
+        "operation": "subscribe",
+        "types": ["transactions"],
+        "addresses": addresses,
+        "min_finality": "pending",
+        "include_address_book": False,
+        "include_metadata": False,
+        "id": f"grx-{int(time.time())}",
+    })
+
+
+
+def _num(v):
+    try: return float(v) if v is not None else None
+    except (TypeError,ValueError): return None
+
+def _addr(v):
+    if isinstance(v,str): return v
+    if isinstance(v,dict): return v.get("address") or v.get("account_address") or v.get("account")
+    return None
+
+def _walk_actions(obj):
+    if isinstance(obj,dict):
+        for a in obj.get("actions") or []:
+            if isinstance(a,dict): yield a
+        for v in obj.values(): yield from _walk_actions(v)
+    elif isinstance(obj,list):
+        for v in obj: yield from _walk_actions(v)
+
+def _decode_swap_action(a,context_pool=None):
+    kind=str(a.get("type") or a.get("action_type") or "").lower()
+    if "swap" not in kind: return None
+    d=a.get("Swap") or a.get("swap") or a
+    dex=str(d.get("dex") or d.get("platform") or d.get("protocol") or d.get("dex_name") or "").lower()
+    if dex and not any(x in dex for x in ("dedust","ston","ston.fi")): return None
+    pool=_addr(d.get("pool")) or _addr(d.get("pool_address")) or context_pool
+    if not pool or pool not in LIVE_POOL_ADDRESSES: return None
+    ino=d.get("in") or d.get("offer") or d.get("asset_in") or {}
+    outo=d.get("out") or d.get("ask") or d.get("asset_out") or {}
+    ai=_num(d.get("amount_in") or d.get("offer_amount") or (ino.get("amount") if isinstance(ino,dict) else None))
+    ao=_num(d.get("amount_out") or d.get("ask_amount") or (outo.get("amount") if isinstance(outo,dict) else None))
+    side=str(d.get("side") or "").lower()
+    if side not in ("buy","sell"): side=None
+    return {"pool":pool,"ts":int(d.get("timestamp") or a.get("timestamp") or time.time()),
+            "price":_num(d.get("price") or d.get("price_usd")),"amount_in":ai,"amount_out":ao,
+            "side":side,"source":"dedust" if "dedust" in dex else "stonfi" if "ston" in dex else "ton"}
+
+def _decode_stream_swaps(payload,touched):
+    context=next(iter(touched)) if len(touched)==1 else None
+    return [s for s in (_decode_swap_action(a,context) for a in _walk_actions(payload)) if s]
+
+def _merge_live_swaps_into_ohlcv(ohlcv,pool,timeframe_key):
+    swaps=LIVE_SWAPS.get(pool) or []
+    if not swaps or not ohlcv: return ohlcv
+    step={"1s":1,"5s":5,"15s":15,"30s":30,"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"4h":14400,"1d":86400}.get(timeframe_key,60)
+    rows=[list(r) for r in ohlcv]
+    try: last=int(rows[-1][0])
+    except Exception: return ohlcv
+    for s in swaps:
+        p=_num(s.get("price"))
+        if not p or s.get("ts",0)<last: continue
+        bt=(int(s["ts"])//step)*step
+        if bt>int(rows[-1][0]): rows.append([bt,p,p,p,p,0.0])
+        elif bt==int(rows[-1][0]):
+            rows[-1][2]=max(float(rows[-1][2]),p); rows[-1][3]=min(float(rows[-1][3]),p); rows[-1][4]=p
+    return rows[-120:]
+
+async def ton_live_stream_engine() -> None:
+    """Persistent low-latency TON pool watcher.
+
+    This does not replace GeckoTerminal historical candles. Instead it tells GRX
+    exactly when a watched pool has on-chain activity so cached market/candle
+    data is invalidated immediately. The next Refresh/chart interaction therefore
+    requests fresh data instead of waiting for a TTL to expire.
+    """
+    global LIVE_STREAM_CONNECTED
+
+    if not LIVE_STREAM_ENABLED:
+        logger.info("GRX live stream disabled by GRX_LIVE_STREAM=0")
+        return
+    if not TONAPI_KEY:
+        logger.warning(
+            "GRX live stream inactive: TONAPI_KEY is not set. "
+            "REST scanner will continue to work normally."
+        )
+        return
+
+    headers = {"Authorization": f"Bearer {TONAPI_KEY}"}
+    backoff = 1.0
+
+    while True:
+        try:
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.ws_connect(
+                    TON_STREAM_WS,
+                    heartbeat=15,
+                    autoping=True,
+                    receive_timeout=None,
+                ) as ws:
+                    LIVE_STREAM_CONNECTED = True
+                    backoff = 1.0
+                    logger.info("GRX live TON stream connected")
+
+                    if LIVE_POOL_ADDRESSES:
+                        await _send_live_subscription(ws)
+                    LIVE_STREAM_RESUBSCRIBE.clear()
+
+                    while True:
+                        receive_task = asyncio.create_task(ws.receive())
+                        resub_task = asyncio.create_task(LIVE_STREAM_RESUBSCRIBE.wait())
+                        done, pending = await asyncio.wait(
+                            {receive_task, resub_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        for task in pending:
+                            task.cancel()
+
+                        if resub_task in done and resub_task.result():
+                            LIVE_STREAM_RESUBSCRIBE.clear()
+                            if LIVE_POOL_ADDRESSES:
+                                await _send_live_subscription(ws)
+                            continue
+
+                        msg = receive_task.result()
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            try:
+                                payload = msg.json()
+                            except Exception:
+                                continue
+
+                            if payload.get("type") != "transactions":
+                                continue
+
+                            # The subscription is address-filtered. Transaction objects
+                            # expose their account/address in different compatible
+                            # implementations, so inspect the common fields.
+                            touched = set()
+                            for tx in payload.get("transactions") or []:
+                                candidates = [
+                                    tx.get("account"),
+                                    tx.get("account_address"),
+                                    tx.get("address"),
+                                ]
+                                account_obj = tx.get("account")
+                                if isinstance(account_obj, dict):
+                                    candidates.extend([
+                                        account_obj.get("address"),
+                                        account_obj.get("account_address"),
+                                    ])
+                                for candidate in candidates:
+                                    if candidate:
+                                        c = str(candidate)
+                                        if c in LIVE_POOL_ADDRESSES:
+                                            touched.add(c)
+
+                            # Some compatible stream implementations omit the repeated
+                            # account field when only one address matched. If so, mark
+                            # recently subscribed pools dirty conservatively only when
+                            # exactly one pool is watched.
+                            if not touched and len(LIVE_POOL_ADDRESSES) == 1:
+                                touched = set(LIVE_POOL_ADDRESSES)
+
+                            for pool in touched:
+                                _invalidate_live_pool_caches(pool)
+
+                            for swap in _decode_stream_swaps(payload, touched):
+                                _record_live_swap(swap["pool"], ts=swap["ts"], price=swap.get("price"),
+                                    amount_in=swap.get("amount_in"), amount_out=swap.get("amount_out"),
+                                    side=swap.get("side"), source=swap.get("source","ton"))
+
+                        elif msg.type in (
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.ERROR,
+                        ):
+                            raise ConnectionError("TON live stream disconnected")
+
+        except asyncio.CancelledError:
+            LIVE_STREAM_CONNECTED = False
+            raise
+        except Exception as exc:
+            LIVE_STREAM_CONNECTED = False
+            logger.warning("GRX live stream reconnecting after error: %s", exc)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+
+
+def _register_report_live_pool(report: dict) -> None:
+    dex = report.get("dex_data") or {}
+    pool = (
+        dex.get("chart_pair_address")
+        or dex.get("pair_address")
+        or dex.get("pairAddress")
+    )
+    _register_live_pool(pool)
+
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     jetton_info = await get_jetton_info(session, address)
@@ -2075,6 +2344,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     except Exception:
         logger.exception("Error loading TopBlast bonding curve data")
 
+    _register_report_live_pool(report)
     return report
 
 
@@ -3239,11 +3509,15 @@ async def main():
     init_db()
     logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON_ALERTS")
     watcher = asyncio.create_task(alert_watcher())
+    live_stream = asyncio.create_task(ton_live_stream_engine())
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
+        live_stream.cancel()
         try: await watcher
+        except asyncio.CancelledError: pass
+        try: await live_stream
         except asyncio.CancelledError: pass
 
 
