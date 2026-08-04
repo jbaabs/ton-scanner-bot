@@ -1713,17 +1713,20 @@ def build_report_keyboard(
     show_stats: bool = False,
 ):
     builder = InlineKeyboardBuilder()
-    row = []
 
-    if has_chart:
-        row.append(InlineKeyboardButton(text="📈 Chart", callback_data=f"tg:chart:{key}"))
-    row.append(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"tg:refresh:{key}"))
-    row.append(
+    # Primary action — full-width GRX Stats row.
+    builder.row(
         InlineKeyboardButton(
             text="◂ Scanner" if show_stats else "🔥 GRX Stats",
             callback_data=f"tg:stats:{key}",
         )
     )
+
+    # Scanner controls.
+    row = []
+    if has_chart:
+        row.append(InlineKeyboardButton(text="📈 Chart", callback_data=f"tg:chart:{key}"))
+    row.append(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"tg:refresh:{key}"))
     row.append(
         InlineKeyboardButton(
             text="✖ Holders" if show_holders else "👥 Holders",
@@ -2166,7 +2169,7 @@ async def handle_timeframe(callback: CallbackQuery):
 
 async def main():
     init_db()
-    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V4_CHART")
+    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON")
     await dp.start_polling(bot)
 
 
