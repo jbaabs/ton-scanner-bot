@@ -1026,32 +1026,104 @@ async def get_jetton_holders(
         return None
 
 
-async def get_ohlcv(
-    session: aiohttp.ClientSession, pool_address: str, timeframe_key: str, token_address: str | None = None
-) -> list | None:
-    preset = CHART_TIMEFRAMES.get(timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME])
-    url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/{preset['timeframe']}"
-    params = {"aggregate": preset["aggregate"], "limit": preset["limit"], "currency": "usd"}
-    # GeckoTerminal expects token=base or token=quote here (not a token address).
-    # DexScreener token-pair lookups normally expose the scanned jetton as baseToken.
-    # Requesting base prevents inverted TON/USD candles and, importantly, works for
-    # every selectable timeframe instead of returning a 4xx for an address value.
-    if token_address:
-        params["token"] = "base"
+def _resample_ohlcv(candles: list, factor: int) -> list:
+    """Combine chronological OHLCV candles into larger candles."""
+    if not candles or factor <= 1:
+        return candles or []
+    out = []
+    for i in range(0, len(candles), factor):
+        chunk = candles[i:i + factor]
+        if len(chunk) < factor:
+            continue
+        try:
+            ts = int(chunk[0][0])
+            o = float(chunk[0][1])
+            h = max(float(c[2]) for c in chunk)
+            l = min(float(c[3]) for c in chunk)
+            close = float(chunk[-1][4])
+            vol = sum(float(c[5] or 0) for c in chunk if len(c) > 5)
+            out.append([ts, o, h, l, close, vol])
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
 
-    try:
-        async with session.get(
-            url,
-            params=params,
-            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            items = (data.get("data") or {}).get("attributes", {}).get("ohlcv_list")
-            return sorted(items, key=lambda c: c[0]) if items else None
-    except (aiohttp.ClientError, TimeoutError):
+
+async def get_ohlcv(
+    session: aiohttp.ClientSession,
+    pool_address: str,
+    timeframe_key: str,
+    token_address: str | None = None,
+) -> list | None:
+    """Fetch chart candles with supported GeckoTerminal intervals and local resampling.
+
+    GeckoTerminal does not support every arbitrary aggregate. In particular,
+    30-minute and 4-day views are built from supported 15m and 1d candles.
+    """
+    requested = CHART_TIMEFRAMES.get(
+        timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME]
+    )
+
+    # (API timeframe, API aggregate, fetch limit, local resample factor)
+    route = {
+        "1m":  ("minute", 1,  60, 1),
+        "5m":  ("minute", 5,  60, 1),
+        "15m": ("minute", 15, 60, 1),
+        "30m": ("minute", 15, 120, 2),
+        "1h":  ("hour",   1,  60, 1),
+        "4h":  ("hour",   4,  60, 1),
+        "1d":  ("day",    1,  60, 1),
+        "4d":  ("day",    1, 120, 4),
+    }
+    api_tf, api_agg, api_limit, factor = route.get(
+        timeframe_key,
+        (requested["timeframe"], requested["aggregate"], requested["limit"], 1),
+    )
+
+    url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/{api_tf}"
+    params = {
+        "aggregate": api_agg,
+        "limit": api_limit,
+        "currency": "usd",
+        "token": "base",
+    }
+
+    async def _request(params_to_use):
+        try:
+            async with session.get(
+                url,
+                params=params_to_use,
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                items = (
+                    (data.get("data") or {})
+                    .get("attributes", {})
+                    .get("ohlcv_list")
+                )
+                return sorted(items, key=lambda c: c[0]) if items else None
+        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
+            return None
+
+    candles = await _request(params)
+
+    # Some pools expose the scanned jetton as quote rather than base.
+    # If base produces no candles, try quote before declaring the timeframe unavailable.
+    if not candles:
+        quote_params = dict(params)
+        quote_params["token"] = "quote"
+        candles = await _request(quote_params)
+
+    if not candles:
         return None
+
+    if factor > 1:
+        candles = _resample_ohlcv(candles, factor)
+
+    # Keep the visible chart clean and consistent.
+    display_limit = requested.get("limit", 60)
+    return candles[-display_limit:] if candles else None
 
 
 async def select_chart_pool(
@@ -1197,7 +1269,7 @@ async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> fl
     return max(highs) if highs else None
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -1215,8 +1287,21 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
     move_col=green if move>=0 else red
 
     fig=plt.figure(figsize=(8,5.0),dpi=150,facecolor=bg)
-    fig.text(.055,.92,f"{symbol} / USD",color=text,fontsize=16,fontweight="bold",ha="left",va="center")
-    fig.text(.055,.865,timeframe_label,color=muted,fontsize=10,ha="left",va="center")
+    title_x=.055
+    if token_icon_bytes:
+        try:
+            from PIL import Image, ImageDraw
+            icon=Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
+            side=min(icon.size); lx=(icon.width-side)//2; ty=(icon.height-side)//2
+            icon=icon.crop((lx,ty,lx+side,ty+side)).resize((128,128))
+            mask=Image.new("L",(128,128),0); ImageDraw.Draw(mask).ellipse((1,1,127,127),fill=255)
+            icon.putalpha(mask)
+            iax=fig.add_axes([.055,.865,.065,.065],zorder=20); iax.imshow(icon); iax.axis("off")
+            title_x=.132
+        except Exception:
+            pass
+    fig.text(title_x,.92,f"{symbol} / USD",color=text,fontsize=16,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.865,timeframe_label,color=muted,fontsize=10,ha="left",va="center")
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
     ax=fig.add_axes([.055,.12,.865,.67],facecolor=bg)
@@ -1275,8 +1360,28 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     fig.text(.965,.972,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
-    fig.text(.04,.925,f"{symbol} / USD",color=text,fontsize=14,fontweight="bold",ha="left",va="center")
-    fig.text(.04,.900,f"{timeframe_label}",color=muted,fontsize=8.5,ha="left",va="center")
+    # Token artwork + identity, DTrade-inspired but kept in GRX styling.
+    title_x = .04
+    if token_icon_bytes:
+        try:
+            from PIL import Image, ImageDraw
+            icon = Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
+            side = min(icon.size)
+            left = (icon.width - side) // 2
+            top_crop = (icon.height - side) // 2
+            icon = icon.crop((left, top_crop, left + side, top_crop + side)).resize((128, 128))
+            mask = Image.new("L", (128, 128), 0)
+            ImageDraw.Draw(mask).ellipse((1, 1, 127, 127), fill=255)
+            icon.putalpha(mask)
+            iax = fig.add_axes([.04, .895, .055, .055], zorder=20)
+            iax.imshow(icon)
+            iax.axis("off")
+            title_x = .108
+        except Exception:
+            pass
+
+    fig.text(title_x,.925,f"{symbol} / USD",color=text,fontsize=14,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.900,f"{timeframe_label}",color=muted,fontsize=8.5,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
     ax=fig.add_axes([.045,.595,.89,.275],facecolor=bg)
@@ -1422,6 +1527,9 @@ async def build_scan_photo(
         logger.exception("Error building GRX scan report card image")
         return None
 
+    # Cache the exact main dashboard image in-memory. Chart timeframe browsing can
+    # then return to the scanner instantly without re-fetching OHLCV or artwork.
+    report["_grx_scan_png"] = png_bytes
     return BufferedInputFile(png_bytes, filename="grx_scan.png")
 
 def parse_holders(holders_data: dict | None, total_supply: str | None) -> dict:
@@ -2719,8 +2827,17 @@ async def handle_toggle(callback: CallbackQuery):
             has_chart=bool(((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))),
             show_stats=False,
         )
-        async with aiohttp.ClientSession() as session:
-            chart_photo = await build_scan_photo(session, entry["report"])
+        cached_png = entry["report"].get("_grx_scan_png")
+        chart_photo = (
+            BufferedInputFile(cached_png, filename="grx_scan.png")
+            if cached_png
+            else None
+        )
+
+        # Only rebuild if this report predates the cached-card behaviour.
+        if chart_photo is None:
+            async with aiohttp.ClientSession() as session:
+                chart_photo = await build_scan_photo(session, entry["report"])
 
         if chart_photo:
             try:
@@ -2729,7 +2846,7 @@ async def handle_toggle(callback: CallbackQuery):
                 await callback.answer()
                 return
             except Exception:
-                logger.exception("Error restoring scan card in-place")
+                logger.exception("Error restoring cached scan card in-place")
 
         await callback.answer("Couldn't restore the scan card. Please refresh the token.", show_alert=True)
         return
@@ -2774,10 +2891,14 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         await callback.answer("Couldn't load chart data for this timeframe.", show_alert=True)
         return
 
+    async with aiohttp.ClientSession() as icon_session:
+        token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
+
     png_bytes = build_candlestick_chart(
         ohlcv,
         symbol,
         CHART_TIMEFRAMES[timeframe]["label"],
+        token_icon_bytes=token_icon,
     )
 
     media = InputMediaPhoto(
@@ -2916,10 +3037,14 @@ async def handle_timeframe(callback: CallbackQuery):
         await callback.answer("Couldn't load chart data for that timeframe.", show_alert=True)
         return
 
+    async with aiohttp.ClientSession() as icon_session:
+        token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
+
     png_bytes = build_candlestick_chart(
         ohlcv,
         symbol,
         CHART_TIMEFRAMES[timeframe]["label"],
+        token_icon_bytes=token_icon,
     )
 
     media = InputMediaPhoto(
