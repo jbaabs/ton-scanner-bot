@@ -1918,7 +1918,15 @@ def format_token_report(
 
     launch_emoji = _launchpad_emoji(report)
     dex_emoji = _dex_emoji(report)
-    title_emojis = " ".join(x for x in (dex_emoji, launch_emoji) if x)
+
+    # Pre-migration / still-bonding tokens should show their launchpad identity
+    # (TopBlast/Uranus/etc.) rather than the underlying DeDust pool emoji.
+    is_pre_migration = bool(bonding) and not bonding.get("bonded", False)
+    if is_pre_migration and launch_emoji:
+        title_emojis = launch_emoji
+    else:
+        title_emojis = " ".join(x for x in (dex_emoji, launch_emoji) if x)
+
     title_suffix = f" {title_emojis}" if title_emojis else ""
 
     links = _collect_links(report)
