@@ -54,6 +54,8 @@ LIVE_SWAPS: dict[str, list[dict]] = {}
 LIVE_SWAP_MAX_PER_POOL = 800
 GRX_CANDLE_BOOK: dict[tuple[str, str], list[list]] = {}
 GRX_CANDLE_BOOK_MAX = 500
+LAUNCHPAD_TRADE_CACHE: dict[str, tuple[float, list[dict]]] = {}
+LAUNCHPAD_TRADE_CACHE_TTL = 2.0
 
 def _record_live_swap(pool: str, *, ts: int, price=None, amount_in=None, amount_out=None, side=None, source="ton"):
     if not pool: return
@@ -1658,6 +1660,15 @@ async def get_routed_chart_data(
     launchpad = str(bonding.get("launchpad") or "").lower()
     pre_migration = bool(bonding) and not bonding.get("bonded", False)
 
+    # Pre-migration launchpad tokens need their bonding-curve transaction
+    # history, not an immature/empty DEX pool. Prefer that feed whenever DeDust
+    # exposes the underlying curve account; fall back safely if it does not.
+    if pre_migration and launchpad in {"topblast", "uranus", "groypfi"}:
+        launch_candles = await _get_launchpad_ohlcv(session, report, timeframe_key)
+        if launch_candles:
+            pseudo_pool = f"launchpad:{token_address or launchpad}"
+            return pseudo_pool, launch_candles, f"{launchpad}_ton_history"
+
     # For the 1m scanner card, inspect relevant TON pools so a thin/new
     # secondary pool cannot replace the established market.
     if timeframe_key == "1m":
@@ -1787,15 +1798,86 @@ def _calc_bonding_curve(collected, target) -> dict | None:
     }
 
 
-def _progress_bar(percent: float | None, size: int = 12) -> str:
+def _progress_bar(percent: float | None, size: int = 20) -> str:
+    """Compact Telegram-safe bonding bar with half-step visual resolution."""
     try:
         percent = max(0.0, min(float(percent), 100.0))
     except (ValueError, TypeError):
         percent = 0.0
+    units = (percent / 100.0) * size
+    full = int(units)
+    frac = units - full
+    partial = "▌" if frac >= 0.5 and full < size else ""
+    empty = max(0, size - full - (1 if partial else 0))
+    return "█" * full + partial + "░" * empty
 
-    filled = round((percent / 100.0) * size)
-    return "█" * filled + "░" * (size - filled)
 
+
+def _launchpad_trade_price_from_tx(tx: dict) -> tuple[float | None, float]:
+    """Best-effort extraction of an explicit execution price from decoded tx data.
+    We intentionally reject ambiguous transactions rather than invent candles."""
+    blob=tx if isinstance(tx,dict) else {}
+    candidates=[]
+    def walk(v):
+        if isinstance(v,dict):
+            # Common decoded/indexer field pairs.
+            token=None; quote=None
+            for k,val in v.items():
+                lk=str(k).lower()
+                if lk in {"token_amount","jetton_amount","amount_out","tokens","jettons"}:
+                    n=_num(val)
+                    if n and n>0: token=n
+                elif lk in {"ton_amount","gram_amount","amount_in","quote_amount","value"}:
+                    n=_num(val)
+                    if n and n>0: quote=n
+            if token and quote:
+                candidates.append((quote/token, quote))
+            for x in v.values(): walk(x)
+        elif isinstance(v,list):
+            for x in v: walk(x)
+    walk(blob)
+    if not candidates: return None,0.0
+    p,q=candidates[0]
+    return (p if p>0 else None),q
+
+async def _get_launchpad_account_transactions(session, account: str | None, limit: int = 100) -> list[dict]:
+    if not account: return []
+    cached=_ttl_get(LAUNCHPAD_TRADE_CACHE,account,LAUNCHPAD_TRADE_CACHE_TTL)
+    if cached is not None: return cached
+    # toncenter-style endpoint; existing TONCENTER_API_BASE/key config is reused.
+    try:
+        params={"address":account,"limit":min(max(limit,10),100),"archival":"true"}
+        headers={}
+        if TONCENTER_API_KEY:
+            headers["X-API-Key"]=TONCENTER_API_KEY
+        async with session.get(f"{TONCENTER_API_BASE}/getTransactions",params=params,headers=headers,
+                               timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+            if resp.status != 200: return []
+            payload=await resp.json()
+        rows=(payload.get("result") if isinstance(payload,dict) else None) or []
+        _ttl_put(LAUNCHPAD_TRADE_CACHE,account,rows)
+        return rows
+    except Exception:
+        return []
+
+async def _get_launchpad_ohlcv(session, report: dict, timeframe_key: str) -> list | None:
+    bonding=report.get("bonding_curve") or {}
+    account=bonding.get("curve_account") or bonding.get("coin_account")
+    txs=await _get_launchpad_account_transactions(session,account,100)
+    if not txs: return None
+    step=_timeframe_seconds(timeframe_key)
+    buckets={}
+    for tx in reversed(txs):
+        ts=int(_num(tx.get("utime") or tx.get("now") or tx.get("timestamp")) or 0)
+        price,vol=_launchpad_trade_price_from_tx(tx)
+        if not ts or not price: continue
+        b=(ts//step)*step
+        row=buckets.get(b)
+        if row is None: buckets[b]=[b,price,price,price,price,vol]
+        else:
+            row[2]=max(row[2],price); row[3]=min(row[3],price); row[4]=price; row[5]+=vol
+    rows=[buckets[k] for k in sorted(buckets)]
+    return rows[-120:] or None
 
 async def get_topblast_bonding_curve(
     session: aiohttp.ClientSession, address: str, symbol: str | None = None,
@@ -1885,6 +1967,16 @@ async def get_topblast_bonding_curve(
     bonding = _calc_bonding_curve(collected, target)
     if bonding is None:
         return None
+
+    # Preserve any explicit curve/coin account exposed by DeDust. This lets the
+    # chart router reconstruct pre-migration trades directly from TON history.
+    for key in ("curve_address","curve_account","coin_address","coin_account","address"):
+        value = extra.get(key) or item.get(key)
+        if value:
+            if "curve" in key:
+                bonding["curve_account"] = str(value)
+            elif key in {"coin_address","coin_account"}:
+                bonding["coin_account"] = str(value)
 
     # migration_date is set once the token has graduated to a DeDust pool,
     # even if curve math alone rounds just under 100%.
@@ -2958,9 +3050,22 @@ def format_token_report(
             link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">CG</a>")
             seen_labels.add("CG")
 
+    # Keep the social/link row visually centred beneath the token title.
+    # Telegram HTML has no text-align support, so use the same calculated
+    # monospace-style padding approach as the centred token title.
+    social_line = " • ".join(link_parts)
+    if social_line:
+        # Estimate visible characters only; HTML/custom-emoji markup itself
+        # must not affect the centring calculation.
+        visible_social = re.sub(r"<[^>]+>", "", social_line)
+        visible_social = html.unescape(visible_social)
+        target_width = 34
+        left_pad = max(0, (target_width - len(visible_social)) // 2)
+        social_line = ("\u2007" * left_pad) + social_line
+
     lines = [
         _centred_token_title(symbol, name, title_suffix),
-        *([ " • ".join(link_parts) ] if link_parts else []),
+        *([social_line] if social_line else []),
     ]
 
     if bonding and not bonding.get("bonded", False):
@@ -2968,8 +3073,8 @@ def format_token_report(
         lines += [
             "",
             "<b>🧨 Bonding Curve</b>",
-            f"<code>{html.escape(_progress_bar(percent, size=10))}</code> <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
-            f"Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} • Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')}",
+            f"<code>{html.escape(_progress_bar(percent, size=20))}</code>  <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
+            f"<b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} collected  •  <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')} left",
         ]
 
     if show_holders:
