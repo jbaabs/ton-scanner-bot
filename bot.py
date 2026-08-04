@@ -2028,7 +2028,9 @@ def _creator_details(report: dict) -> tuple[str | None, float | None]:
     """Best-effort creator/admin wallet + current holding from loaded holder data."""
     info = report.get("jetton_info") or {}
     creator = str(info.get("admin_address") or "").strip() or None
-    if not creator:
+    # TonAPI can expose the zero/null admin address for immutable jettons.
+    # That is not a real creator wallet and should never be shown as the dev.
+    if not creator or re.fullmatch(r"0:[0]+", creator):
         return None, None
     for holder in (report.get("holders") or {}).get("holders") or []:
         if _same_ton_address(creator, holder.get("address")):
@@ -2093,8 +2095,7 @@ def format_token_info(report: dict) -> str:
     ]
     if sources:
         lines += ["", "<b>Sources:</b> " + " · ".join(sources)]
-    lines += ["", "<i>Creator uses the jetton admin when exposed by TonAPI. Sold data is only shown when it can be verified.</i>"]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def format_token_report(
