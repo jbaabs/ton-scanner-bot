@@ -1171,7 +1171,10 @@ async def build_scan_photo(
     if not pool_address:
         return None
 
-    ohlcv = await get_ohlcv(session, pool_address, DEFAULT_CHART_TIMEFRAME)
+    # Main scanner card: always render 5-minute candles.
+    # The separate Chart button keeps its own selectable 5m / 1H / 4H / 1D state.
+    main_scan_timeframe = "5m"
+    ohlcv = await get_ohlcv(session, pool_address, main_scan_timeframe)
     if not ohlcv:
         return None
 
@@ -1181,7 +1184,7 @@ async def build_scan_photo(
         png_bytes = build_report_card(
             ohlcv,
             report,
-            CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME]["label"],
+            CHART_TIMEFRAMES[main_scan_timeframe]["label"],
             token_icon_bytes=token_icon,
         )
     except Exception:
@@ -1455,11 +1458,11 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         if pool_address:
             try:
                 gecko_changes = await get_gecko_price_changes(session, pool_address)
+                # Store the independent cross-check separately. Do NOT mutate
+                # V5's original dex_data fields here: the report-card/chart path
+                # expects those original values and should remain pixel/functionally
+                # identical to the working V5 build.
                 report["dex_data"]["gecko_price_changes"] = gecko_changes
-                for field in ("price_change_1h", "price_change_6h", "price_change_24h"):
-                    value = gecko_changes.get(field)
-                    if value is not None:
-                        report["dex_data"][field] = value
                 report["dex_data"]["price_change_source"] = (
                     gecko_changes.get("price_change_source")
                     if any(gecko_changes.get(k) is not None for k in (
