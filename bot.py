@@ -1032,10 +1032,12 @@ async def get_ohlcv(
     preset = CHART_TIMEFRAMES.get(timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME])
     url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/{preset['timeframe']}"
     params = {"aggregate": preset["aggregate"], "limit": preset["limit"], "currency": "usd"}
-    # Pin OHLCV to the scanned token so GeckoTerminal cannot accidentally invert
-    # a pool where the jetton is the quote side.
+    # GeckoTerminal expects token=base or token=quote here (not a token address).
+    # DexScreener token-pair lookups normally expose the scanned jetton as baseToken.
+    # Requesting base prevents inverted TON/USD candles and, importantly, works for
+    # every selectable timeframe instead of returning a 4xx for an address value.
     if token_address:
-        params["token"] = token_address
+        params["token"] = "base"
 
     try:
         async with session.get(
@@ -1196,66 +1198,49 @@ async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> fl
 
 
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
+    """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyBboxPatch
     from datetime import datetime, timezone
     from io import BytesIO
 
-    times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
-    opens = [float(c[1]) for c in ohlcv]
-    highs = [float(c[2]) for c in ohlcv]
-    lows = [float(c[3]) for c in ohlcv]
-    closes = [float(c[4]) for c in ohlcv]
-
-    bg = "#050b14"
-    panel = "#081426"
-    blue = "#168bff"
-    grid = "#17304a"
-    text = "#e8eef8"
-    muted = "#9aa9bd"
-    green = "#16c7ad"
-    red = "#ff5260"
-
-    fig = plt.figure(figsize=(8, 5.1), dpi=150, facecolor=bg)
-    panel_patch = FancyBboxPatch((.018,.025),.964,.95, transform=fig.transFigure,
-        boxstyle="round,pad=0.004,rounding_size=0.018", facecolor=panel,
-        edgecolor=blue, linewidth=1.1, zorder=-5)
-    fig.add_artist(panel_patch)
-    ax = fig.add_axes([.065,.14,.865,.72])
-    ax.set_facecolor(panel)
-
-    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
-        col = green if c >= o else red
-        ax.plot([i,i],[l,h],color=col,linewidth=1.05)
-        bottom=min(o,c)
-        height=abs(c-o) or max((h-l)*.01,h*.0005,1e-12)
-        ax.add_patch(plt.Rectangle((i-.3,bottom),.6,height,facecolor=col,edgecolor=col,linewidth=0))
-
-    tick_count=min(6,len(ohlcv))
-    tick_idx=([round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0])
-    tick_idx=sorted(set(tick_idx))
-    fmt="%H:%M" if timeframe_label in ("1m","5m","1H","4H") else "%b %d"
-    ax.set_xticks(tick_idx)
-    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx],color=muted,fontsize=8)
-    ax.tick_params(axis="y",colors=muted,labelsize=8)
-    ax.yaxis.tick_right()
-    ax.grid(True,color=grid,linewidth=.55,alpha=.8)
-    for sp in ax.spines.values(): sp.set_color("#20476c")
-
+    times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
+    opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
+    lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
+    bg="#050607"; text="#f3f5f7"; muted="#8d939c"; grid="#202327"
+    green="#42c99a"; red="#f06468"
     first=closes[0]; last=closes[-1]
-    pct=((last-first)/first*100) if first else 0
-    delta=last-first
-    move_col=green if delta>=0 else red
-    fig.text(.065,.915,f"{symbol} / TON  ·  {timeframe_label}",color=text,fontsize=13,fontweight='bold',ha='left')
-    fig.text(.43,.915,_fmt_price(last),color=move_col,fontsize=12,fontweight='bold',ha='left')
-    fig.text(.60,.915,f"{delta:+.6g}  ({pct:+.2f}%)",color=move_col,fontsize=11,ha='left')
+    move=((last-first)/first*100) if first else 0.0
+    move_col=green if move>=0 else red
 
-    buf=BytesIO()
-    fig.savefig(buf,format="png",facecolor=bg)
-    plt.close(fig)
-    return buf.getvalue()
+    fig=plt.figure(figsize=(8,5.0),dpi=150,facecolor=bg)
+    fig.text(.055,.92,f"{symbol} / USD",color=text,fontsize=16,fontweight="bold",ha="left",va="center")
+    fig.text(.055,.865,timeframe_label,color=muted,fontsize=10,ha="left",va="center")
+    fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
+
+    ax=fig.add_axes([.055,.12,.865,.67],facecolor=bg)
+    width=.66 if len(ohlcv)<=80 else .52
+    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
+        col=green if c>=o else red
+        ax.plot([i,i],[l,h],color=col,linewidth=1.0,solid_capstyle="round")
+        bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
+        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
+
+    ax.set_xlim(-1,len(ohlcv)+2.5)
+    pad=max((max(highs)-min(lows))*.08,abs(last)*.015,1e-12)
+    ax.set_ylim(min(lows)-pad,max(highs)+pad)
+    ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
+    ids=sorted(set(ids)); fmt="%H:%M" if timeframe_label.lower() in ("1m","5m","15m","30m","1h","4h") else "%b %d"
+    ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
+    ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
+    ax.yaxis.tick_right(); ax.grid(axis="y",color=grid,linewidth=.65,alpha=.72); ax.grid(axis="x",visible=False)
+    for sp in ax.spines.values(): sp.set_visible(False)
+    ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
+    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.85,last),textcoords="data",
+                ha="left",va="center",fontsize=8.5,color="#ffffff",
+                bbox=dict(boxstyle="round,pad=.28",fc=move_col,ec="none"),clip_on=False)
+    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
 
 
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None) -> bytes:
@@ -1291,7 +1276,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
     fig.text(.04,.925,f"{symbol} / USD",color=text,fontsize=14,fontweight="bold",ha="left",va="center")
-    fig.text(.04,.900,f"{timeframe_label} candles",color=muted,fontsize=8.5,ha="left",va="center")
+    fig.text(.04,.900,f"{timeframe_label}",color=muted,fontsize=8.5,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
     ax=fig.add_axes([.045,.595,.89,.275],facecolor=bg)
