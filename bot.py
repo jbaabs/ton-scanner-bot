@@ -682,6 +682,85 @@ def get_snapshot_near(report: dict, seconds_ago: int) -> dict | None:
     return dict(row) if row else None
 
 
+
+def get_snapshot_after(report: dict, seconds_ago: int) -> dict | None:
+    """Nearest snapshot to the requested rolling-window boundary."""
+    token_key = _history_key(report)
+    if not token_key:
+        return None
+    target = int(time.time()) - seconds_ago
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        """
+        SELECT * FROM token_snapshots
+        WHERE token_key = ?
+        ORDER BY ABS(snapshot_ts - ?) ASC
+        LIMIT 1
+        """,
+        (token_key, target),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_ath_mcap_since(report: dict, since_ts: int | None) -> float | None:
+    token_key = _history_key(report)
+    if not token_key or not since_ts:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        """
+        SELECT MAX(market_cap) FROM token_snapshots
+        WHERE token_key = ? AND snapshot_ts >= ? AND market_cap IS NOT NULL
+        """,
+        (token_key, int(since_ts)),
+    ).fetchone()
+    conn.close()
+    snap_max = _as_float(row[0]) if row else None
+    current = _as_float((report.get("dex_data") or {}).get("market_cap"))
+    vals = [v for v in (snap_max, current) if v is not None]
+    return max(vals) if vals else None
+
+
+def _live_trade_metrics(report: dict, seconds: int = 300) -> dict:
+    """Use GRX-observed swaps only when side + usable notional are explicit.
+    Never fabricate money-flow from transaction counts."""
+    dex = report.get("dex_data") or {}
+    pool = dex.get("chart_pair_address") or dex.get("pair_address")
+    if not pool:
+        return {"trades": None, "buy_pressure": None, "net_flow": None}
+    cutoff = time.time() - seconds
+    buys = sells = 0
+    buy_value = sell_value = 0.0
+    valued = 0
+    for s in LIVE_SWAPS.get(pool, ()):
+        if s.get("ts", 0) < cutoff:
+            continue
+        side = s.get("side")
+        if side == "buy":
+            buys += 1
+        elif side == "sell":
+            sells += 1
+        # Only value a swap when decoder supplied an explicit price and amount.
+        # amount_out/in asset identity is not guaranteed, so use notional only
+        # when a positive explicit price exists and a positive amount is present.
+        price = _as_float(s.get("price"))
+        amount = _as_float(s.get("amount_out")) or _as_float(s.get("amount_in"))
+        if side in ("buy", "sell") and price and price > 0 and amount and amount > 0:
+            notional = price * amount
+            if 0 < notional < 1e12:
+                valued += 1
+                if side == "buy":
+                    buy_value += notional
+                else:
+                    sell_value += notional
+    trades = buys + sells
+    pressure = (buy_value / (buy_value + sell_value) * 100.0) if valued and (buy_value + sell_value) > 0 else None
+    flow = (buy_value - sell_value) if valued else None
+    return {"trades": trades if trades else None, "buy_pressure": pressure, "net_flow": flow}
+
+
 def save_recent_chat_scan(message: Message, report: dict, sent_message: Message) -> None:
     token_key = _history_key(report)
     if not token_key:
@@ -769,71 +848,92 @@ def format_grx_stats(report: dict) -> str:
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
     symbol = html.escape(str(info.get("symbol") or "???"))
-    name = html.escape(str(info.get("name") or "Unknown"))
 
-    snap_5m = get_snapshot_near(report, 5 * 60)
-    snap_10m = get_snapshot_near(report, 10 * 60)
+    snap_5m = get_snapshot_after(report, 5 * 60)
+    snap_10m = get_snapshot_after(report, 10 * 60)
+
+    # Rolling volume: current provider 5m bucket vs the 5m bucket recorded
+    # around five minutes ago. Suppress false -100% when either side is absent.
+    now_v5 = _as_float(dex.get("volume_5m"))
+    old_v5 = _as_float((snap_5m or {}).get("volume_5m"))
+    vol_change = _pct_change(now_v5, old_v5) if now_v5 is not None and old_v5 not in (None, 0) else None
 
     holder_now = int(info.get("holders_count") or 0)
-    holder_delta = None
-    if snap_10m and snap_10m.get("holders_count") is not None:
-        holder_delta = holder_now - int(snap_10m.get("holders_count") or 0)
+    old_holders = (snap_10m or {}).get("holders_count")
+    holder_delta = holder_now - int(old_holders) if old_holders is not None else None
 
     top_now = _as_float(holders.get("top_concentration"))
     top_old = _as_float((snap_10m or {}).get("top10_pct"))
-    top_delta = (top_now - top_old) if top_now is not None and top_old is not None else None
+    top_delta = top_now - top_old if top_now is not None and top_old is not None else None
 
     liq_change = _pct_change(dex.get("liquidity_usd"), (snap_10m or {}).get("liquidity_usd"))
-    vol_change = _pct_change(dex.get("volume_5m"), (snap_5m or {}).get("volume_5m"))
+    price_change = _pct_change(dex.get("price_usd"), (snap_10m or {}).get("price_usd"))
 
+    live = _live_trade_metrics(report, 5 * 60)
     tx5 = dex.get("txns_5m") or {}
-    buys = int(tx5.get("buys") or 0)
-    sells = int(tx5.get("sells") or 0)
-    tx_total = buys + sells
-    buy_pressure = (buys / tx_total * 100.0) if tx_total else None
+    provider_buys = int(tx5.get("buys") or 0)
+    provider_sells = int(tx5.get("sells") or 0)
+    provider_total = provider_buys + provider_sells
+
+    # Prefer GRX's decoded swap stream. Provider counts are a fallback for
+    # trade count / pressure only; Net Flow is never guessed from counts.
+    trades_5m = live.get("trades") if live.get("trades") is not None else (provider_total or None)
+    buy_pressure = live.get("buy_pressure")
+    if buy_pressure is None and provider_total:
+        buy_pressure = provider_buys / provider_total * 100.0
+    net_flow = live.get("net_flow")
 
     first = get_first_scan_resolved(report)
-    first_mc = _as_float(str((first or {}).get("scan_market_cap") or "").replace("$", "").replace(",", "").replace("K", "000").replace("M", "000000"))
-    # Prefer reconstructing first MC from formatted history safely below.
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
-    current_mc = _as_float(dex.get("market_cap"))
 
-    def parse_compact_usd(text):
-        if not text or text == "N/A":
+    def parse_compact_usd(value):
+        if not value or value == "N/A":
             return None
-        t = str(text).replace("$", "").replace(",", "").strip().upper()
+        t = str(value).replace("$", "").replace(",", "").strip().upper()
         mult = 1
         if t.endswith("K"):
             mult, t = 1_000, t[:-1]
         elif t.endswith("M"):
             mult, t = 1_000_000, t[:-1]
+        elif t.endswith("B"):
+            mult, t = 1_000_000_000, t[:-1]
         try:
             return float(t) * mult
         except ValueError:
             return None
 
+    current_mc = _as_float(dex.get("market_cap"))
     first_mc_value = parse_compact_usd(first_mc_text)
-    call_change = _pct_change(current_mc, first_mc_value)
+    performance = _pct_change(current_mc, first_mc_value)
+    ath_since = get_ath_mcap_since(report, (first or {}).get("scan_ts"))
+    ath_perf = _pct_change(ath_since, first_mc_value)
+
+    def signed(v, suffix="%", decimals=1):
+        if v is None:
+            return "Collecting data"
+        return f"{v:+.{decimals}f}{suffix}"
 
     lines = [
         f"<b>🔥 GRX SIGNALS — {symbol}</b>",
-        f"<i>{name}</i>",
         "",
-        f"📊 5m Volume: <b>{_fmt_signal_change(vol_change)}</b>",
-        *(
-            [f"🚀 Since available history: <b>{_fmt_pct((dex.get('gecko_price_changes') or {}).get('price_change_available'))}</b>"]
-            if (dex.get("gecko_price_changes") or {}).get("price_change_available") is not None
-            and ((dex.get("gecko_price_changes") or {}).get("available_history_hours") or 999) < 24
-            else []
-        ),
-        f"{_ce('holders', '👥')} Holders 10m: <b>{('+' if holder_delta is not None and holder_delta >= 0 else '') + str(holder_delta) if holder_delta is not None else 'Collecting data'}</b>",
-        f"🐋 Top 10 10m: <b>{(f'{top_delta:+.2f} pts' if top_delta is not None else 'Collecting data')}</b>",
-        f"{_ce('buy', '🟢')} Buy Pressure 5m: <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'N/A')}</b>",
-        f"{_ce('liquidity', '💧')} Liquidity 10m: <b>{_fmt_signal_change(liq_change)}</b>",
-        f"{_ce('mcap', '📈')} MC since call: <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
-        f"🔥 Call performance: <b>{(_fmt_pct(call_change) if call_change is not None else 'N/A')}</b>",
+        "<b>MOMENTUM</b>",
+        f"5m Volume        <b>{signed(vol_change)}</b>",
+        f"Buy Pressure     <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'Collecting data')}</b>",
+        f"Net Flow         <b>{(_fmt_usd(net_flow) if net_flow is not None else 'Collecting data')}</b>",
+        f"Trades 5m        <b>{(f'{trades_5m:,}' if trades_5m is not None else 'Collecting data')}</b>",
         "",
-        "<i>GRX Stats improve as GRX collects more snapshots of the token.</i>",
+        "<b>HOLDERS</b>",
+        f"Holders 10m      <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
+        f"Top 10           <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
+        "",
+        "<b>MARKET</b>",
+        f"Liquidity 10m    <b>{signed(liq_change)}</b>",
+        f"Price 10m        <b>{signed(price_change)}</b>",
+        "",
+        "<b>CALL</b>",
+        f"Performance      <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
+        f"ATH Since Call   <b>{(_fmt_pct(ath_perf) if ath_perf is not None else 'Collecting data')}</b>",
+        f"MC Since Call    <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
     ]
     return "\n".join(lines)
 
@@ -1562,64 +1662,59 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
     else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
 
-    # Auto-fit stat cards aligned to the exact same two-column split as
-    # MARKET PULSE / FIRST CALLED BY above.
-    rows=[
-      (("PRICE",_fmt_price_compact(dex.get("price_usd")),text),("1H CHANGE",_fmt_pct(h1),pc(h1))),
-      (("MARKET CAP",_fmt_usd(dex.get("market_cap")),text),("24H CHANGE",_fmt_pct(h24),pc(h24))),
-      (("AGE",age,text),("VOLUME 24H",_fmt_usd(dex.get("volume_24h")),text)),
-      (("LIQUIDITY",_fmt_usd(dex.get("liquidity_usd")),text),("ATH",_fmt_usd(dex.get("ath_market_cap")),text)),
-      (("BUYS",f"{buys:,}  ·  {buy_pct:.0f}%",green),("SELLS",f"{sells:,}  ·  {sell_pct:.0f}%",red)),
-      (("HOLDERS",_fmt_num(info.get("holders_count")),text),("TOP 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
+    # Compact 3 x 2 stat grid on each side. The centre split remains aligned
+    # exactly with MARKET PULSE / FIRST CALLED BY, but the previous dead space
+    # is filled horizontally.
+    left_stats = [
+        ("PRICE", _fmt_price_compact(dex.get("price_usd")), text),
+        ("MARKET CAP", _fmt_usd(dex.get("market_cap")), text),
+        ("AGE", age, text),
+        ("LIQUIDITY", _fmt_usd(dex.get("liquidity_usd")), text),
+        ("BUYS", f"{buys:,} · {buy_pct:.0f}%", green),
+        ("HOLDERS", _fmt_num(info.get("holders_count")), text),
+    ]
+    right_stats = [
+        ("1H CHANGE", _fmt_pct(h1), pc(h1)),
+        ("24H CHANGE", _fmt_pct(h24), pc(h24)),
+        ("VOLUME 24H", _fmt_usd(dex.get("volume_24h")), text),
+        ("ATH", _fmt_usd(dex.get("ath_market_cap")), text),
+        ("SELLS", f"{sells:,} · {sell_pct:.0f}%", red),
+        ("TOP 10", f"{top10:.2f}%" if top10 is not None else "N/A", text),
     ]
 
-    # Measure the actual rendered label/value widths. This avoids values such
-    # as "1,471 · 61%" escaping a card while keeping short stats compact.
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    # Two halves, each containing 3 columns x 2 rows.
+    half_left_x, half_right_x = .025, .51
+    half_w = .465
+    col_gap = .007
+    row_gap = .010
+    grid_top = .425
+    grid_bottom = .185
+    card_h = (grid_top - grid_bottom - row_gap) / 2
+    card_w = (half_w - 2 * col_gap) / 3
 
-    def _text_width_fig(s, fontsize, fontweight="bold"):
-        probe = fig.text(0, 0, str(s), fontsize=fontsize, fontweight=fontweight,
-                         alpha=0.0, transform=fig.transFigure)
-        try:
-            bbox = probe.get_window_extent(renderer=renderer)
-            return bbox.width / fig.bbox.width
-        finally:
-            probe.remove()
+    def draw_grid(stats, x0):
+        for idx, (label, val, col) in enumerate(stats):
+            row = idx // 3
+            column = idx % 3
+            x = x0 + column * (card_w + col_gap)
+            y = grid_top - (row + 1) * card_h - row * row_gap
+            box(x, y, card_w, card_h, fc=cell, ec=line, lw=.72, r=.009)
 
-    def stat_card_width(label, value, value_fs):
-        label_w = _text_width_fig(label, 8.4)
-        value_w = _text_width_fig(value, value_fs)
-        # 0.014 padding on each side plus a tiny safety margin for antialiasing.
-        return max(.105, label_w + .034, value_w + .034)
+            value = str(val)
+            # Adaptive type keeps every value inside a fixed uniform card.
+            fs = 11.2
+            if len(value) > 11:
+                fs = 9.9
+            if len(value) > 15:
+                fs = 8.8
 
-    top=.425; bottom=.035; gap=.008; rh=(top-bottom-gap*5)/6
+            fig.text(x + .010, y + card_h * .68, label, color=muted,
+                     fontsize=7.1, fontweight="bold", ha="left", va="center")
+            fig.text(x + .010, y + card_h * .30, value, color=col,
+                     fontsize=fs, fontweight="bold", ha="left", va="center")
 
-    # Match the split above: left starts at .025, right starts at .51.
-    left_x=.025
-    right_x=.51
-
-    for r,(left,right) in enumerate(rows):
-        y=top-(r+1)*rh-r*gap
-        for x,(label,val,col) in ((left_x,left),(right_x,right)):
-            value_len=len(str(val))
-            fs=12.8 if value_len<=10 else 11.8 if value_len<=14 else 10.8
-            cw=stat_card_width(label,val,fs)
-
-            # Never allow a card to cross the centre split or right dashboard edge.
-            max_w=(.49-x) if x==left_x else (.975-x)
-            if cw > max_w:
-                # Preserve padding and shrink only as a last resort.
-                while fs > 8.8 and stat_card_width(label,val,fs) > max_w:
-                    fs -= .4
-                cw=min(stat_card_width(label,val,fs),max_w)
-
-            box(x,y,cw,rh,fc=cell,ec=line,lw=.72,r=.009)
-            pad=.012
-            fig.text(x+pad,y+rh*.68,label,color=muted,fontsize=8.4,fontweight="bold",
-                     ha="left",va="center")
-            fig.text(x+pad,y+rh*.29,val,color=col,fontsize=fs,fontweight="bold",
-                     ha="left",va="center")
+    draw_grid(left_stats, half_left_x)
+    draw_grid(right_stats, half_right_x)
 
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
