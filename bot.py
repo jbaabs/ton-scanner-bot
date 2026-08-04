@@ -1308,11 +1308,14 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # Chart
     box(.025,.555,.95,.385,fc=panel)
-    fig.text(.05,.918,f"{symbol}/TON  ·  {timeframe_label}",color=text,fontsize=11.5,fontweight="bold",ha="left")
+    fig.text(.05,.918,f"{symbol}/TON  ·  {timeframe_label}",color=text,fontsize=10.8,fontweight="bold",ha="left",va="center")
     last=closes[-1] if closes else 0
     first_close=closes[0] if closes else 0
     move=((last-first_close)/first_close*100) if first_close else 0
-    fig.text(.95,.918,f"{_fmt_price(last)}   {move:+.2f}%",color=pct_col(move),fontsize=10.5,fontweight="bold",ha="right")
+    # Keep the right-side quote safely inside the chart border.
+    quote_text = f"{_fmt_price_compact(last)}  {move:+.2f}%"
+    fig.text(.935,.918,quote_text,color=pct_col(move),fontsize=9.4,
+             fontweight="bold",ha="right",va="center")
     ax=fig.add_axes([.055,.59,.87,.29],facecolor=panel2)
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
@@ -1361,12 +1364,12 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     row_h=(grid_top-grid_bottom-gap*5)/6
     left_x=.025; right_x=.505; col_w=.47
     stat_rows=[
-        (("💰","Price",_fmt_price_compact(dex.get("price_usd")),text),("%","1H Change",_fmt_pct(h1),pct_col(h1))),
-        (("▥","MCap",_fmt_usd(dex.get("market_cap")),text),("🔥","24H Change",_fmt_pct(h24),pct_col(h24))),
-        (("▣","Age",age,text),("▥","Volume",_fmt_usd(dex.get("volume_24h")),text)),
-        (("●","LP",_fmt_usd(dex.get("liquidity_usd")),text),("🚀","ATH",_fmt_usd(dex.get("ath_market_cap")),text)),
+        (("$","Price",_fmt_price_compact(dex.get("price_usd")),text),("%","1H Change",_fmt_pct(h1),pct_col(h1))),
+        (("MC","MCap",_fmt_usd(dex.get("market_cap")),text),("🔥","24H Change",_fmt_pct(h24),pct_col(h24))),
+        (("AGE","Age",age,text),("▥","Volume",_fmt_usd(dex.get("volume_24h")),text)),
+        (("LP","LP",_fmt_usd(dex.get("liquidity_usd")),text),("🚀","ATH",_fmt_usd(dex.get("ath_market_cap")),text)),
         (("BUY","Buys",f"{buys:,} ({buy_pct:.0f}%)",green),("SELL","Sells",f"{sells:,} ({sell_pct:.0f}%)",red)),
-        (("●","Holders",_fmt_num(info.get("holders_count")),text),("◆","Top 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
+        (("HLD","Holders",_fmt_num(info.get("holders_count")),text),("◆","Top 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
     ]
     for r,(left,right) in enumerate(stat_rows):
         y=grid_top-(r+1)*row_h-r*gap
@@ -1374,7 +1377,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             icon,label,val,col=item
             box(x,y,col_w,row_h,fc=cell,ec=border,lw=.65,r=.009)
             fig.text(x+.018,y+row_h/2,icon,color=blue if icon not in ("BUY","SELL") else col,
-                     fontsize=8.5 if icon in ("BUY","SELL") else 11,fontweight="bold",ha="left",va="center")
+                     fontsize=7.4,fontweight="bold",ha="left",va="center")
             fig.text(x+.075,y+row_h/2,label,color=text,fontsize=9.3,ha="left",va="center")
             fig.text(x+col_w-.018,y+row_h/2,val,color=col,fontsize=9.6,fontweight="bold",ha="right",va="center")
 
