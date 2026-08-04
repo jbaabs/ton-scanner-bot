@@ -1312,7 +1312,8 @@ def _progress_bar(percent: float | None, size: int = 12) -> str:
 
 
 async def get_topblast_bonding_curve(
-    session: aiohttp.ClientSession, address: str, symbol: str | None = None
+    session: aiohttp.ClientSession, address: str, symbol: str | None = None,
+    source_hints: list[str] | None = None,
 ) -> dict | None:
     """Pulls live bonding-curve progress for a TopBlast / Uranus-style TON
     memepad token straight from DeDust's public backend.
@@ -1360,13 +1361,26 @@ async def get_topblast_bonding_curve(
     # Preserve source metadata returned by DeDust. Different memepad frontends
     # can share the same underlying DeDust curve, so classification is based on
     # explicit URLs/source text when available rather than guessing from curve data.
+    # Search the complete DeDust payload, not only a handful of fields.  The
+    # memepad source is not consistently returned in the same key.  Also fold
+    # in token/DexScreener metadata supplied by scan_token so launchpad links
+    # in website/social fields can identify a pre-migration token.
+    def _flatten_source(value) -> list[str]:
+        if isinstance(value, dict):
+            parts = []
+            for k, v in value.items():
+                parts.append(str(k))
+                parts.extend(_flatten_source(v))
+            return parts
+        if isinstance(value, (list, tuple, set)):
+            parts = []
+            for v in value:
+                parts.extend(_flatten_source(v))
+            return parts
+        return [str(value or "")]
+
     source_blob = " ".join(
-        str(v or "") for v in (
-            item.get("website"), item.get("url"), item.get("source"),
-            item.get("platform"), item.get("launcher"), item.get("launchpad"),
-            extra.get("website"), extra.get("url"), extra.get("source"),
-            extra.get("platform"), extra.get("launcher"), extra.get("launchpad"),
-        )
+        _flatten_source(item) + _flatten_source(extra) + list(source_hints or [])
     ).lower()
     collected_nano = extra.get("curve_ton_collected")
     target_nano = extra.get("curve_ton_max")
@@ -1391,13 +1405,33 @@ async def get_topblast_bonding_curve(
     if extra.get("migration_date"):
         bonding["bonded"] = True
 
-    if "topblast" in source_blob:
+    if "topblast" in source_blob or "topblast.lol" in source_blob:
         bonding["launchpad"] = "topblast"
     elif "groyp" in source_blob:
         bonding["launchpad"] = "groypfi"
-    elif "uranus" in source_blob or "x1000.finance" in source_blob:
+    elif (
+        "uranus" in source_blob
+        or "x1000.finance" in source_blob
+        or "x1000" in source_blob
+    ):
         bonding["launchpad"] = "uranus"
     return bonding
+
+
+def _flatten_source_hint(value) -> list[str]:
+    """Flatten token/social metadata into searchable launchpad source hints."""
+    if isinstance(value, dict):
+        parts = []
+        for k, v in value.items():
+            parts.append(str(k))
+            parts.extend(_flatten_source_hint(v))
+        return parts
+    if isinstance(value, (list, tuple, set)):
+        parts = []
+        for v in value:
+            parts.extend(_flatten_source_hint(v))
+        return parts
+    return [str(value or "")]
 
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
@@ -1543,8 +1577,22 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         # Prefer the canonical jetton-master address TonAPI resolved (more
         # reliable than whatever format the user/ticker-search handed us).
         canonical_address = (jetton_info or {}).get("metadata", {}).get("address")
+        # Feed every known website/social/DEX URL into launchpad detection.
+        # This fixes TopBlast/Uranus custom emojis when DeDust exposes the curve
+        # but omits a dedicated launchpad field.
+        source_hints = []
+        info_for_hints = report.get("jetton_info") or {}
+        dex_for_hints = report.get("dex_data") or {}
+        for value in (
+            info_for_hints.get("website"), info_for_hints.get("telegram"),
+            info_for_hints.get("twitter"), dex_for_hints.get("dex_url"),
+            dex_for_hints.get("websites"), dex_for_hints.get("socials"),
+        ):
+            source_hints.extend(_flatten_source_hint(value))
+
         bonding_curve = await get_topblast_bonding_curve(
-            session, canonical_address or address, symbol=symbol
+            session, canonical_address or address, symbol=symbol,
+            source_hints=source_hints,
         )
         if bonding_curve and not bonding_curve.get("bonded", False):
             report["bonding_curve"] = bonding_curve
@@ -1890,6 +1938,20 @@ def _coingecko_url(report: dict) -> str | None:
             return url
     return None
 
+def _centred_token_title(symbol: str, name: str, suffix: str = "", width: int = 30) -> str:
+    """Visually centre only the token title in Telegram's message column.
+
+    Figure spaces are used so Telegram does not collapse/trim the padding.
+    The rest of the report remains left aligned.
+    """
+    visible = f"{symbol} • {name}"
+    # HTML entities/tags are not included in symbol/name at this point beyond
+    # escaping, so this is intentionally an approximate visual width.
+    plain_len = len(html.unescape(visible))
+    pad = max(0, (width - plain_len) // 2)
+    return (" " * pad) + f"<b>{visible}</b>{suffix}"
+
+
 def format_token_report(
     report: dict,
     show_info: bool = False,
@@ -1966,7 +2028,7 @@ def format_token_report(
             seen_labels.add("CG")
 
     lines = [
-        f"<b>{symbol} • {name}</b>{title_suffix}",
+        _centred_token_title(symbol, name, title_suffix),
         f"<code>{html.escape(address)}</code>",
         *([ " • ".join(link_parts), "" ] if link_parts else [""]),
         f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
