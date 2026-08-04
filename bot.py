@@ -1422,6 +1422,40 @@ async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None)
         return None
 
 
+async def get_routed_chart_data(
+    session: aiohttp.ClientSession, report: dict, timeframe_key: str
+) -> tuple[str | None, list | None, str]:
+    """Route chart data by token lifecycle.
+
+    Pre-migration TopBlast/x1000 (Uranus) tokens are identified from the shared
+    DeDust memepad backend.  Their native frontends do not expose a documented
+    public OHLCV API, so GeckoTerminal is used only when it has indexed a usable
+    pool.  Migrated tokens use GeckoTerminal directly.  DexScreener remains
+    discovery/metadata/fallback, not the candle source.
+    """
+    dex = report.get("dex_data") or {}
+    fallback_pool = dex.get("pair_address")
+    bonding = report.get("bonding_curve") or {}
+    launchpad = str(bonding.get("launchpad") or "").lower()
+    pre_migration = bool(bonding) and not bonding.get("bonded", False)
+
+    # For the 1m scanner card, inspect relevant TON pools so a thin/new
+    # secondary pool cannot replace the established market.
+    if timeframe_key == "1m":
+        pool, candles = await select_chart_pool(
+            session, dex.get("chart_pair_candidates") or [], fallback_pool
+        )
+    else:
+        pool = dex.get("chart_pair_address") or fallback_pool
+        candles = await get_ohlcv(session, pool, timeframe_key) if pool else None
+
+    if pre_migration and launchpad in {"topblast", "uranus", "groypfi"}:
+        source = f"{launchpad}_via_geckoterminal" if candles else f"{launchpad}_unavailable"
+    else:
+        source = "geckoterminal" if candles else "unavailable"
+    return pool, candles, source
+
+
 async def build_scan_photo(
     session: aiohttp.ClientSession, report: dict
 ) -> BufferedInputFile | None:
@@ -1434,11 +1468,12 @@ async def build_scan_photo(
     # Main scanner card: render true 1-minute candles from the best usable pool.
     # The separate Chart button keeps its selectable timeframe state.
     main_scan_timeframe = "1m"
-    chart_pool, ohlcv = await select_chart_pool(
-        session, dex.get("chart_pair_candidates") or [], pool_address
+    chart_pool, ohlcv, chart_source = await get_routed_chart_data(
+        session, report, main_scan_timeframe
     )
     if chart_pool:
         dex["chart_pair_address"] = chart_pool
+    dex["chart_source"] = chart_source
     if not ohlcv:
         return None
 
@@ -2806,7 +2841,12 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     await callback.answer("Loading chart...")
 
     async with aiohttp.ClientSession() as session:
-        ohlcv = await get_ohlcv(session, pool_address, timeframe)
+        routed_pool, ohlcv, chart_source = await get_routed_chart_data(
+            session, entry["report"], timeframe
+        )
+        if routed_pool:
+            (entry["report"].get("dex_data") or {})["chart_pair_address"] = routed_pool
+        (entry["report"].get("dex_data") or {})["chart_source"] = chart_source
 
     if not ohlcv:
         await callback.answer("Couldn't load chart data for this timeframe.", show_alert=True)
@@ -2943,7 +2983,12 @@ async def handle_timeframe(callback: CallbackQuery):
     await callback.answer("Loading chart...")
 
     async with aiohttp.ClientSession() as session:
-        ohlcv = await get_ohlcv(session, pool_address, timeframe)
+        routed_pool, ohlcv, chart_source = await get_routed_chart_data(
+            session, entry["report"], timeframe
+        )
+        if routed_pool:
+            (entry["report"].get("dex_data") or {})["chart_pair_address"] = routed_pool
+        (entry["report"].get("dex_data") or {})["chart_source"] = chart_source
 
     if not ohlcv:
         await callback.answer("Couldn't load chart data for that timeframe.", show_alert=True)
