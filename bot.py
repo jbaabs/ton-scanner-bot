@@ -1048,6 +1048,49 @@ async def get_ohlcv(
         return None
 
 
+async def select_chart_pool(
+    session: aiohttp.ClientSession, dex_pairs: list[dict], fallback_pool: str | None
+) -> tuple[str | None, list | None]:
+    """Choose the materially-liquid TON pool with the best usable 1m history."""
+    ton_pairs = [p for p in (dex_pairs or []) if _is_ton_pair(p) and p.get("pairAddress")]
+    if not ton_pairs:
+        if not fallback_pool:
+            return None, None
+        return fallback_pool, await get_ohlcv(session, fallback_pool, "1m")
+
+    max_liq = max((_pair_liquidity(p) for p in ton_pairs), default=0.0)
+    candidates = (
+        [p for p in ton_pairs if _pair_liquidity(p) >= max_liq * 0.50]
+        if max_liq > 0 else ton_pairs[:]
+    )
+    candidates.sort(key=lambda p: (_pair_liquidity(p), _pair_volume(p)), reverse=True)
+    candidates = candidates[:5]
+
+    async def inspect(pair):
+        candles = await get_ohlcv(session, pair.get("pairAddress"), "1m")
+        return pair, candles
+
+    results = await asyncio.gather(*(inspect(p) for p in candidates), return_exceptions=True)
+    best_pool, best_candles = fallback_pool, None
+    best_score = (-1, -1.0, -1.0)
+
+    for result in results:
+        if isinstance(result, Exception):
+            continue
+        pair, candles = result
+        if not candles:
+            continue
+        score = (len(candles), _pair_liquidity(pair), _pair_volume(pair))
+        if score > best_score:
+            best_score = score
+            best_pool = pair.get("pairAddress")
+            best_candles = candles
+
+    if best_candles is None and fallback_pool:
+        best_candles = await get_ohlcv(session, fallback_pool, "1m")
+    return best_pool, best_candles
+
+
 
 async def get_gecko_price_changes(
     session: aiohttp.ClientSession, pool_address: str
@@ -1388,10 +1431,14 @@ async def build_scan_photo(
     if not pool_address:
         return None
 
-    # Main scanner card: always render 5-minute candles.
-    # The separate Chart button keeps its own selectable 5m / 1H / 4H / 1D state.
+    # Main scanner card: render true 1-minute candles from the best usable pool.
+    # The separate Chart button keeps its selectable timeframe state.
     main_scan_timeframe = "1m"
-    ohlcv = await get_ohlcv(session, pool_address, main_scan_timeframe)
+    chart_pool, ohlcv = await select_chart_pool(
+        session, dex.get("chart_pair_candidates") or [], pool_address
+    )
+    if chart_pool:
+        dex["chart_pair_address"] = chart_pool
     if not ohlcv:
         return None
 
@@ -1707,6 +1754,15 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "txns_1h": (best.get("txns") or {}).get("h1") or {},
             "txns_5m": (best.get("txns") or {}).get("m5") or {},
             "pair_address": best.get("pairAddress"),
+            "chart_pair_candidates": [
+                {
+                    "pairAddress": p.get("pairAddress"),
+                    "chainId": p.get("chainId"),
+                    "liquidity": p.get("liquidity") or {},
+                    "volume": p.get("volume") or {},
+                }
+                for p in dex_pairs[:8] if p.get("pairAddress")
+            ],
             "dex_id": str(best.get("dexId") or "").lower(),
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
@@ -2703,7 +2759,7 @@ async def handle_toggle(callback: CallbackQuery):
         )
         keyboard = build_report_keyboard(
             key, False, entry["show_holders"],
-            has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")),
+            has_chart=bool(((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))),
             show_stats=False,
         )
         async with aiohttp.ClientSession() as session:
@@ -2740,7 +2796,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         await callback.answer("This report has expired — please scan the token again.", show_alert=True)
         return
 
-    pool_address = (entry["report"].get("dex_data") or {}).get("pair_address")
+    pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
 
     if not pool_address:
@@ -2877,7 +2933,7 @@ async def handle_timeframe(callback: CallbackQuery):
     entry["ts"] = time.time()
     entry["chart_tf"] = timeframe
 
-    pool_address = (entry["report"].get("dex_data") or {}).get("pair_address")
+    pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
 
     if not pool_address or timeframe not in CHART_TIMEFRAMES:
