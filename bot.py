@@ -1467,61 +1467,6 @@ def _flatten_source_hint(value) -> list[str]:
     return [str(value or "")]
 
 
-
-
-async def get_x1000_token_details(session: aiohttp.ClientSession, address: str) -> dict:
-    """Best-effort project/author metadata from x1000's public token page.
-
-    x1000 indexes both its own/Uranus launches and TopBlast tokens, so this is
-    useful even after a token has migrated and the jetton admin is null.
-    """
-    if not address:
-        return {}
-    url = f"https://x1000.finance/tokens/{address}"
-    try:
-        async with session.get(url, headers={"Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
-            if resp.status != 200:
-                return {}
-            body = await resp.text(errors="ignore")
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        return {}
-
-    # Next/SSR pages usually contain the visible fields in serialized JSON.
-    decoded = html.unescape(body).replace('\\u0026', '&').replace('\\/', '/')
-    out = {"url": url}
-
-    # Friendly/raw TON addresses. Prefer an address appearing after Author/Creator.
-    addr_pat = r"(?:UQ|EQ)[A-Za-z0-9_-]{40,60}|0:[0-9a-fA-F]{64}"
-    for label in ("Author", "Creator", "Deployer"):
-        m = re.search(label + r".{0,1200}?(" + addr_pat + r")", decoded, re.I | re.S)
-        if m:
-            candidate = m.group(1)
-            if not _same_ton_address(candidate, address):
-                out["creator"] = candidate
-                break
-
-    # Extract launchpad from the rendered/serialized page.
-    low = decoded.lower()
-    if "topblast" in low:
-        out["launchpad"] = "TopBlast"
-    elif "uranus" in low or "x1000" in low:
-        out["launchpad"] = "Uranus / X1000"
-
-    # Capture a useful description when it is explicitly serialized.
-    patterns = [
-        r'\"description\"\s*:\s*\"([^\"]{3,1000})\"',
-        r'"description"\s*:\s*"([^"]{3,1000})"',
-    ]
-    for pat in patterns:
-        m = re.search(pat, decoded, re.I | re.S)
-        if m:
-            desc = m.group(1).replace('\\n', ' ').replace('\\"', '"').strip()
-            if desc and not desc.lower().startswith(('x1000', 'trade ')):
-                out["description"] = desc
-                break
-    return out
-
-
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     jetton_info = await get_jetton_info(session, address)
     dex_pairs = await get_dex_data(session, address)
@@ -1542,7 +1487,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         "jetton_info": None,
         "holders": None,
         "bonding_curve": None,
-        "project_info": {},
         "errors": [],
     }
 
@@ -1700,15 +1644,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             report["bonding_curve"] = bonding_curve
     except Exception:
         logger.exception("Error loading TopBlast bonding curve data")
-
-    # Deep-info metadata. x1000's public token pages expose Author/Launchpad for
-    # many TON memecoins, including migrated TopBlast launches where TonAPI's
-    # current jetton admin is intentionally null/renounced.
-    try:
-        canonical = ((jetton_info or {}).get("metadata") or {}).get("address") or address
-        report["project_info"] = await get_x1000_token_details(session, canonical)
-    except Exception:
-        logger.debug("x1000 token metadata lookup failed", exc_info=True)
 
     return report
 
@@ -2085,14 +2020,10 @@ def _launchpad_name(report: dict) -> str:
 
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
-    project = report.get("project_info") or {}
-    if project.get("launchpad"):
-        return str(project["launchpad"])
-    launch_hints = [
+    haystack = " ".join(str(v or "") for v in (
         info.get("description"), info.get("website"), info.get("telegram"), info.get("twitter"),
-        dex.get("description"), dex.get("dex_url"), dex.get("websites"), dex.get("socials"),
-    ]
-    haystack = " ".join(_flatten_source_hint(launch_hints)).lower()
+        dex.get("description"), dex.get("dex_url"),
+    )).lower()
     if "topblast" in haystack:
         return "TopBlast"
     if "x1000" in haystack or "uranus" in haystack:
@@ -2114,8 +2045,7 @@ def _dex_name(report: dict) -> str:
 def _creator_details(report: dict) -> tuple[str | None, float | None]:
     """Best-effort creator/admin wallet + current holding from loaded holder data."""
     info = report.get("jetton_info") or {}
-    project = report.get("project_info") or {}
-    creator = str(project.get("creator") or info.get("admin_address") or "").strip() or None
+    creator = str(info.get("admin_address") or "").strip() or None
     if not creator or re.fullmatch(r"0:[0]+", creator):
         return None, None
     for holder in (report.get("holders") or {}).get("holders") or []:
@@ -2128,10 +2058,7 @@ def _best_description(report: dict) -> str:
     """Return a clean human description, stripping URLs/deployment boilerplate."""
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
-    project = report.get("project_info") or {}
-    candidates = [project.get("description"), info.get("description"), dex.get("description")]
-    candidates = [str(v).strip() for v in candidates if v and str(v).strip()]
-    value = max(candidates, key=len) if candidates else None
+    value = info.get("description") or dex.get("description")
     if not value:
         return "No description currently available."
     text = str(value).replace("\\n", "\n")
@@ -2442,12 +2369,12 @@ async def _render_report_message(target_message: Message, key: str):
             await target_message.edit_caption(caption=text, reply_markup=keyboard)
             return
         except Exception:
-            pass
+            logger.exception("Failed to edit report photo caption")
 
     try:
         await target_message.edit_text(text, disable_web_page_preview=True, reply_markup=keyboard)
     except Exception:
-        pass
+        logger.exception("Failed to edit report message text")
 
 
 if not TELEGRAM_BOT_TOKEN:
@@ -2731,6 +2658,9 @@ async def handle_toggle(callback: CallbackQuery):
         return
 
     if section == "info":
+        # Acknowledge the button immediately so Telegram does not leave it spinning
+        # while the existing scan message is being edited.
+        await callback.answer()
         entry["show_info"] = not entry.get("show_info", False)
         entry["show_stats"] = False
         entry["show_holders"] = False
@@ -2746,7 +2676,9 @@ async def handle_toggle(callback: CallbackQuery):
         entry["show_holders"] = not entry["show_holders"]
 
     await _render_report_message(callback.message, key)
-    await callback.answer()
+    # Info was acknowledged before rendering to prevent Telegram's loading spinner.
+    if section != "info":
+        await callback.answer()
 
 
 async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
