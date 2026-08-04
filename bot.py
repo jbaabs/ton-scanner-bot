@@ -26,6 +26,7 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardButton,
+    CopyTextButton,
     BufferedInputFile,
     InputMediaPhoto,
     ReplyParameters,
@@ -2317,7 +2318,6 @@ def format_token_report(
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
-        f"<code>{html.escape(address)}</code>",
         *([ " • ".join(link_parts), "" ] if link_parts else [""]),
         f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
         f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
@@ -2369,6 +2369,20 @@ def build_report_keyboard(
 ):
     builder = InlineKeyboardBuilder()
 
+    # Token name button — tapping it copies the contract address to clipboard.
+    entry = REPORT_CACHE.get(key) or {}
+    report = entry.get("report") or {}
+    token_ca = str(report.get("address") or "").strip()
+    token_info = report.get("jetton_info") or {}
+    token_symbol = str(token_info.get("symbol") or "Token").strip()
+    if token_ca:
+        builder.row(
+            InlineKeyboardButton(
+                text=token_symbol,
+                copy_text=CopyTextButton(text=token_ca),
+            )
+        )
+
     # Primary action — full-width GRX Stats row.
     builder.row(
         InlineKeyboardButton(
@@ -2395,10 +2409,6 @@ def build_report_keyboard(
     )
 
     # Open each trading bot directly on the token currently being scanned.
-    entry = REPORT_CACHE.get(key) or {}
-    report = entry.get("report") or {}
-    token_ca = str(report.get("address") or "").strip()
-
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
     gbot_url = GBOT_URL
