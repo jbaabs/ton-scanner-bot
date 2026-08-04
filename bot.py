@@ -1848,6 +1848,17 @@ def _holder_icon_name(report: dict, holder: dict) -> str:
     return "wallet"
 
 
+def _dex_emoji(report: dict) -> str:
+    """Return the custom emoji for the token's active DEX."""
+    dex = report.get("dex_data") or {}
+    dex_id = str(dex.get("dex_id") or "").lower()
+    if "dedust" in dex_id:
+        return _ce("dedust", "💎")
+    if "ston" in dex_id:
+        return _ce("stonfi", "💎")
+    return ""
+
+
 def _launchpad_emoji(report: dict) -> str:
     bonding = report.get("bonding_curve") or {}
     launchpad = str(bonding.get("launchpad") or "").lower()
@@ -1906,7 +1917,9 @@ def format_token_report(
     sell_pct = (sells / total_txns * 100.0) if total_txns else 0.0
 
     launch_emoji = _launchpad_emoji(report)
-    title_suffix = f" {launch_emoji}" if launch_emoji else ""
+    dex_emoji = _dex_emoji(report)
+    title_emojis = " ".join(x for x in (dex_emoji, launch_emoji) if x)
+    title_suffix = f" {title_emojis}" if title_emojis else ""
 
     links = _collect_links(report)
 
