@@ -171,6 +171,14 @@ CHART_POOL_CACHE_TTL = 5 * 60
 REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 FAST_MARKET_CACHE: dict[str, tuple[float, list]] = {}
 FAST_MARKET_CACHE_TTL = 2.0
+JETTON_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+JETTON_INFO_CACHE_TTL = 10 * 60
+HOLDERS_CACHE: dict[str, tuple[float, object]] = {}
+HOLDERS_CACHE_TTL = 45
+ATH_CACHE: dict[str, tuple[float, object]] = {}
+ATH_CACHE_TTL = 15 * 60
+SCAN_INFLIGHT: dict[str, asyncio.Task] = {}
+RENDER_SEMAPHORE = asyncio.Semaphore(3)
 
 def _refresh_lock(key: str) -> asyncio.Lock:
     lock = REFRESH_LOCKS.get(key)
@@ -1643,7 +1651,7 @@ async def build_scan_photo(
         return None
 
     try:
-        png_bytes = await asyncio.to_thread(
+        png_bytes = await _render_offloop(
             build_report_card,
             ohlcv,
             report,
@@ -2161,9 +2169,48 @@ def _register_report_live_pool(report: dict) -> None:
     _register_live_pool(pool)
 
 
+
+
+def _trim_perf_caches():
+    limits=((JETTON_INFO_CACHE,1000),(HOLDERS_CACHE,1000),(ATH_CACHE,1000),(IMAGE_CACHE,1200),(CHART_POOL_CACHE,1200))
+    for cache,limit in limits:
+        if len(cache)>limit:
+            oldest=sorted(cache.items(), key=lambda kv: kv[1][0])[:len(cache)-limit]
+            for k,_ in oldest: cache.pop(k,None)
+
+async def _cached_jetton_info(session, address):
+    cached=_ttl_get(JETTON_INFO_CACHE,address,JETTON_INFO_CACHE_TTL)
+    if cached is not None: return cached
+    value=await get_jetton_info(session,address)
+    if value: _ttl_put(JETTON_INFO_CACHE,address,value)
+    return value
+
+async def _cached_holders(session,address,limit=10):
+    key=f"{address}:{limit}"
+    cached=_ttl_get(HOLDERS_CACHE,key,HOLDERS_CACHE_TTL)
+    if cached is not None: return cached
+    value=await get_jetton_holders(session,address,limit=limit)
+    if value is not None: _ttl_put(HOLDERS_CACHE,key,value)
+    return value
+
+async def _cached_ath(session,pool):
+    cached=_ttl_get(ATH_CACHE,pool,ATH_CACHE_TTL)
+    if cached is not None: return cached
+    value=await get_gecko_ath(session,pool)
+    if value is not None: _ttl_put(ATH_CACHE,pool,value)
+    return value
+
+async def _render_offloop(func,*args):
+    # Prevent a burst of users from starting too many Matplotlib jobs at once.
+    async with RENDER_SEMAPHORE:
+        return await asyncio.to_thread(func,*args)
+
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
-    jetton_info = await get_jetton_info(session, address)
-    dex_pairs = await get_dex_data(session, address)
+    # TonAPI metadata and DEX discovery are independent: fetch them together.
+    jetton_info, dex_pairs = await asyncio.gather(
+        _cached_jetton_info(session, address),
+        get_dex_data(session, address),
+    )
 
     if not dex_pairs and jetton_info:
         tonapi_addr = jetton_info.get("metadata", {}).get("address")
@@ -2205,10 +2252,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "verification": jetton_info.get("verification", "none"),
             "holders_count": jetton_info.get("holders_count", 0),
         }
-        report["holders"] = parse_holders(
-            await get_jetton_holders(session, address, limit=10),
-            jetton_info.get("total_supply"),
-        )
+        holders_task = asyncio.create_task(_cached_holders(session, address, limit=10))
     else:
         report["errors"].append("TonAPI: token not found or API unavailable")
 
@@ -2276,6 +2320,15 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "DexScreener: no DEX pairs found" if dex_pairs == [] else "DexScreener: API request failed"
         )
 
+    if jetton_info:
+        try:
+            report["holders"] = parse_holders(
+                await holders_task,
+                jetton_info.get("total_supply"),
+            )
+        except Exception:
+            logger.debug("Holder lookup failed", exc_info=True)
+
     # Token-image fallback: TonAPI -> DexScreener -> GeckoTerminal.  Only make
     # the Gecko request when the first two providers did not supply an image.
     if not _safe_image_url(report):
@@ -2290,7 +2343,10 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         pool_address = (report["dex_data"] or {}).get("pair_address")
         if pool_address:
             try:
-                gecko_changes = await get_gecko_price_changes(session, pool_address)
+                gecko_changes, ath_price = await asyncio.gather(
+                    get_gecko_price_changes(session, pool_address),
+                    _cached_ath(session, pool_address),
+                )
                 # Store the independent cross-check separately. Do NOT mutate
                 # V5's original dex_data fields here: the report-card/chart path
                 # expects those original values and should remain pixel/functionally
@@ -2303,7 +2359,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
                     ))
                     else "dexscreener_fallback"
                 )
-                ath_price = await get_gecko_ath(session, pool_address)
                 report["dex_data"]["ath_price"] = ath_price
                 try:
                     current_price = float(report["dex_data"].get("price_usd") or 0)
@@ -2345,6 +2400,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         logger.exception("Error loading TopBlast bonding curve data")
 
     _register_report_live_pool(report)
+    _trim_perf_caches()
     return report
 
 
@@ -3002,7 +3058,7 @@ async def handle_address(message: Message):
     status_msg = None
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
             if is_valid_ton_address(text):
                 lookup_value = text
                 status_msg = await message.answer("Scanning token...")
@@ -3321,10 +3377,13 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
 
     await callback.answer("Loading chart...")
 
-    async with aiohttp.ClientSession() as session:
-        routed_pool, ohlcv, chart_source = await get_routed_chart_data(
-            session, entry["report"], timeframe
-        )
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10),
+        connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+    ) as session:
+        chart_task = asyncio.create_task(get_routed_chart_data(session, entry["report"], timeframe))
+        icon_task = asyncio.create_task(_download_image_bytes(session, _safe_image_url(entry["report"])))
+        (routed_pool, ohlcv, chart_source), token_icon = await asyncio.gather(chart_task, icon_task)
         if routed_pool:
             (entry["report"].get("dex_data") or {})["chart_pair_address"] = routed_pool
         (entry["report"].get("dex_data") or {})["chart_source"] = chart_source
@@ -3333,10 +3392,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         await callback.answer("Couldn't load chart data for this timeframe.", show_alert=True)
         return
 
-    async with aiohttp.ClientSession() as icon_session:
-        token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
-
-    png_bytes = await asyncio.to_thread(
+    png_bytes = await _render_offloop(
         build_candlestick_chart,
         ohlcv,
         symbol,
@@ -3469,10 +3525,13 @@ async def handle_timeframe(callback: CallbackQuery):
 
     await callback.answer("Loading chart...")
 
-    async with aiohttp.ClientSession() as session:
-        routed_pool, ohlcv, chart_source = await get_routed_chart_data(
-            session, entry["report"], timeframe
-        )
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10),
+        connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+    ) as session:
+        chart_task = asyncio.create_task(get_routed_chart_data(session, entry["report"], timeframe))
+        icon_task = asyncio.create_task(_download_image_bytes(session, _safe_image_url(entry["report"])))
+        (routed_pool, ohlcv, chart_source), token_icon = await asyncio.gather(chart_task, icon_task)
         if routed_pool:
             (entry["report"].get("dex_data") or {})["chart_pair_address"] = routed_pool
         (entry["report"].get("dex_data") or {})["chart_source"] = chart_source
@@ -3481,10 +3540,7 @@ async def handle_timeframe(callback: CallbackQuery):
         await callback.answer("Couldn't load chart data for that timeframe.", show_alert=True)
         return
 
-    async with aiohttp.ClientSession() as icon_session:
-        token_icon = await _download_image_bytes(icon_session, _safe_image_url(entry["report"]))
-
-    png_bytes = await asyncio.to_thread(
+    png_bytes = await _render_offloop(
         build_candlestick_chart,
         ohlcv,
         symbol,
