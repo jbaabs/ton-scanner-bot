@@ -855,65 +855,61 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
     from datetime import datetime, timezone
     from io import BytesIO
 
     times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
-    opens = [c[1] for c in ohlcv]
-    highs = [c[2] for c in ohlcv]
-    lows = [c[3] for c in ohlcv]
-    closes = [c[4] for c in ohlcv]
+    opens = [float(c[1]) for c in ohlcv]
+    highs = [float(c[2]) for c in ohlcv]
+    lows = [float(c[3]) for c in ohlcv]
+    closes = [float(c[4]) for c in ohlcv]
 
-    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
-    bg = "#0e0e12"
-    fig.patch.set_facecolor(bg)
-    ax.set_facecolor(bg)
+    bg = "#050b14"
+    panel = "#081426"
+    blue = "#168bff"
+    grid = "#17304a"
+    text = "#e8eef8"
+    muted = "#9aa9bd"
+    green = "#16c7ad"
+    red = "#ff5260"
 
-    for i, (o, h, l, c) in enumerate(zip(opens, highs, lows, closes)):
-        color = "#26a69a" if c >= o else "#ef5350"
-        ax.plot([i, i], [l, h], color=color, linewidth=1)
-        bottom = min(o, c)
-        height = abs(c - o) or max((h - l) * 0.01, h * 0.0005, 1e-12)
-        ax.add_patch(
-            plt.Rectangle(
-                (i - 0.3, bottom),
-                0.6,
-                height,
-                facecolor=color,
-                edgecolor=color,
-                linewidth=0,
-            )
-        )
+    fig = plt.figure(figsize=(8, 5.1), dpi=150, facecolor=bg)
+    panel_patch = FancyBboxPatch((.018,.025),.964,.95, transform=fig.transFigure,
+        boxstyle="round,pad=0.004,rounding_size=0.018", facecolor=panel,
+        edgecolor=blue, linewidth=1.1, zorder=-5)
+    fig.add_artist(panel_patch)
+    ax = fig.add_axes([.065,.14,.865,.72])
+    ax.set_facecolor(panel)
 
-    tick_count = min(6, len(ohlcv))
-    tick_idx = (
-        [round(i * (len(ohlcv) - 1) / (tick_count - 1)) for i in range(tick_count)]
-        if tick_count > 1
-        else [0]
-    )
-    tick_idx = sorted(set(tick_idx))
-    fmt = "%H:%M" if timeframe_label in ("5m", "1H", "4H") else "%b %d"
+    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
+        col = green if c >= o else red
+        ax.plot([i,i],[l,h],color=col,linewidth=1.05)
+        bottom=min(o,c)
+        height=abs(c-o) or max((h-l)*.01,h*.0005,1e-12)
+        ax.add_patch(plt.Rectangle((i-.3,bottom),.6,height,facecolor=col,edgecolor=col,linewidth=0))
 
+    tick_count=min(6,len(ohlcv))
+    tick_idx=([round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0])
+    tick_idx=sorted(set(tick_idx))
+    fmt="%H:%M" if timeframe_label in ("5m","1H","4H") else "%b %d"
     ax.set_xticks(tick_idx)
-    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx], color="#e8e8ec", fontsize=8)
-    ax.tick_params(axis="y", colors="#e8e8ec", labelsize=8)
+    ax.set_xticklabels([times[i].strftime(fmt) for i in tick_idx],color=muted,fontsize=8)
+    ax.tick_params(axis="y",colors=muted,labelsize=8)
     ax.yaxis.tick_right()
-    ax.grid(True, color="#2a2a33", linewidth=0.5)
+    ax.grid(True,color=grid,linewidth=.55,alpha=.8)
+    for sp in ax.spines.values(): sp.set_color("#20476c")
 
-    for spine in ax.spines.values():
-        spine.set_color("#2a2a33")
+    first=closes[0]; last=closes[-1]
+    pct=((last-first)/first*100) if first else 0
+    delta=last-first
+    move_col=green if delta>=0 else red
+    fig.text(.065,.915,f"{symbol} / TON  ·  {timeframe_label}",color=text,fontsize=13,fontweight='bold',ha='left')
+    fig.text(.43,.915,_fmt_price(last),color=move_col,fontsize=12,fontweight='bold',ha='left')
+    fig.text(.60,.915,f"{delta:+.6g}  ({pct:+.2f}%)",color=move_col,fontsize=11,ha='left')
 
-    ax.set_title(
-        f"{symbol}  ·  {timeframe_label}  ·  ${closes[-1]:.10g}".rstrip("0").rstrip("."),
-        color="#e8e8ec",
-        fontsize=11,
-        loc="left",
-        pad=10,
-    )
-
-    buf = BytesIO()
-    fig.tight_layout()
-    fig.savefig(buf, format="png", facecolor=bg)
+    buf=BytesIO()
+    fig.savefig(buf,format="png",facecolor=bg)
     plt.close(fig)
     return buf.getvalue()
 
@@ -988,8 +984,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         from PIL import Image
         from io import BytesIO as _BytesIO
         import numpy as np
-        logo_img = Image.open(_BytesIO(base64.b64decode(GRX_LOGO_B64))).convert('RGBA')
-        la = fig.add_axes([.875,.875,.075,.075], zorder=10); la.imshow(np.asarray(logo_img)); la.axis('off')
         if token_icon_bytes:
             ti = Image.open(_BytesIO(token_icon_bytes)).convert('RGBA')
             # contain rather than stretch/crop
@@ -2032,6 +2026,7 @@ async def handle_toggle(callback: CallbackQuery):
         return
 
     if section == "back":
+        entry["show_stats"] = False
         entry["scan_history"] = get_scan_history(entry["report"])
         text = format_token_report(
             entry["report"],
@@ -2040,56 +2035,23 @@ async def handle_toggle(callback: CallbackQuery):
             scan_history=entry["scan_history"],
         )
         keyboard = build_report_keyboard(
-            key,
-            False,
-            entry["show_holders"],
+            key, False, entry["show_holders"],
             has_chart=bool((entry["report"].get("dex_data") or {}).get("pair_address")),
             show_stats=False,
         )
-        image_url = _safe_image_url(entry["report"])
-
         async with aiohttp.ClientSession() as session:
             chart_photo = await build_scan_photo(session, entry["report"])
 
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
         if chart_photo:
             try:
-                await callback.message.answer_photo(
-                    photo=chart_photo,
-                    caption=text,
-                    reply_markup=keyboard,
-                )
+                media = InputMediaPhoto(media=chart_photo, caption=text)
+                await callback.message.edit_media(media=media, reply_markup=keyboard)
                 await callback.answer()
                 return
             except Exception:
-                logger.exception("Error sending chart card on back, falling back")
-                chart_photo = None
+                logger.exception("Error restoring scan card in-place")
 
-        if image_url:
-            try:
-                await callback.message.answer_photo(
-                    photo=image_url,
-                    caption=text,
-                    reply_markup=keyboard,
-                )
-            except Exception:
-                await callback.message.answer(
-                    text,
-                    disable_web_page_preview=True,
-                    reply_markup=keyboard,
-                )
-        else:
-            await callback.message.answer(
-                text,
-                disable_web_page_preview=True,
-                reply_markup=keyboard,
-            )
-
-        await callback.answer()
+        await callback.answer("Couldn't restore the scan card. Please refresh the token.", show_alert=True)
         return
 
     if section == "stats":
@@ -2135,7 +2097,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
 
     media = InputMediaPhoto(
         media=BufferedInputFile(png_bytes, filename="chart.png"),
-        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+        caption=f"<b>{html.escape(str(symbol))} Chart</b> · {html.escape(CHART_TIMEFRAMES[timeframe]["label"])}",
     )
     keyboard = build_chart_keyboard(key, timeframe)
 
@@ -2144,7 +2106,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     except Exception:
         await callback.message.answer_photo(
             photo=BufferedInputFile(png_bytes, filename="chart.png"),
-            caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+            caption=f"<b>{html.escape(str(symbol))} Chart</b> · {html.escape(CHART_TIMEFRAMES[timeframe]["label"])}",
             reply_markup=keyboard,
         )
 
@@ -2192,7 +2154,7 @@ async def handle_timeframe(callback: CallbackQuery):
 
     media = InputMediaPhoto(
         media=BufferedInputFile(png_bytes, filename="chart.png"),
-        caption=f"<b>{html.escape(str(symbol))}</b> price chart",
+        caption=f"<b>{html.escape(str(symbol))} Chart</b> · {html.escape(CHART_TIMEFRAMES[timeframe]["label"])}",
     )
     keyboard = build_chart_keyboard(key, timeframe)
 
@@ -2204,7 +2166,7 @@ async def handle_timeframe(callback: CallbackQuery):
 
 async def main():
     init_db()
-    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V3")
+    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V4_CHART")
     await dp.start_polling(bot)
 
 
