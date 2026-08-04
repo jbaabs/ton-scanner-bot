@@ -488,10 +488,20 @@ def get_recent_chat_scan(chat_id: int, token_key: str) -> dict | None:
 
 
 def _telegram_message_url(chat_id: int, message_id: int, chat_username: str | None = None) -> str | None:
+    # IMPORTANT: private Telegram chats use a positive chat_id. In a private
+    # bot chat, message.chat.username is the USER'S username, not a public chat
+    # username. Building t.me/<user>/<message_id> therefore opens the user's
+    # profile/Saved Messages instead of the stored bot scan. Never build a URL
+    # for positive/private chat IDs.
+    chat_text = str(chat_id)
+    if not chat_text.startswith("-"):
+        return None
+
+    # Public groups/channels can use their public username.
     if chat_username:
         return f"https://t.me/{chat_username}/{message_id}"
-    # Telegram's /c/ links work for supergroups/channels whose internal id starts -100.
-    chat_text = str(chat_id)
+
+    # Private supergroups/channels use Telegram's /c/ message-link format.
     if chat_text.startswith("-100"):
         return f"https://t.me/c/{chat_text[4:]}/{message_id}"
     return None
