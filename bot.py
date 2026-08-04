@@ -1948,10 +1948,14 @@ def format_token_report(
         f"<b>{symbol} • {name}</b>{title_suffix}",
         f"<code>{html.escape(address)}</code>",
         *([ " • ".join(link_parts), "" ] if link_parts else [""]),
-        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
-        f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
-        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>  •     📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
-        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  {_ce('ath', '🏆')} ATH: <b>{html.escape(_fmt_usd(dex.get('ath_market_cap')))}</b>",
+        "<pre>"
+        + html.escape(
+            f"💰 Price: {_fmt_price_compact(dex.get('price_usd')):<10} ·  🎯 1H:  {_fmt_pct(dex.get('price_change_1h'))}\n"
+            f"📊 MCap:  {_fmt_usd(dex.get('market_cap')):<10} ·  🔥 24H: {_fmt_pct(dex.get('price_change_24h'))}\n"
+            f"🧾 Age:   {_fmt_age(dex.get('pair_created_at')):<10} ·  📊 Vol: {_fmt_usd(dex.get('volume_24h'))}\n"
+            f"💧 LP:    {_fmt_usd(dex.get('liquidity_usd')):<10} ·  🚀 ATH: {_fmt_usd(dex.get('ath_market_cap'))}"
+        )
+        + "</pre>",
         "",
         f"{_ce('buy', '🟢')} Buys: <b>{buys:,}</b> ({buy_pct:.0f}%)   {_ce('sell', '🔴')} Sells: <b>{sells:,}</b> ({sell_pct:.0f}%)",
         "",
