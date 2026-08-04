@@ -1304,7 +1304,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
     lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    bg="#050607"; text="#f3f5f7"; muted="#8d939c"; grid="#202327"
+    bg="#050607"; text="#ffffff"; muted="#b7c0ca"; grid="#282d33"
     green="#42c99a"; red="#f06468"
     first=closes[0]; last=closes[-1]
     move=((last-first)/first*100) if first else 0.0
@@ -1329,25 +1329,6 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
     ax=fig.add_axes([.055,.12,.865,.67],facecolor=bg)
-    # GRX Telegram sticker watermark. The sticker's native transparency is preserved.
-    try:
-        import base64
-        from PIL import Image
-        _raw_wm = grx_watermark_bytes or base64.b64decode(GRX_WATERMARK_B64)
-        _wm = Image.open(BytesIO(_raw_wm)).convert("RGBA")
-        # Wide GRAMX6900 wordmark: centred, subtle and not stretched.
-        # The sticker's transparent canvas lets the black/white logo sit naturally behind price action.
-        ax.imshow(
-            _wm,
-            extent=(0.23, 0.77, 0.30, 0.70),
-            transform=ax.transAxes,
-            alpha=0.085 if grx_watermark_bytes else 0.045,
-            aspect="auto",
-            interpolation="lanczos",
-            zorder=0,
-        )
-    except Exception:
-        pass
     width=.66 if len(ohlcv)<=80 else .52
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
@@ -1390,7 +1371,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         try:return float(v)
         except:return None
 
-    bg="#050607"; panel="#090b0d"; cell="#0c1014"; line="#20262c"; text="#f1f3f5"; muted="#7f8994"; green="#43c996"; red="#ee6868"; purple="#9a54ff"
+    bg="#050607"; panel="#090b0d"; cell="#0b0f13"; line="#343b43"; text="#ffffff"; muted="#b7c0ca"; green="#55e0ad"; red="#ff7478"; purple="#a968ff"
     def pc(v):
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
@@ -1427,25 +1408,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
     ax=fig.add_axes([.045,.595,.89,.275],facecolor=bg)
-    # GRX Telegram sticker watermark. The sticker's native transparency is preserved.
-    try:
-        import base64
-        from PIL import Image
-        _raw_wm = grx_watermark_bytes or base64.b64decode(GRX_WATERMARK_B64)
-        _wm = Image.open(BytesIO(_raw_wm)).convert("RGBA")
-        # Wide GRAMX6900 wordmark: centred, subtle and not stretched.
-        # The sticker's transparent canvas lets the black/white logo sit naturally behind price action.
-        ax.imshow(
-            _wm,
-            extent=(0.23, 0.77, 0.30, 0.70),
-            transform=ax.transAxes,
-            alpha=0.085 if grx_watermark_bytes else 0.045,
-            aspect="auto",
-            interpolation="lanczos",
-            zorder=0,
-        )
-    except Exception:
-        pass
     width=.66 if len(ohlcv)<=80 else .52
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
@@ -1486,7 +1448,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
     else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
 
-    # Six-by-two grid, no icons. Labels sit above large values for phone readability.
+    # Compact adaptive stat cards. Each border hugs its content instead of filling half the image.
+    # Width grows automatically for longer values, while both columns remain visually uniform.
     rows=[
       (("PRICE",_fmt_price_compact(dex.get("price_usd")),text),("1H CHANGE",_fmt_pct(h1),pc(h1))),
       (("MARKET CAP",_fmt_usd(dex.get("market_cap")),text),("24H CHANGE",_fmt_pct(h24),pc(h24))),
@@ -1495,14 +1458,26 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
       (("BUYS",f"{buys:,}  ·  {buy_pct:.0f}%",green),("SELLS",f"{sells:,}  ·  {sell_pct:.0f}%",red)),
       (("HOLDERS",_fmt_num(info.get("holders_count")),text),("TOP 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
     ]
-    top=.425; bottom=.025; gap=.007; rh=(top-bottom-gap*5)/6; cw=.465
+
+    def stat_card_width(label, value):
+        # Figure-relative estimate based on the longest line. Clamp prevents overflow.
+        chars=max(len(str(label)),len(str(value)))
+        return min(.405,max(.205,.115 + chars*.0175))
+
+    top=.425; bottom=.025; gap=.009; rh=(top-bottom-gap*5)/6
     for r,(left,right) in enumerate(rows):
         y=top-(r+1)*rh-r*gap
-        for x,(label,val,col) in ((.025,left),(.51,right)):
-            box(x,y,cw,rh,fc=cell,ec=line,lw=.55,r=.007)
-            fig.text(x+.018,y+rh*.68,label,color=muted,fontsize=7.8,fontweight="bold",ha="left",va="center")
-            fs=11.7 if len(str(val))<14 else 10.5
-            fig.text(x+.018,y+rh*.31,val,color=col,fontsize=fs,fontweight="bold",ha="left",va="center")
+        for side,(label,val,col) in enumerate((left,right)):
+            cw=stat_card_width(label,val)
+            x=.035 if side==0 else .965-cw
+            box(x,y,cw,rh,fc=cell,ec=line,lw=.72,r=.009)
+            pad=min(.018,cw*.06)
+            fig.text(x+pad,y+rh*.69,label,color=muted,fontsize=8.4,fontweight="bold",
+                     ha="left",va="center")
+            value_len=len(str(val))
+            fs=12.8 if value_len<=10 else 11.8 if value_len<=14 else 10.8
+            fig.text(x+pad,y+rh*.30,val,color=col,fontsize=fs,fontweight="bold",
+                     ha="left",va="center")
 
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
