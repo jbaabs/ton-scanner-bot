@@ -1951,6 +1951,12 @@ def format_token_report(
                     lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
 
     links = _collect_links(report)
+
+    # Compact GeckoTerminal token link, matching the abbreviated link row.
+    token_address = str(report.get("address") or "").strip()
+    if token_address:
+        links.insert(0, ("GT", f"https://www.geckoterminal.com/ton/tokens/{token_address}"))
+
     cg_url = _coingecko_url(report)
     if cg_url:
         links.append(("CG", cg_url))
@@ -1958,23 +1964,26 @@ def format_token_report(
     seen_labels = set()
     for label, url in links:
         safe_url = html.escape(url, quote=True)
-        if label == "DS" and "DS" not in seen_labels:
-            link_parts.append(f"{_ce('dexscreener', '📊')} <a href=\"{safe_url}\">DexScreener</a>")
+        if label == "GT" and "GT" not in seen_labels:
+            link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">GT</a>")
+            seen_labels.add("GT")
+        elif label == "DS" and "DS" not in seen_labels:
+            link_parts.append(f"{_ce('dexscreener', '📊')} <a href=\"{safe_url}\">DS</a>")
             seen_labels.add("DS")
         elif label == "TG" and "TG" not in seen_labels:
-            link_parts.append(f"{_ce('social', '💬')} <a href=\"{safe_url}\">Telegram</a>")
+            link_parts.append(f"{_ce('social', '💬')} <a href=\"{safe_url}\">TG</a>")
             seen_labels.add("TG")
         elif label == "X" and "X" not in seen_labels:
             link_parts.append(f"𝕏 <a href=\"{safe_url}\">X</a>")
             seen_labels.add("X")
         elif label == "TV" and "TV" not in seen_labels:
-            link_parts.append(f"{_ce('wallet', '👛')} <a href=\"{safe_url}\">TON Viewer</a>")
+            link_parts.append(f"{_ce('wallet', '👛')} <a href=\"{safe_url}\">TV</a>")
             seen_labels.add("TV")
         elif label == "WEB" and "WEB" not in seen_labels:
-            link_parts.append(f"🌐 <a href=\"{safe_url}\">Website</a>")
+            link_parts.append(f"🌐 <a href=\"{safe_url}\">Web</a>")
             seen_labels.add("WEB")
         elif label == "CG" and "CG" not in seen_labels:
-            link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">CoinGecko</a>")
+            link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">CG</a>")
             seen_labels.add("CG")
     if link_parts:
         lines += ["", " • ".join(link_parts)]
