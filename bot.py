@@ -1798,18 +1798,36 @@ def _calc_bonding_curve(collected, target) -> dict | None:
     }
 
 
-def _progress_bar(percent: float | None, size: int = 20) -> str:
-    """Compact Telegram-safe bonding bar with half-step visual resolution."""
+def _progress_bar(percent: float | None, size: int = 16) -> str:
+    """Slim Telegram-safe bonding bar with quarter-step visual resolution."""
     try:
         percent = max(0.0, min(float(percent), 100.0))
     except (ValueError, TypeError):
         percent = 0.0
+
     units = (percent / 100.0) * size
     full = int(units)
     frac = units - full
-    partial = "▌" if frac >= 0.5 and full < size else ""
+    partial = ""
+    if full < size:
+        if frac >= .75:
+            partial = "▊"
+        elif frac >= .50:
+            partial = "▌"
+        elif frac >= .25:
+            partial = "▎"
     empty = max(0, size - full - (1 if partial else 0))
-    return "█" * full + partial + "░" * empty
+    return "━" * full + partial + "─" * empty
+
+
+def _centre_html_line(line: str, target_width: int = 34) -> str:
+    """Best-effort Telegram centring while preserving HTML/custom emojis."""
+    visible = re.sub(r"<[^>]+>", "", line or "")
+    visible = html.unescape(visible)
+    # Custom emoji tags render as one glyph but have no visible fallback after
+    # stripping markup, so target-width padding remains intentionally modest.
+    pad = max(0, (target_width - len(visible)) // 2)
+    return ("\u2007" * pad) + line
 
 
 
@@ -3057,11 +3075,7 @@ def format_token_report(
     if social_line:
         # Estimate visible characters only; HTML/custom-emoji markup itself
         # must not affect the centring calculation.
-        visible_social = re.sub(r"<[^>]+>", "", social_line)
-        visible_social = html.unescape(visible_social)
-        target_width = 34
-        left_pad = max(0, (target_width - len(visible_social)) // 2)
-        social_line = ("\u2007" * left_pad) + social_line
+        social_line = _centre_html_line(social_line, 34)
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
@@ -3070,12 +3084,19 @@ def format_token_report(
 
     if bonding and not bonding.get("bonded", False):
         percent = bonding.get("percent")
-        lines += [
-            "",
-            "<b>🧨 Bonding Curve</b>",
-            f"<code>{html.escape(_progress_bar(percent, size=20))}</code>  <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
-            f"<b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} collected  •  <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')} left",
-        ]
+        bonding_title = _centre_html_line("<b>🧨 Bonding Curve</b>", 34)
+        if percent is not None:
+            bonding_progress = _centre_html_line(
+                f"<code>{html.escape(_progress_bar(percent, size=16))}</code>  <b>{percent:.1f}%</b>", 34
+            )
+        else:
+            bonding_progress = _centre_html_line("<b>Progress: N/A</b>", 34)
+        bonding_amounts = _centre_html_line(
+            f"<b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} collected  •  "
+            f"<b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')} left",
+            34,
+        )
+        lines += ["", bonding_title, bonding_progress, bonding_amounts]
 
     if show_holders:
         holder_list = holders.get("holders") or []
