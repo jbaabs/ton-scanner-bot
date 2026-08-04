@@ -1255,7 +1255,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> b
 
 
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None) -> bytes:
-    """Render the complete GRX scan dashboard as a single branded image."""
+    """Render the GRX pro-dashboard: chart + pulse/caller + uniform 12-stat grid."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1271,142 +1271,117 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     age = _fmt_age(dex.get("pair_created_at"))
 
     txns = dex.get("txns_24h") or {}
-    buys = int(txns.get("buys") or 0)
-    sells = int(txns.get("sells") or 0)
-    txns_total = buys + sells
-    buy_pressure = (buys / txns_total * 100.0) if txns_total else 0.0
-    h1 = dex.get("price_change_1h")
-    h6 = dex.get("price_change_6h")
-    h24 = dex.get("price_change_24h")
-    top10 = holders.get("top_concentration")
-
-    bg = "#070b12"
-    panel = "#0c1627"
-    panel2 = "#0a1321"
-    blue = "#249dff"
-    text = "#f3f6fb"
-    muted = "#8795aa"
-    green = "#20d7ad"
-    red = "#ff5d6c"
+    buys = int(txns.get("buys") or 0); sells = int(txns.get("sells") or 0)
+    total = buys + sells
+    buy_pct = buys / total * 100.0 if total else 0.0
+    sell_pct = sells / total * 100.0 if total else 0.0
+    h1=dex.get("price_change_1h"); h6=dex.get("price_change_6h"); h24=dex.get("price_change_24h")
+    top10=holders.get("top_concentration")
 
     def fnum(v):
         try: return float(v)
         except (TypeError, ValueError): return None
+    def pct_col(v):
+        n=fnum(v)
+        return green if n is not None and n >= 0 else red if n is not None else muted
 
-    h24n = fnum(h24)
-    h1n = fnum(h1)
-    change_color = green if (h24n is not None and h24n >= 0) else red
-    h1_color = green if (h1n is not None and h1n >= 0) else red
+    bg="#050810"; panel="#0a1424"; panel2="#07101d"; cell="#0c1728"
+    blue="#188fff"; purple="#8c46ff"; text="#f4f7fb"; muted="#8796aa"
+    green="#20d7ad"; red="#ff5968"; border="#1d74bd"
 
-    times = [datetime.fromtimestamp(c[0], tz=timezone.utc) for c in ohlcv]
-    opens = [c[1] for c in ohlcv]; highs = [c[2] for c in ohlcv]
-    lows = [c[3] for c in ohlcv]; closes = [c[4] for c in ohlcv]
+    times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
+    opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
+    lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
 
-    fig = plt.figure(figsize=(8, 8.25), dpi=150, facecolor=bg)
+    fig=plt.figure(figsize=(8,10.15),dpi=150,facecolor=bg)
 
-    def rounded_panel(x, y, w, h, radius=0.018):
-        patch = FancyBboxPatch((x,y), w,h, transform=fig.transFigure,
-            boxstyle=f"round,pad=0.004,rounding_size={radius}",
-            facecolor=panel, edgecolor=blue, linewidth=0.75, alpha=0.98, zorder=-5)
-        fig.add_artist(patch)
+    def box(x,y,w,h,fc=panel,ec=border,lw=.75,r=.012):
+        p=FancyBboxPatch((x,y),w,h,transform=fig.transFigure,
+            boxstyle=f"round,pad=0.003,rounding_size={r}",
+            facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5)
+        fig.add_artist(p)
 
-    # Header
-    rounded_panel(.025,.855,.95,.12)
-    icon_left = .045
-    title_left = .155 if token_icon_bytes else .055
-    fig.text(title_left,.935,symbol,color=text,fontsize=19,fontweight='bold',ha='left',va='center')
-    fig.text(title_left,.895,f"{name}  •  {age}",color=muted,fontsize=9.5,ha='left',va='center')
-    fig.text(.785,.932,_fmt_pct(h24),color=change_color,fontsize=14,fontweight='bold',ha='center',va='center',
-             bbox=dict(boxstyle='round,pad=.38',facecolor='#151c2a',edgecolor='#27364c',linewidth=.7))
-    fig.text(.785,.892,'24H',color=muted,fontsize=8,ha='center',va='center')
+    # Slim GRX header
+    fig.text(.04,.968,"GRX",color=purple,fontsize=18,fontweight="bold",ha="left",va="center")
+    fig.text(.125,.968,"SCAN",color=text,fontsize=18,fontweight="bold",ha="left",va="center")
+    fig.text(.96,.968,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
-    # Logos/icons
-    try:
-        from PIL import Image
-        from io import BytesIO as _BytesIO
-        import numpy as np
-        if token_icon_bytes:
-            ti = Image.open(_BytesIO(token_icon_bytes)).convert('RGBA')
-            # contain rather than stretch/crop
-            ti.thumbnail((220,220), Image.Resampling.LANCZOS)
-            canvas = Image.new('RGBA',(240,240),(8,18,34,255))
-            canvas.alpha_composite(ti,((240-ti.width)//2,(240-ti.height)//2))
-            ia=fig.add_axes([icon_left,.875,.085,.085],zorder=10); ia.imshow(np.asarray(canvas)); ia.axis('off')
-    except Exception:
-        logger.debug('GRX header image render failed', exc_info=True)
-
-    # KPI strip
-    rounded_panel(.025,.745,.95,.095)
-    kpis=[('PRICE',_fmt_price(dex.get('price_usd'))),('MCAP',_fmt_usd(dex.get('market_cap'))),
-          ('LIQUIDITY',_fmt_usd(dex.get('liquidity_usd'))),('VOLUME 24H',_fmt_usd(dex.get('volume_24h'))),
-          ('HOLDERS',_fmt_num(info.get('holders_count')))]
-    for i,(lab,val) in enumerate(kpis):
-        x=.12+i*.19
-        fig.text(x,.805,lab,color=muted,fontsize=7.5,fontweight='bold',ha='center')
-        fig.text(x,.77,val,color=text,fontsize=11,fontweight='bold',ha='center')
-
-    # Chart panel
-    rounded_panel(.025,.315,.95,.415)
-    ax=fig.add_axes([.055,.35,.87,.335],facecolor=panel2)
+    # Chart
+    box(.025,.555,.95,.385,fc=panel)
+    fig.text(.05,.918,f"{symbol}/TON  ·  {timeframe_label}",color=text,fontsize=11.5,fontweight="bold",ha="left")
+    last=closes[-1] if closes else 0
+    first_close=closes[0] if closes else 0
+    move=((last-first_close)/first_close*100) if first_close else 0
+    fig.text(.95,.918,f"{_fmt_price(last)}   {move:+.2f}%",color=pct_col(move),fontsize=10.5,fontweight="bold",ha="right")
+    ax=fig.add_axes([.055,.59,.87,.29],facecolor=panel2)
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
-        ax.plot([i,i],[l,h],color=col,linewidth=.8)
+        ax.plot([i,i],[l,h],color=col,linewidth=.85)
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.01,h*.0005,1e-12)
         ax.add_patch(plt.Rectangle((i-.3,bottom),.6,height,facecolor=col,edgecolor=col,linewidth=0))
-    tick_count=min(6,len(ohlcv))
-    idx=[round(i*(len(ohlcv)-1)/(tick_count-1)) for i in range(tick_count)] if tick_count>1 else [0]
-    idx=sorted(set(idx)); fmt='%H:%M' if timeframe_label in ('1m','5m','1H','4H') else '%b %d'
-    ax.set_xticks(idx); ax.set_xticklabels([times[i].strftime(fmt) for i in idx],color=muted,fontsize=7)
-    ax.tick_params(axis='y',colors=muted,labelsize=7); ax.yaxis.tick_right()
-    ax.grid(True,color='#17263a',linewidth=.5,alpha=.8)
-    for sp in ax.spines.values(): sp.set_color('#1c314a')
-    fig.text(.055,.704,f'{timeframe_label} PRICE ACTION',color=blue,fontsize=8,fontweight='bold')
+    ticks=min(6,len(ohlcv))
+    ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
+    ids=sorted(set(ids)); fmt="%H:%M" if timeframe_label in ("1m","5m","1H","4H") else "%b %d"
+    ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=7)
+    ax.tick_params(axis="y",colors=muted,labelsize=7); ax.yaxis.tick_right()
+    ax.grid(True,color="#14263c",linewidth=.5,alpha=.8)
+    for s in ax.spines.values(): s.set_color("#1a3856")
 
-    # Bottom panels: Market Pulse + First Called By
-    # V5 layout preserved; only these two panels are restyled.
-    rounded_panel(.025,.055,.49,.24)
-    rounded_panel(.53,.055,.445,.24)
-
-    # Market Pulse — vertical 1H / 6H / 24H layout
-    fig.text(.05,.265,'MARKET PULSE',color=blue,fontsize=9,fontweight='bold',ha='left')
-    pulse_rows=[('1H',h1),('6H',h6),('24H',h24)]
-    pulse_y=[.215,.165,.115]
-    for (lab,val), y in zip(pulse_rows,pulse_y):
-        col = green if (val is not None and val >= 0) else red if val is not None else muted
-        fig.text(.055,y,lab,color=muted,fontsize=10.5,ha='left',va='center')
-        fig.text(.49,y,_fmt_pct(val),color=col,fontsize=11.5,ha='right',va='center')
-
-    # First Called By — caller on top, then MCAP THEN / MCAP NOW / PERFORMANCE
-    fig.text(.555,.265,'FIRST CALLED BY',color=blue,fontsize=9,fontweight='bold',ha='left')
+    # Pulse + caller
+    box(.025,.405,.46,.13); box(.50,.405,.475,.13)
+    fig.text(.045,.512,"MARKET PULSE",color=blue,fontsize=8.5,fontweight="bold")
+    for j,(lab,val) in enumerate([("1H",h1),("6H",h6),("24H",h24)]):
+        y=.482-j*.032
+        fig.text(.05,y,lab,color=muted,fontsize=8.5,ha="left")
+        fig.text(.465,y,_fmt_pct(val),color=pct_col(val),fontsize=9.5,fontweight="bold",ha="right")
+    fig.text(.52,.512,"FIRST CALLED BY",color=blue,fontsize=8.5,fontweight="bold")
     first=get_first_scan_resolved(report)
     if first:
-        caller=str(first.get('scanner_name') or DEFAULT_SCANNER_LABEL)
-        then_txt=str(first.get('scan_market_cap') or 'N/A')
+        caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL)
+        then_txt=str(first.get("scan_market_cap") or "N/A")
         def parse_usd(t):
-            t=str(t or '').replace('$','').replace(',','').strip().upper(); m=1
-            if t.endswith('K'): m,t=1000,t[:-1]
-            elif t.endswith('M'): m,t=1000000,t[:-1]
+            t=str(t or "").replace("$","").replace(",","").strip().upper(); m=1
+            if t.endswith("K"): m,t=1000,t[:-1]
+            elif t.endswith("M"): m,t=1000000,t[:-1]
             try:return float(t)*m
             except:return None
-        then_val=parse_usd(then_txt); now_val=fnum(dex.get('market_cap'))
+        then_val=parse_usd(then_txt); now_val=fnum(dex.get("market_cap"))
         perf=_pct_change(now_val,then_val) if then_val else None
-        perf_txt=_fmt_pct(perf) if perf is not None else 'N/A'
-        perf_col=green if (perf is not None and perf>=0) else red
-        fig.text(.555,.222,'☎',color=muted,fontsize=10,ha='left',va='center')
-        fig.text(.585,.222,caller,color=blue,fontsize=10.5,ha='left',va='center')
-        caller_rows=[
-            ('MCAP THEN',then_txt,text),
-            ('MCAP NOW',_fmt_usd(now_val),text),
-            ('PERFORMANCE',perf_txt,perf_col),
-        ]
-        caller_y=[.175,.135,.095]
-        for (lab,val,col), y in zip(caller_rows,caller_y):
-            fig.text(.555,y,lab,color=muted,fontsize=7.5,ha='left',va='center')
-            fig.text(.95,y,val,color=col,fontsize=10,ha='right',va='center')
+        fig.text(.52,.483,caller,color=blue,fontsize=9.2,fontweight="bold",ha="left")
+        rows=[("MCAP THEN",then_txt,text),("MCAP NOW",_fmt_usd(now_val),text),("PERFORMANCE",_fmt_pct(perf) if perf is not None else "N/A",pct_col(perf))]
+        for j,(lab,val,col) in enumerate(rows):
+            y=.458-j*.025
+            fig.text(.52,y,lab,color=muted,fontsize=6.8,ha="left")
+            fig.text(.95,y,val,color=col,fontsize=8.5,fontweight="bold",ha="right")
     else:
-        fig.text(.555,.18,'First scan',color=muted,fontsize=10,ha='left')
+        fig.text(.52,.47,"First scan",color=muted,fontsize=9)
 
-    buf=BytesIO(); fig.savefig(buf,format='png',facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
+    # Uniform 12-stat grid: six rows, two columns.
+    grid_top=.385; grid_bottom=.035; gap=.008
+    row_h=(grid_top-grid_bottom-gap*5)/6
+    left_x=.025; right_x=.505; col_w=.47
+    stat_rows=[
+        (("💰","Price",_fmt_price_compact(dex.get("price_usd")),text),("%","1H Change",_fmt_pct(h1),pct_col(h1))),
+        (("▥","MCap",_fmt_usd(dex.get("market_cap")),text),("🔥","24H Change",_fmt_pct(h24),pct_col(h24))),
+        (("▣","Age",age,text),("▥","Volume",_fmt_usd(dex.get("volume_24h")),text)),
+        (("●","LP",_fmt_usd(dex.get("liquidity_usd")),text),("🚀","ATH",_fmt_usd(dex.get("ath_market_cap")),text)),
+        (("BUY","Buys",f"{buys:,} ({buy_pct:.0f}%)",green),("SELL","Sells",f"{sells:,} ({sell_pct:.0f}%)",red)),
+        (("●","Holders",_fmt_num(info.get("holders_count")),text),("◆","Top 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
+    ]
+    for r,(left,right) in enumerate(stat_rows):
+        y=grid_top-(r+1)*row_h-r*gap
+        for x,item in ((left_x,left),(right_x,right)):
+            icon,label,val,col=item
+            box(x,y,col_w,row_h,fc=cell,ec=border,lw=.65,r=.009)
+            fig.text(x+.018,y+row_h/2,icon,color=blue if icon not in ("BUY","SELL") else col,
+                     fontsize=8.5 if icon in ("BUY","SELL") else 11,fontweight="bold",ha="left",va="center")
+            fig.text(x+.075,y+row_h/2,label,color=text,fontsize=9.3,ha="left",va="center")
+            fig.text(x+col_w-.018,y+row_h/2,val,color=col,fontsize=9.6,fontweight="bold",ha="right",va="center")
+
+    buf=BytesIO()
+    fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None)
+    plt.close(fig)
+    return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
@@ -2317,15 +2292,7 @@ def format_token_report(
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
-        *([ " • ".join(link_parts), "" ] if link_parts else [""]),
-        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
-        f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
-        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>  •     📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
-        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  {_ce('ath', '🏆')} ATH: <b>{html.escape(_fmt_usd(dex.get('ath_market_cap')))}</b>",
-        "",
-        f"{_ce('buy', '🟢')} Buys: <b>{buys:,}</b> ({buy_pct:.0f}%)   {_ce('sell', '🔴')} Sells: <b>{sells:,}</b> ({sell_pct:.0f}%)",
-        "",
-        f"{_ce('holders', '👥')} Holders: <b>{_fmt_num(info.get('holders_count'))}</b>  •  Top 10: <b>{html.escape(f'{holders.get('top_concentration'):.2f}%' if holders.get('top_concentration') is not None else 'N/A')}</b>",
+        *([ " • ".join(link_parts) ] if link_parts else []),
     ]
 
     if bonding and not bonding.get("bonded", False):
@@ -2356,7 +2323,6 @@ def format_token_report(
                 else:
                     lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
 
-    lines += ["", "<i>GRX Scan · TON intelligence · Not financial advice</i>"]
     return "\n".join(lines)
 
 def build_report_keyboard(
