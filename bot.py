@@ -1908,48 +1908,6 @@ def format_token_report(
     launch_emoji = _launchpad_emoji(report)
     title_suffix = f" {launch_emoji}" if launch_emoji else ""
 
-    lines = [
-        f"<b>{symbol} • {name}</b>{title_suffix}",
-        f"<code>{html.escape(address)}</code>",
-        "",
-        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
-        f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
-        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>  •  📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
-        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  {_ce('ath', '🏆')} ATH: <b>{html.escape(_fmt_usd(dex.get('ath_market_cap')))}</b>",
-        "",
-        f"{_ce('buy', '🟢')} Buys: <b>{buys:,}</b> ({buy_pct:.0f}%)   {_ce('sell', '🔴')} Sells: <b>{sells:,}</b> ({sell_pct:.0f}%)",
-        "",
-        f"{_ce('holders', '👥')} Holders: <b>{_fmt_num(info.get('holders_count'))}</b>  •  Top 10: <b>{html.escape(f'{holders.get('top_concentration'):.2f}%' if holders.get('top_concentration') is not None else 'N/A')}</b>",
-    ]
-
-    if bonding and not bonding.get("bonded", False):
-        percent = bonding.get("percent")
-        lines += [
-            "",
-            "<b>🧨 Bonding Curve</b>",
-            f"<code>{html.escape(_progress_bar(percent, size=10))}</code> <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
-            f"Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} • Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')}",
-        ]
-
-    if show_holders:
-        holder_list = holders.get("holders") or []
-        if holder_list:
-            lines += ["", "<b>👥 Top Wallets</b>"]
-            for i, holder in enumerate(holder_list[:6], 1):
-                pct = holder.get("percentage")
-                pct_text = f"{pct:.2f}%" if pct is not None else "N/A"
-                wallet_address = str(holder.get("address") or "").strip()
-                icon_name = _holder_icon_name(report, holder)
-                icon_fallback = "💎" if icon_name in ("dedust", "stonfi") else "👛"
-                if wallet_address:
-                    wallet_url = f"https://tonviewer.com/{wallet_address}"
-                    # The numerical holding percentage itself remains the TON Viewer hyperlink.
-                    lines.append(
-                        f"{i}. {_ce(icon_name, icon_fallback)} <a href=\"{html.escape(wallet_url, quote=True)}\"><b>{html.escape(pct_text)}</b></a>"
-                    )
-                else:
-                    lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
-
     links = _collect_links(report)
 
     # Compact GeckoTerminal token link, matching the abbreviated link row.
@@ -1985,8 +1943,48 @@ def format_token_report(
         elif label == "CG" and "CG" not in seen_labels:
             link_parts.append(f"{_ce('coingecko', '🦎')} <a href=\"{safe_url}\">CG</a>")
             seen_labels.add("CG")
-    if link_parts:
-        lines += ["", " • ".join(link_parts)]
+
+    lines = [
+        f"<b>{symbol} • {name}</b>{title_suffix}",
+        f"<code>{html.escape(address)}</code>",
+        *([ " • ".join(link_parts), "" ] if link_parts else [""]),
+        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
+        f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
+        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>  •     📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
+        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  {_ce('ath', '🏆')} ATH: <b>{html.escape(_fmt_usd(dex.get('ath_market_cap')))}</b>",
+        "",
+        f"{_ce('buy', '🟢')} Buys: <b>{buys:,}</b> ({buy_pct:.0f}%)   {_ce('sell', '🔴')} Sells: <b>{sells:,}</b> ({sell_pct:.0f}%)",
+        "",
+        f"{_ce('holders', '👥')} Holders: <b>{_fmt_num(info.get('holders_count'))}</b>  •  Top 10: <b>{html.escape(f'{holders.get('top_concentration'):.2f}%' if holders.get('top_concentration') is not None else 'N/A')}</b>",
+    ]
+
+    if bonding and not bonding.get("bonded", False):
+        percent = bonding.get("percent")
+        lines += [
+            "",
+            "<b>🧨 Bonding Curve</b>",
+            f"<code>{html.escape(_progress_bar(percent, size=10))}</code> <b>{percent:.1f}%</b>" if percent is not None else "<b>Progress: N/A</b>",
+            f"Collected: <b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} • Left: <b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')}",
+        ]
+
+    if show_holders:
+        holder_list = holders.get("holders") or []
+        if holder_list:
+            lines += ["", "<b>👥 Top Wallets</b>"]
+            for i, holder in enumerate(holder_list[:6], 1):
+                pct = holder.get("percentage")
+                pct_text = f"{pct:.2f}%" if pct is not None else "N/A"
+                wallet_address = str(holder.get("address") or "").strip()
+                icon_name = _holder_icon_name(report, holder)
+                icon_fallback = "💎" if icon_name in ("dedust", "stonfi") else "👛"
+                if wallet_address:
+                    wallet_url = f"https://tonviewer.com/{wallet_address}"
+                    # The numerical holding percentage itself remains the TON Viewer hyperlink.
+                    lines.append(
+                        f"{i}. {_ce(icon_name, icon_fallback)} <a href=\"{html.escape(wallet_url, quote=True)}\"><b>{html.escape(pct_text)}</b></a>"
+                    )
+                else:
+                    lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
 
     lines += ["", "<i>GRX Scan · TON intelligence · Not financial advice</i>"]
     return "\n".join(lines)
