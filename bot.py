@@ -2012,10 +2012,33 @@ def build_report_keyboard(
     )
     builder.row(*row)
 
+    # Open each trading bot directly on the token currently being scanned.
+    entry = REPORT_CACHE.get(key) or {}
+    report = entry.get("report") or {}
+    token_ca = str(report.get("address") or "").strip()
+
+    redotrade_url = REDOTRADE_URL
+    dtrade_url = DTRADE_URL
+    gbot_url = GBOT_URL
+
+    if token_ca:
+        redo_ref = REDOTRADE_URL.split("?start=", 1)[1].split("&", 1)[0] if "?start=" in REDOTRADE_URL else ""
+        dtrade_ref = DTRADE_URL.split("?start=", 1)[1].split("&", 1)[0] if "?start=" in DTRADE_URL else ""
+        gbot_start = GBOT_URL.split("?start=", 1)[1].split("&", 1)[0] if "?start=" in GBOT_URL else ""
+
+        # RedoTrade Fast Buy: ?start={ref_code}-{ca}
+        redotrade_url = f"https://t.me/redotrade?start={redo_ref}-{token_ca}" if redo_ref else f"https://t.me/redotrade?start={token_ca}"
+
+        # DTrade token link: ?start={ref_code}_{ca}
+        dtrade_url = f"https://t.me/dtrade?start={dtrade_ref}_{token_ca}" if dtrade_ref else f"https://t.me/dtrade?start={token_ca}"
+
+        # GroypFi/GBot token link: ?start=ref_{telegram_id}={ca}
+        gbot_url = f"https://t.me/groypfi_bot?start={gbot_start}={token_ca}" if gbot_start else f"https://t.me/groypfi_bot?start={token_ca}"
+
     builder.row(
-        _custom_icon_button("RedoTrade", REDOTRADE_URL, "redotrade"),
-        _custom_icon_button("DTrade", DTRADE_URL, "dtrade"),
-        _custom_icon_button("GBot", GBOT_URL, "gbot"),
+        _custom_icon_button("RedoTrade", redotrade_url, "redotrade"),
+        _custom_icon_button("DTrade", dtrade_url, "dtrade"),
+        _custom_icon_button("GBot", gbot_url, "gbot"),
     )
     return builder.as_markup()
 
