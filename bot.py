@@ -28,6 +28,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     BufferedInputFile,
     InputMediaPhoto,
+    ReplyParameters,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -2254,12 +2255,31 @@ async def handle_address(message: Message):
                 )
                 ticker_label = html.escape(normalize_ticker(text) if is_valid_ticker(text) else "Token")
                 if link:
+                    # Public/supergroup chats have a real Telegram message URL.
                     await message.answer(
                         f"<b>{ticker_label}</b> has already been scanned recently — "
                         f'<a href="{html.escape(link, quote=True)}">see scan ↗</a>'
                     )
                 else:
-                    await message.answer(f"<b>{ticker_label}</b> has already been scanned recently.")
+                    # Telegram does not provide a reliable t.me message URL for
+                    # private bot chats. Reply to the stored scan instead: Telegram
+                    # makes the quoted message tappable and jumps straight to it.
+                    try:
+                        await message.answer(
+                            f"<b>{ticker_label}</b> has already been scanned recently — "
+                            "tap the scan above ↗",
+                            reply_parameters=ReplyParameters(
+                                message_id=int(recent["message_id"]),
+                                chat_id=message.chat.id,
+                                allow_sending_without_reply=False,
+                            ),
+                        )
+                    except Exception:
+                        # If the stored message was deleted, don't create another
+                        # broken Saved Messages-style link.
+                        await message.answer(
+                            f"<b>{ticker_label}</b> has already been scanned recently."
+                        )
                 return
 
             report = await scan_token(session, lookup_value)
