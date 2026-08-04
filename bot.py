@@ -1356,6 +1356,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "txns_1h": (best.get("txns") or {}).get("h1") or {},
             "txns_5m": (best.get("txns") or {}).get("m5") or {},
             "pair_address": best.get("pairAddress"),
+            "dex_id": str(best.get("dexId") or "").lower(),
             "pair_created_at": best.get("pairCreatedAt"),
             "dex_url": best.get("url"),
             "total_liquidity_usd": total_liq,
@@ -1624,6 +1625,35 @@ def _collect_links(report: dict) -> list[tuple[str, str]]:
     return deduped
 
 
+
+def _same_ton_address(a: str | None, b: str | None) -> bool:
+    """Compare TON addresses even when one is friendly and the other is raw."""
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    raw_a = _to_raw_address(a)
+    raw_b = _to_raw_address(b)
+    return bool(raw_a and raw_b and raw_a.lower() == raw_b.lower())
+
+
+def _holder_icon_name(report: dict, holder: dict) -> str:
+    """Use the DEX custom emoji when the holder is the active LP/pool contract."""
+    dex = report.get("dex_data") or {}
+    holder_address = str(holder.get("address") or "").strip()
+    pair_address = str(dex.get("pair_address") or "").strip()
+    if not _same_ton_address(holder_address, pair_address):
+        return "wallet"
+
+    dex_id = str(dex.get("dex_id") or "").lower()
+    if "dedust" in dex_id:
+        return "dedust"
+    if "ston" in dex_id:
+        return "stonfi"
+    return "wallet"
+
 def format_token_report(
     report: dict,
     show_info: bool = False,
@@ -1681,14 +1711,16 @@ def format_token_report(
                 pct = holder.get("percentage")
                 pct_text = f"{pct:.2f}%" if pct is not None else "N/A"
                 wallet_address = str(holder.get("address") or "").strip()
+                icon_name = _holder_icon_name(report, holder)
+                icon_fallback = "💎" if icon_name in ("dedust", "stonfi") else "👛"
                 if wallet_address:
                     wallet_url = f"https://tonviewer.com/{wallet_address}"
-                    # The numerical holding percentage itself is the hyperlink.
+                    # The numerical holding percentage itself remains the TON Viewer hyperlink.
                     lines.append(
-                        f"{i}. {_ce('wallet', '👛')} <a href=\"{html.escape(wallet_url, quote=True)}\"><b>{html.escape(pct_text)}</b></a>"
+                        f"{i}. {_ce(icon_name, icon_fallback)} <a href=\"{html.escape(wallet_url, quote=True)}\"><b>{html.escape(pct_text)}</b></a>"
                     )
                 else:
-                    lines.append(f"{i}. {_ce('wallet', '👛')} <b>{html.escape(pct_text)}</b>")
+                    lines.append(f"{i}. {_ce(icon_name, icon_fallback)} <b>{html.escape(pct_text)}</b>")
 
     links = _collect_links(report)
     link_parts = []
