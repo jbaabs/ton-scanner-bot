@@ -131,7 +131,7 @@ CHART_TIMEFRAMES = {
     "4d": {"timeframe": "day", "aggregate": 4, "limit": 30, "label": "4D"},
 }
 CHART_TIMEFRAME_ORDER = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "4d"]
-DEFAULT_CHART_TIMEFRAME = "1h"
+DEFAULT_CHART_TIMEFRAME = "1m"
 REQUEST_TIMEOUT = 15
 REPORT_CACHE: dict[str, dict] = {}
 REPORT_CACHE_TTL = 60 * 60
