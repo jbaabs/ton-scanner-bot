@@ -2374,7 +2374,28 @@ async def handle_address(message: Message):
         PENDING_ALERT_INPUT.pop(message.from_user.id, None)
         label={"price_above":"Price above","price_below":"Price below","mcap_above":"MCap above","mcap_below":"MCap below"}[pending["type"]]
         shown = _money(value)
-        await message.answer(f"✅ <b>Alert set</b> · {html.escape(pending['symbol'])}\n{label}: <b>{shown}</b>\n\nI’ll DM you when it triggers.")
+
+        # Clean up the temporary alert setup conversation once the alert is saved.
+        # In groups, Telegram requires the bot to have permission to delete user messages.
+        prompt_message_id = pending.get("prompt_message_id")
+        if prompt_message_id:
+            try:
+                await bot.delete_message(chat_id=message.chat.id, message_id=prompt_message_id)
+            except Exception:
+                logger.debug("Could not delete alert prompt message", exc_info=True)
+        try:
+            await message.delete()
+        except Exception:
+            logger.debug("Could not delete alert target message", exc_info=True)
+
+        confirmation = await message.answer(
+            f"✅ <b>Alert set</b> · {html.escape(pending['symbol'])}\n{label}: <b>{shown}</b>\n\nI’ll DM you when it triggers."
+        )
+        await asyncio.sleep(2)
+        try:
+            await confirmation.delete()
+        except Exception:
+            logger.debug("Could not delete alert confirmation message", exc_info=True)
         return
     status_msg = None
 
@@ -2719,10 +2740,16 @@ async def handle_alert_choice(callback: CallbackQuery):
         await _render_report_message(callback.message,key); return
     typ={"pa":"price_above","pb":"price_below","ma":"mcap_above","mb":"mcap_below"}.get(kind)
     if not typ: await callback.answer(); return
-    PENDING_ALERT_INPUT[callback.from_user.id]={"type":typ,"address":address,"symbol":symbol,"key":key}
     prompt="price" if kind in ("pa","pb") else "market cap"
     await callback.answer()
-    await callback.message.answer(f"🔔 <b>{html.escape(symbol)} Alert</b>\n\nSend me the {prompt} target (e.g. <b>50K</b>, <b>1.2M</b> or <b>0.000015</b>).\n\n/cancel to stop.")
+    prompt_message = await callback.message.answer(f"🔔 <b>{html.escape(symbol)} Alert</b>\n\nSend me the {prompt} target (e.g. <b>50K</b>, <b>1.2M</b> or <b>0.000015</b>).\n\n/cancel to stop.")
+    PENDING_ALERT_INPUT[callback.from_user.id]={
+        "type":typ,
+        "address":address,
+        "symbol":symbol,
+        "key":key,
+        "prompt_message_id":prompt_message.message_id,
+    }
 
 @dp.message(Command("cancel"))
 async def cancel_alert_input(message: Message):
