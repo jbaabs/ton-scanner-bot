@@ -1379,6 +1379,20 @@ async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> fl
     return max(highs) if highs else None
 
 
+def _chart_axis_price(v, _pos=None):
+    """Human price labels without Matplotlib scientific-offset notation."""
+    try:
+        v=float(v)
+    except Exception:
+        return ""
+    a=abs(v)
+    if a >= 1000: return f"{v:,.0f}"
+    if a >= 1: return f"{v:.2f}".rstrip("0").rstrip(".")
+    if a >= .01: return f"{v:.4f}".rstrip("0").rstrip(".")
+    if a >= .0001: return f"{v:.6f}".rstrip("0").rstrip(".")
+    if a >= .000001: return f"{v:.8f}".rstrip("0").rstrip(".")
+    return f"{v:.10f}".rstrip("0").rstrip(".")
+
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
@@ -1415,27 +1429,33 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     fig.text(title_x,.865,timeframe_label,color=muted,fontsize=10,ha="left",va="center")
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
-    ax=fig.add_axes([.055,.12,.865,.67],facecolor=bg)
-    width=.48 if len(ohlcv)<=80 else .34
+    ax=fig.add_axes([.055,.12,.875,.67],facecolor=bg)
+    n=len(ohlcv)
+    width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
-        ax.plot([i,i],[l,h],color=col,linewidth=.72,solid_capstyle="round")
+        ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
 
-    ax.set_xlim(-1,len(ohlcv)+2.5)
-    pad=max((max(highs)-min(lows))*.08,abs(last)*.015,1e-12)
+    ax.set_xlim(-.8,len(ohlcv)+1.8)
+    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
     ax.set_ylim(min(lows)-pad,max(highs)+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
     ids=sorted(set(ids)); fmt="%H:%M" if timeframe_label.lower() in ("1m","5m","15m","30m","1h","4h") else "%b %d"
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
-    ax.yaxis.tick_right(); ax.grid(axis="y",color=grid,linewidth=.65,alpha=.72); ax.grid(axis="x",visible=False)
+    ax.yaxis.tick_right()
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.yaxis.get_offset_text().set_visible(False)
+    ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.85,last),textcoords="data",
-                ha="left",va="center",fontsize=8.5,color="#ffffff",
-                bbox=dict(boxstyle="round,pad=.28",fc=move_col,ec="none"),clip_on=False)
+    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
+                ha="left",va="center",fontsize=8.0,color="#ffffff",
+                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
 
 
@@ -1463,11 +1483,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    fig=plt.figure(figsize=(8,9.25),dpi=160,facecolor=bg)
+    fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
-    fig.text(.965,.972,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
+    fig.text(.965,.974,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
     # Token artwork + identity, DTrade-inspired but kept in GRX styling.
@@ -1490,28 +1510,33 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         except Exception:
             pass
 
-    fig.text(title_x,.925,f"{symbol} / USD",color=text,fontsize=14,fontweight="bold",ha="left",va="center")
-    fig.text(title_x,.900,f"{timeframe_label}",color=muted,fontsize=8.5,ha="left",va="center")
+    fig.text(title_x,.927,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.899,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
-    ax=fig.add_axes([.045,.595,.89,.275],facecolor=bg)
-    width=.48 if len(ohlcv)<=80 else .34
+    ax=fig.add_axes([.045,.595,.90,.275],facecolor=bg)
+    n=len(ohlcv)
+    width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
-        ax.vlines(i,l,h,color=col,linewidth=1.0,alpha=.95)
+        ax.vlines(i,l,h,color=col,linewidth=.68,alpha=.95)
         bottom=min(o,c); height=max(abs(c-o),max(h,l)*1e-8)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
-    ax.set_xlim(-1,len(ohlcv)+2.5)
-    lo=min(lows); hi=max(highs); pad=(hi-lo)*.08 if hi>lo else max(hi*.02,1e-12); ax.set_ylim(lo-pad,hi+pad)
+    ax.set_xlim(-.8,len(ohlcv)+1.8)
+    lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
     fmt="%H:%M" if timeframe_label in ("1m","5m","1H","4H") else "%b %d"
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors="#b5bbc2",labelsize=8.5,length=0,pad=8); ax.yaxis.tick_right()
     ax.set_axisbelow(False)
-    ax.grid(axis="y",color="#24282c",linewidth=.65,alpha=.65); ax.grid(axis="x",visible=False)
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.yaxis.get_offset_text().set_visible(False)
+    ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+1.0,last),textcoords="data",ha="left",va="center",fontsize=8.3,color="#ffffff",bbox=dict(boxstyle="round,pad=.28",fc=pc(move),ec="none"),clip_on=False)
+    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
 
     # Compact pulse/caller band.
     box(.025,.445,.465,.115); box(.51,.445,.465,.115)
@@ -1546,14 +1571,27 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
       (("HOLDERS",_fmt_num(info.get("holders_count")),text),("TOP 10",f"{top10:.2f}%" if top10 is not None else "N/A",text)),
     ]
 
-    # Estimate the rendered text width and give it only a small amount of padding.
-    # The card grows only when its own label/value needs more room.
-    def stat_card_width(label, value, value_fs):
-        label_w = .0080 * len(str(label)) + .025
-        value_w = (.0091 * len(str(value)) * (value_fs / 12.0)) + .025
-        return min(.455, max(.145, label_w, value_w))
+    # Measure the actual rendered label/value widths. This avoids values such
+    # as "1,471 · 61%" escaping a card while keeping short stats compact.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
 
-    top=.425; bottom=.025; gap=.009; rh=(top-bottom-gap*5)/6
+    def _text_width_fig(s, fontsize, fontweight="bold"):
+        probe = fig.text(0, 0, str(s), fontsize=fontsize, fontweight=fontweight,
+                         alpha=0.0, transform=fig.transFigure)
+        try:
+            bbox = probe.get_window_extent(renderer=renderer)
+            return bbox.width / fig.bbox.width
+        finally:
+            probe.remove()
+
+    def stat_card_width(label, value, value_fs):
+        label_w = _text_width_fig(label, 8.4)
+        value_w = _text_width_fig(value, value_fs)
+        # 0.014 padding on each side plus a tiny safety margin for antialiasing.
+        return max(.105, label_w + .034, value_w + .034)
+
+    top=.425; bottom=.035; gap=.008; rh=(top-bottom-gap*5)/6
 
     # Match the split above: left starts at .025, right starts at .51.
     left_x=.025
@@ -1568,13 +1606,17 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
             # Never allow a card to cross the centre split or right dashboard edge.
             max_w=(.49-x) if x==left_x else (.975-x)
-            cw=min(cw,max_w)
+            if cw > max_w:
+                # Preserve padding and shrink only as a last resort.
+                while fs > 8.8 and stat_card_width(label,val,fs) > max_w:
+                    fs -= .4
+                cw=min(stat_card_width(label,val,fs),max_w)
 
             box(x,y,cw,rh,fc=cell,ec=line,lw=.72,r=.009)
-            pad=.014
-            fig.text(x+pad,y+rh*.69,label,color=muted,fontsize=8.4,fontweight="bold",
+            pad=.012
+            fig.text(x+pad,y+rh*.68,label,color=muted,fontsize=8.4,fontweight="bold",
                      ha="left",va="center")
-            fig.text(x+pad,y+rh*.30,val,color=col,fontsize=fs,fontweight="bold",
+            fig.text(x+pad,y+rh*.29,val,color=col,fontsize=fs,fontweight="bold",
                      ha="left",va="center")
 
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
