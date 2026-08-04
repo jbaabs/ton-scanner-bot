@@ -844,47 +844,62 @@ def _fmt_signal_change(value: float | None) -> str:
 
 
 def format_grx_stats(report: dict) -> str:
+    """Classic GRX Stats presentation, backed by the safer rolling snapshot data."""
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
+
     symbol = html.escape(str(info.get("symbol") or "???"))
+    name = html.escape(str(info.get("name") or symbol))
 
     snap_5m = get_snapshot_after(report, 5 * 60)
     snap_10m = get_snapshot_after(report, 10 * 60)
 
-    # Rolling volume: current provider 5m bucket vs the 5m bucket recorded
-    # around five minutes ago. Suppress false -100% when either side is absent.
+    # Only compare genuine non-zero rolling buckets. This avoids the old
+    # misleading -100% result when a provider/snapshot simply had no 5m value.
     now_v5 = _as_float(dex.get("volume_5m"))
     old_v5 = _as_float((snap_5m or {}).get("volume_5m"))
-    vol_change = _pct_change(now_v5, old_v5) if now_v5 is not None and old_v5 not in (None, 0) else None
+    vol_change = (
+        _pct_change(now_v5, old_v5)
+        if now_v5 is not None and old_v5 not in (None, 0)
+        else None
+    )
 
     holder_now = int(info.get("holders_count") or 0)
     old_holders = (snap_10m or {}).get("holders_count")
-    holder_delta = holder_now - int(old_holders) if old_holders is not None else None
+    holder_delta = (
+        holder_now - int(old_holders)
+        if old_holders is not None
+        else None
+    )
 
     top_now = _as_float(holders.get("top_concentration"))
     top_old = _as_float((snap_10m or {}).get("top10_pct"))
-    top_delta = top_now - top_old if top_now is not None and top_old is not None else None
+    top_delta = (
+        top_now - top_old
+        if top_now is not None and top_old is not None
+        else None
+    )
 
-    liq_change = _pct_change(dex.get("liquidity_usd"), (snap_10m or {}).get("liquidity_usd"))
-    price_change = _pct_change(dex.get("price_usd"), (snap_10m or {}).get("price_usd"))
+    liq_change = _pct_change(
+        dex.get("liquidity_usd"),
+        (snap_10m or {}).get("liquidity_usd"),
+    )
 
+    # Prefer decoded GRX swaps for pressure. Fall back to the provider's
+    # explicit 5m buy/sell counts; never invent pressure when neither exists.
     live = _live_trade_metrics(report, 5 * 60)
-    tx5 = dex.get("txns_5m") or {}
-    provider_buys = int(tx5.get("buys") or 0)
-    provider_sells = int(tx5.get("sells") or 0)
-    provider_total = provider_buys + provider_sells
-
-    # Prefer GRX's decoded swap stream. Provider counts are a fallback for
-    # trade count / pressure only; Net Flow is never guessed from counts.
-    trades_5m = live.get("trades") if live.get("trades") is not None else (provider_total or None)
     buy_pressure = live.get("buy_pressure")
-    if buy_pressure is None and provider_total:
-        buy_pressure = provider_buys / provider_total * 100.0
-    net_flow = live.get("net_flow")
+    if buy_pressure is None:
+        tx5 = dex.get("txns_5m") or {}
+        buys = int(tx5.get("buys") or 0)
+        sells = int(tx5.get("sells") or 0)
+        total = buys + sells
+        buy_pressure = (buys / total * 100.0) if total else None
 
     first = get_first_scan_resolved(report)
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
+    current_mc = _as_float(dex.get("market_cap"))
 
     def parse_compact_usd(value):
         if not value or value == "N/A":
@@ -902,38 +917,32 @@ def format_grx_stats(report: dict) -> str:
         except ValueError:
             return None
 
-    current_mc = _as_float(dex.get("market_cap"))
     first_mc_value = parse_compact_usd(first_mc_text)
     performance = _pct_change(current_mc, first_mc_value)
-    ath_since = get_ath_mcap_since(report, (first or {}).get("scan_ts"))
-    ath_perf = _pct_change(ath_since, first_mc_value)
 
-    def signed(v, suffix="%", decimals=1):
+    def trend(v, decimals=1, points=False):
         if v is None:
-            return "Collecting data"
-        return f"{v:+.{decimals}f}{suffix}"
+            return "N/A"
+        arrow = "↑" if v > 0 else ("↓" if v < 0 else "•")
+        suffix = " pts" if points else "%"
+        return f"{arrow} {abs(v):.{decimals}f}{suffix}"
 
+    # Reuse the scanner's established custom-emoji pack. Telegram renders the
+    # custom glyphs; fallbacks are only used where a client cannot display them.
     lines = [
         f"<b>🔥 GRX SIGNALS — {symbol}</b>",
+        f"<i>{name}</i>",
         "",
-        "<b>MOMENTUM</b>",
-        f"5m Volume        <b>{signed(vol_change)}</b>",
-        f"Buy Pressure     <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'Collecting data')}</b>",
-        f"Net Flow         <b>{(_fmt_usd(net_flow) if net_flow is not None else 'Collecting data')}</b>",
-        f"Trades 5m        <b>{(f'{trades_5m:,}' if trades_5m is not None else 'Collecting data')}</b>",
+        f"{_ce('mcap', '📊')} 5m Volume: <b>{trend(vol_change)}</b>",
+        f"{_ce('holders', '👥')} Holders 10m: <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'N/A')}</b>",
+        f"{_ce('percent', '👤')} Top 10 10m: <b>{trend(top_delta, decimals=2, points=True)}</b>",
+        f"{_ce('buy', '🟢')} Buy Pressure 5m: <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'N/A')}</b>",
+        f"{_ce('liquidity', '💧')} Liquidity 10m: <b>{trend(liq_change)}</b>",
+        f"{_ce('mcap', '📊')} MC since call: <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
+        f"🔥 Call performance: <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
         "",
-        "<b>HOLDERS</b>",
-        f"Holders 10m      <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
-        f"Top 10           <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
-        "",
-        "<b>MARKET</b>",
-        f"Liquidity 10m    <b>{signed(liq_change)}</b>",
-        f"Price 10m        <b>{signed(price_change)}</b>",
-        "",
-        "<b>CALL</b>",
-        f"Performance      <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
-        f"ATH Since Call   <b>{(_fmt_pct(ath_perf) if ath_perf is not None else 'Collecting data')}</b>",
-        f"MC Since Call    <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
+        "<i>GRX Stats improve as GRX collects more",
+        "snapshots of the token.</i>",
     ]
     return "\n".join(lines)
 
@@ -1716,11 +1725,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
-    # Crop the unused lower canvas left behind by the compact 3x2 stat grid.
-    # Keep a small margin beneath the cards rather than stretching them vertically.
-    from matplotlib.transforms import Bbox
-    crop = Bbox.from_extents(0, fig.get_figheight() * .155, fig.get_figwidth(), fig.get_figheight())
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=crop,pad_inches=0); plt.close(fig); return buf.getvalue()
+    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
