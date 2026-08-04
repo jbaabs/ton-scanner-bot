@@ -1637,7 +1637,7 @@ def _fmt_price(price_str) -> str:
 
 
 def _fmt_price_compact(price_str) -> str:
-    """Short scan-card price so the right-hand 1H column stays aligned."""
+    """Compact scan-card price, using subscript-zero notation for tiny values."""
     if price_str is None:
         return "N/A"
     try:
@@ -1646,10 +1646,18 @@ def _fmt_price_compact(price_str) -> str:
         return "N/A"
     if price == 0:
         return "$0"
-    if price < 0.000001:
-        return f"${price:.4g}"
-    if price < 0.0001:
-        return f"${price:.8f}".rstrip("0").rstrip(".")
+
+    # DTrade-style tiny-price notation. Example:
+    # 0.000000897 -> $0.0₆897
+    if 0 < price < 0.0001:
+        import math
+        zero_count = max(1, int(-math.floor(math.log10(price))) - 1)
+        subs = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+        sub_count = str(zero_count).translate(subs)
+        significant = price * (10 ** (zero_count + 1))
+        digits = f"{significant:.3g}".replace(".", "")
+        return f"$0.0{sub_count}{digits}"
+
     if price < 0.01:
         return f"${price:.6f}".rstrip("0").rstrip(".")
     if price < 1:
