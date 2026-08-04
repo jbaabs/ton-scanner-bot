@@ -52,6 +52,8 @@ LIVE_STREAM_RESUBSCRIBE = asyncio.Event()
 LIVE_STREAM_CONNECTED = False
 LIVE_SWAPS: dict[str, list[dict]] = {}
 LIVE_SWAP_MAX_PER_POOL = 800
+GRX_CANDLE_BOOK: dict[tuple[str, str], list[list]] = {}
+GRX_CANDLE_BOOK_MAX = 500
 
 def _record_live_swap(pool: str, *, ts: int, price=None, amount_in=None, amount_out=None, side=None, source="ton"):
     if not pool: return
@@ -59,6 +61,7 @@ def _record_live_swap(pool: str, *, ts: int, price=None, amount_in=None, amount_
     b.append({"ts":int(ts or time.time()),"price":price,"amount_in":amount_in,"amount_out":amount_out,"side":side,"source":source})
     if len(b)>LIVE_SWAP_MAX_PER_POOL: del b[:-LIVE_SWAP_MAX_PER_POOL]
     _invalidate_live_pool_caches(pool)
+    _apply_swap_to_all_live_timeframes(pool, b[-1])
 
 def _live_swap_counts(pool: str, seconds: int=30):
     cutoff=time.time()-seconds; buys=sells=0
@@ -146,7 +149,7 @@ def _custom_icon_button(text: str, url: str, emoji_name: str | None = None):
     return InlineKeyboardButton(**kwargs)
 
 CHART_TIMEFRAMES = {
-    "1m": {"timeframe": "minute", "aggregate": 1, "limit": 60, "label": "1m"},
+    "1m": {"timeframe": "minute", "aggregate": 1, "limit": 120, "label": "1m"},
     "5m": {"timeframe": "minute", "aggregate": 5, "limit": 60, "label": "5m"},
     "15m": {"timeframe": "minute", "aggregate": 15, "limit": 60, "label": "15m"},
     "30m": {"timeframe": "minute", "aggregate": 30, "limit": 60, "label": "30m"},
@@ -1413,10 +1416,10 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
     ax=fig.add_axes([.055,.12,.865,.67],facecolor=bg)
-    width=.66 if len(ohlcv)<=80 else .52
+    width=.48 if len(ohlcv)<=80 else .34
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
-        ax.plot([i,i],[l,h],color=col,linewidth=1.0,solid_capstyle="round")
+        ax.plot([i,i],[l,h],color=col,linewidth=.72,solid_capstyle="round")
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
 
@@ -1492,7 +1495,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
     ax=fig.add_axes([.045,.595,.89,.275],facecolor=bg)
-    width=.66 if len(ohlcv)<=80 else .52
+    width=.48 if len(ohlcv)<=80 else .34
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
         ax.vlines(i,l,h,color=col,linewidth=1.0,alpha=.95)
@@ -1623,10 +1626,13 @@ async def get_routed_chart_data(
         pool = dex.get("chart_pair_address") or fallback_pool
         candles = await get_ohlcv(session, pool, timeframe_key, token_address) if pool else None
 
+    if candles and pool:
+        candles = _merge_live_swaps_into_ohlcv(candles, pool, timeframe_key)
+
     if pre_migration and launchpad in {"topblast", "uranus", "groypfi"}:
-        source = f"{launchpad}_via_geckoterminal" if candles else f"{launchpad}_unavailable"
+        source = f"{launchpad}_via_grx" if candles else f"{launchpad}_unavailable"
     else:
-        source = "geckoterminal" if candles else "unavailable"
+        source = "grx_native" if candles else "unavailable"
     return pool, candles, source
 
 async def build_scan_photo(
@@ -2022,21 +2028,89 @@ def _decode_stream_swaps(payload,touched):
     context=next(iter(touched)) if len(touched)==1 else None
     return [s for s in (_decode_swap_action(a,context) for a in _walk_actions(payload)) if s]
 
+def _timeframe_seconds(timeframe_key: str) -> int:
+    return {
+        "1s":1, "5s":5, "15s":15, "30s":30,
+        "1m":60, "5m":300, "15m":900, "30m":1800,
+        "1h":3600, "4h":14400, "1d":86400, "4d":345600,
+    }.get(timeframe_key, 60)
+
+def _seed_grx_candle_book(pool: str, timeframe_key: str, ohlcv: list | None) -> list:
+    """Seed/refresh GRX history without replacing newer locally-built candles."""
+    if not pool:
+        return [list(r) for r in (ohlcv or [])]
+    key=(pool,timeframe_key)
+    incoming=[list(r[:6]) for r in (ohlcv or []) if isinstance(r,(list,tuple)) and len(r)>=5]
+    current=GRX_CANDLE_BOOK.get(key, [])
+    merged={}
+    for row in incoming:
+        try: merged[int(row[0])] = row
+        except Exception: pass
+    # Local candles win for equal/newer timestamps: they can contain trades
+    # upstream indexers have not published yet.
+    for row in current:
+        try: merged[int(row[0])] = row
+        except Exception: pass
+    rows=[merged[k] for k in sorted(merged)]
+    rows=rows[-GRX_CANDLE_BOOK_MAX:]
+    GRX_CANDLE_BOOK[key]=rows
+    return rows
+
+def _apply_swap_to_book(pool: str, timeframe_key: str, swap: dict) -> None:
+    """Apply one decoded on-chain trade to GRX OHLC immediately."""
+    price=_num(swap.get("price"))
+    if not pool or not price or price <= 0:
+        return
+    step=_timeframe_seconds(timeframe_key)
+    ts=int(swap.get("ts") or time.time())
+    bucket=(ts//step)*step
+    key=(pool,timeframe_key)
+    rows=GRX_CANDLE_BOOK.setdefault(key, [])
+    volume=_num(swap.get("amount_in")) or 0.0
+
+    if rows and int(rows[-1][0]) == bucket:
+        row=rows[-1]
+        row[2]=max(float(row[2]),price)
+        row[3]=min(float(row[3]),price)
+        row[4]=price
+        if len(row) < 6: row.append(volume)
+        else: row[5]=(_num(row[5]) or 0.0)+volume
+    elif not rows or bucket > int(rows[-1][0]):
+        # Open from the previous close when available; this makes transitions
+        # between live candles visually continuous.
+        open_price=float(rows[-1][4]) if rows else price
+        rows.append([bucket,open_price,max(open_price,price),min(open_price,price),price,volume])
+    else:
+        # Late/out-of-order trade: update its historical bucket if retained.
+        for row in reversed(rows):
+            if int(row[0]) == bucket:
+                row[2]=max(float(row[2]),price)
+                row[3]=min(float(row[3]),price)
+                row[4]=price
+                if len(row) < 6: row.append(volume)
+                else: row[5]=(_num(row[5]) or 0.0)+volume
+                break
+    if len(rows) > GRX_CANDLE_BOOK_MAX:
+        del rows[:-GRX_CANDLE_BOOK_MAX]
+
 def _merge_live_swaps_into_ohlcv(ohlcv,pool,timeframe_key):
-    swaps=LIVE_SWAPS.get(pool) or []
-    if not swaps or not ohlcv: return ohlcv
-    step={"1s":1,"5s":5,"15s":15,"30s":30,"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"4h":14400,"1d":86400}.get(timeframe_key,60)
-    rows=[list(r) for r in ohlcv]
-    try: last=int(rows[-1][0])
-    except Exception: return ohlcv
-    for s in swaps:
-        p=_num(s.get("price"))
-        if not p or s.get("ts",0)<last: continue
-        bt=(int(s["ts"])//step)*step
-        if bt>int(rows[-1][0]): rows.append([bt,p,p,p,p,0.0])
-        elif bt==int(rows[-1][0]):
-            rows[-1][2]=max(float(rows[-1][2]),p); rows[-1][3]=min(float(rows[-1][3]),p); rows[-1][4]=p
-    return rows[-120:]
+    """Return GRX-owned candles: external history + every priced live swap seen."""
+    rows=_seed_grx_candle_book(pool,timeframe_key,ohlcv)
+    if not pool:
+        return rows
+    # Replaying is safe because rows are reseeded by timestamp and live swaps are
+    # retained only briefly. Build a fresh seeded book first to avoid stale close.
+    for swap in LIVE_SWAPS.get(pool,()):
+        _apply_swap_to_book(pool,timeframe_key,swap)
+    rows=GRX_CANDLE_BOOK.get((pool,timeframe_key), rows)
+    visible = 120 if timeframe_key == "1m" else 90
+    return [list(r) for r in rows[-visible:]]
+
+def _apply_swap_to_all_live_timeframes(pool: str, swap: dict) -> None:
+    # Keep every selectable chart ready before the user presses its button.
+    for tf in CHART_TIMEFRAME_ORDER:
+        if (pool,tf) in GRX_CANDLE_BOOK:
+            _apply_swap_to_book(pool,tf,swap)
 
 async def ton_live_stream_engine() -> None:
     """Persistent low-latency TON pool watcher.
@@ -2173,6 +2247,11 @@ def _register_report_live_pool(report: dict) -> None:
 
 def _trim_perf_caches():
     limits=((JETTON_INFO_CACHE,1000),(HOLDERS_CACHE,1000),(ATH_CACHE,1000),(IMAGE_CACHE,1200),(CHART_POOL_CACHE,1200))
+    if len(GRX_CANDLE_BOOK) > 2000:
+        # Drop the oldest dictionary entries by insertion order; active pools
+        # are naturally recreated/reseeded on the next scan.
+        for k in list(GRX_CANDLE_BOOK)[:len(GRX_CANDLE_BOOK)-2000]:
+            GRX_CANDLE_BOOK.pop(k,None)
     for cache,limit in limits:
         if len(cache)>limit:
             oldest=sorted(cache.items(), key=lambda kv: kv[1][0])[:len(cache)-limit]
