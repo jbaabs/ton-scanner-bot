@@ -74,6 +74,7 @@ CUSTOM_EMOJI = {
     "holders": "5364342783232481866",
     "liquidity": "5363840130324927385",
     "age": "5366367898967253063",
+    "ath": "5366516161238308466",
     "uranus": "6294313725209877707",
     "gram": "6151926179138904505",
     "coingecko": "6256011039360426071",
@@ -92,7 +93,7 @@ def _ce(name: str, fallback: str) -> str:
         "gbot": "🤖", "dedust": "💎", "stonfi": "💎",
         "percent": "💯", "social": "💬", "wallet": "👛",
         "price": "💰", "mcap": "📈", "holders": "👥",
-        "liquidity": "💧", "age": "🌱", "uranus": "🪐", "gram": "💎",
+        "liquidity": "💧", "age": "🌱", "ath": "🏆", "uranus": "🪐", "gram": "💎",
         "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀",
     }
     safe = safe_fallbacks.get(name, "✨")
@@ -941,6 +942,32 @@ async def get_gecko_price_changes(
         pass
     return result
 
+async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> float | None:
+    """Return the highest USD trade price available for the pool (up to 1000 daily candles)."""
+    url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/day"
+    params = {"aggregate": 1, "limit": 1000, "currency": "usd"}
+    try:
+        async with session.get(
+            url, params=params, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+    candles = (data.get("data") or {}).get("attributes", {}).get("ohlcv_list") or []
+    highs = []
+    for candle in candles:
+        try:
+            high = float(candle[2])
+            if high > 0:
+                highs.append(high)
+        except (TypeError, ValueError, IndexError):
+            continue
+    return max(highs) if highs else None
+
+
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str) -> bytes:
     import matplotlib
     matplotlib.use("Agg")
@@ -1497,6 +1524,17 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
                     ))
                     else "dexscreener_fallback"
                 )
+                ath_price = await get_gecko_ath(session, pool_address)
+                report["dex_data"]["ath_price"] = ath_price
+                try:
+                    current_price = float(report["dex_data"].get("price_usd") or 0)
+                    current_mcap = float(report["dex_data"].get("market_cap") or 0)
+                    if ath_price and current_price > 0 and current_mcap > 0:
+                        report["dex_data"]["ath_market_cap"] = current_mcap * (ath_price / current_price)
+                    else:
+                        report["dex_data"]["ath_market_cap"] = None
+                except (TypeError, ValueError, ZeroDivisionError):
+                    report["dex_data"]["ath_market_cap"] = None
             except Exception:
                 logger.exception("Error calculating GeckoTerminal price changes")
 
@@ -1534,6 +1572,29 @@ def _fmt_price(price_str) -> str:
         return f"${price:.6f}"
     if price < 1:
         return f"${price:.4f}"
+    if price < 1000:
+        return f"${price:.2f}"
+    return f"${price:,.0f}"
+
+
+def _fmt_price_compact(price_str) -> str:
+    """Short scan-card price so the right-hand 1H column stays aligned."""
+    if price_str is None:
+        return "N/A"
+    try:
+        price = float(price_str)
+    except (ValueError, TypeError):
+        return "N/A"
+    if price == 0:
+        return "$0"
+    if price < 0.000001:
+        return f"${price:.4g}"
+    if price < 0.0001:
+        return f"${price:.8f}".rstrip("0").rstrip(".")
+    if price < 0.01:
+        return f"${price:.6f}".rstrip("0").rstrip(".")
+    if price < 1:
+        return f"${price:.4f}".rstrip("0").rstrip(".")
     if price < 1000:
         return f"${price:.2f}"
     return f"${price:,.0f}"
@@ -1851,10 +1912,10 @@ def format_token_report(
         f"<b>{symbol} • {name}</b>{title_suffix}",
         f"<code>{html.escape(address)}</code>",
         "",
-        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
+        f"{_ce('price', '💰')} Price: <b>{html.escape(_fmt_price_compact(dex.get('price_usd')))}</b>  •  {_ce('percent', '💯')} 1H: <b>{html.escape(_fmt_pct(dex.get('price_change_1h')))}</b>",
         f"{_ce('mcap', '📈')} MCap: <b>{html.escape(_fmt_usd(dex.get('market_cap')))}</b>  •  🔥 24H: <b>{html.escape(_fmt_pct(dex.get('price_change_24h')))}</b>",
-        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>",
-        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
+        f"{_ce('age', '🌱')} Age: <b>{html.escape(_fmt_age(dex.get('pair_created_at')))}</b>  •  📊 Vol: <b>{html.escape(_fmt_usd(dex.get('volume_24h')))}</b>",
+        f"{_ce('liquidity', '💧')} LP: <b>{html.escape(_fmt_usd(dex.get('liquidity_usd')))}</b>  •  {_ce('ath', '🏆')} ATH: <b>{html.escape(_fmt_usd(dex.get('ath_market_cap')))}</b>",
         "",
         f"{_ce('buy', '🟢')} Buys: <b>{buys:,}</b> ({buy_pct:.0f}%)   {_ce('sell', '🔴')} Sells: <b>{sells:,}</b> ({sell_pct:.0f}%)",
         "",
