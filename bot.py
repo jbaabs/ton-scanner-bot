@@ -3526,26 +3526,24 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     sign = "+" if pct >= 0 else ""
     gain_colour = (35, 235, 75) if pct >= 0 else (255, 70, 85)
 
-    # Phanes-style hierarchy: large, bold, high-contrast type directly on artwork.
-    # No panel, border, or divider lines.
-    x = int(w * 0.60)
-    y = int(h * 0.19)
-    shadow = max(2, int(h * 0.005))
+    # Phanes-style hierarchy: ONLY the two requested stats, rendered huge.
+    # Size is based on the full image width so it remains bold/readable after
+    # Telegram scales the card down on mobile. No panel, border or divider.
+    x = int(w * 0.585)
+    y = int(h * 0.255)
+    shadow = max(3, int(w * 0.0035))
 
-    called_label_f = font(max(38, int(h * 0.085)), True)
-    age_f = font(max(28, int(h * 0.060)), True)
-    since_f = font(max(30, int(h * 0.064)), True)
-    gain_f = font(max(64, int(h * 0.145)), True)
+    called_label_f = font(max(64, int(w * 0.055)), True)
+    gain_f = font(max(120, int(w * 0.115)), True)
 
     def text(pos, value, fnt, fill):
-        draw.text(pos, value, font=fnt, fill=fill, stroke_width=shadow, stroke_fill=(0, 0, 0))
+        draw.text(
+            pos, value, font=fnt, fill=fill,
+            stroke_width=shadow, stroke_fill=(0, 0, 0)
+        )
 
     text((x, y), f"CALLED AT {_fmt_usd(called_mc)}", called_label_f, (255, 255, 255))
-    y += int(h * 0.115)
-    text((x, y), f"{called_age} ago", age_f, (245, 245, 245))
-    y += int(h * 0.135)
-    text((x, y), "SINCE CALL", since_f, (255, 255, 255))
-    y += int(h * 0.075)
+    y += int(h * 0.18)
     text((x, y), f"{sign}{pct:.1f}%", gain_f, gain_colour)
 
     buf = BytesIO()
