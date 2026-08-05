@@ -3519,14 +3519,9 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
             except Exception: pass
         return ImageFont.load_default()
 
-    # Dark translucent backing so values remain readable without redesigning the artwork.
-    x0, y0 = int(w * .59), int(h * .10)
+    # No panel/border: render the call stats directly over the supplied artwork.
+    x0, y0 = int(w * .60), int(h * .10)
     x1, y1 = int(w * .965), int(h * .68)
-    overlay = Image.new("RGBA", im.size, (0,0,0,0))
-    od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle((x0, y0, x1, y1), radius=max(12, int(h*.025)), fill=(0,0,0,145))
-    im = Image.alpha_composite(im.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(im)
 
     current_mc = float(current_mc or 0)
     called_mc = float(called_mc or 0)
@@ -3534,11 +3529,10 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     sign = "+" if pct >= 0 else ""
     gain_colour = (35, 235, 105) if pct >= 0 else (255, 80, 95)
 
-    label_f = font(max(20, int(h*.050)), True)
-    value_f = font(max(24, int(h*.066)), True)
-    age_f = font(max(18, int(h*.043)), False)
-    gain_label_f = font(max(18, int(h*.038)), True)
-    gain_f = font(max(30, int(h*.085)), True)
+    value_f = font(max(30, int(h*.078)), True)
+    age_f = font(max(22, int(h*.052)), True)
+    gain_label_f = font(max(22, int(h*.050)), True)
+    gain_f = font(max(40, int(h*.115)), True)
 
     pad = int(w*.025)
     tx = x0 + pad
@@ -3546,9 +3540,7 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     draw.text((tx, ty), f"CALLED : {_fmt_usd(called_mc)}", font=value_f, fill=(255,255,255))
     ty += int(h*.095)
     draw.text((tx, ty), f"{called_age} ago", font=age_f, fill=(235,235,240))
-    ty += int(h*.105)
-    draw.line((tx, ty, x1-pad, ty), fill=(220,220,225), width=max(1,int(h*.002)))
-    ty += int(h*.040)
+    ty += int(h*.115)
     draw.text((tx, ty), "SINCE CALL", font=gain_label_f, fill=(255,255,255))
     ty += int(h*.060)
     draw.text((tx, ty), f"{sign}{pct:.1f}%", font=gain_f, fill=gain_colour)
