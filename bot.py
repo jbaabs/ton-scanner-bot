@@ -3670,15 +3670,20 @@ def format_token_report(
         social_line = _centre_html_line(social_line, 34)
 
     activity = get_scan_activity(report)
-    activity_line = (
-        f"📡 <b>Scans</b> {activity['scans']}  •  "
-        f"👥 <b>Independent Scanners</b> {activity['sources']}"
-    ) if activity["scans"] else ""
+    group_scans = int(activity.get("groups", 0) or 0)
+    individual_scans = int(activity.get("users", 0) or 0)
+    activity_lines = []
+    if activity["scans"]:
+        activity_lines = [
+            f"👥 <b>Group Scans</b> {group_scans}",
+            f"👤 <b>Individual Scans</b> {individual_scans}",
+        ]
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
         *([social_line] if social_line else []),
-        *([_centre_html_line(activity_line, 34)] if activity_line else []),
+        *([""] if activity_lines else []),
+        *activity_lines,
     ]
 
     if bonding and not bonding.get("bonded", False):
