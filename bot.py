@@ -3502,7 +3502,6 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
 
     raw = base64.b64decode(GRX_TRENDING_BG_B64)
     im = Image.open(BytesIO(raw)).convert("RGB")
-    # Keep the supplied artwork untouched apart from the requested top-right text.
     draw = ImageDraw.Draw(im)
     w, h = im.size
 
@@ -3515,35 +3514,39 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         ])
         for p in candidates:
-            try: return ImageFont.truetype(p, size)
-            except Exception: pass
+            try:
+                return ImageFont.truetype(p, size)
+            except Exception:
+                pass
         return ImageFont.load_default()
-
-    # No panel/border: render the call stats directly over the supplied artwork.
-    x0, y0 = int(w * .60), int(h * .10)
-    x1, y1 = int(w * .965), int(h * .68)
 
     current_mc = float(current_mc or 0)
     called_mc = float(called_mc or 0)
     pct = ((current_mc / called_mc) - 1.0) * 100.0 if called_mc > 0 else 0.0
     sign = "+" if pct >= 0 else ""
-    gain_colour = (35, 235, 105) if pct >= 0 else (255, 80, 95)
+    gain_colour = (35, 235, 75) if pct >= 0 else (255, 70, 85)
 
-    value_f = font(max(30, int(h*.078)), True)
-    age_f = font(max(22, int(h*.052)), True)
-    gain_label_f = font(max(22, int(h*.050)), True)
-    gain_f = font(max(40, int(h*.115)), True)
+    # Phanes-style hierarchy: large, bold, high-contrast type directly on artwork.
+    # No panel, border, or divider lines.
+    x = int(w * 0.60)
+    y = int(h * 0.19)
+    shadow = max(2, int(h * 0.005))
 
-    pad = int(w*.025)
-    tx = x0 + pad
-    ty = y0 + int(h*.025)
-    draw.text((tx, ty), f"CALLED : {_fmt_usd(called_mc)}", font=value_f, fill=(255,255,255))
-    ty += int(h*.095)
-    draw.text((tx, ty), f"{called_age} ago", font=age_f, fill=(235,235,240))
-    ty += int(h*.115)
-    draw.text((tx, ty), "SINCE CALL", font=gain_label_f, fill=(255,255,255))
-    ty += int(h*.060)
-    draw.text((tx, ty), f"{sign}{pct:.1f}%", font=gain_f, fill=gain_colour)
+    called_label_f = font(max(38, int(h * 0.085)), True)
+    age_f = font(max(28, int(h * 0.060)), True)
+    since_f = font(max(30, int(h * 0.064)), True)
+    gain_f = font(max(64, int(h * 0.145)), True)
+
+    def text(pos, value, fnt, fill):
+        draw.text(pos, value, font=fnt, fill=fill, stroke_width=shadow, stroke_fill=(0, 0, 0))
+
+    text((x, y), f"CALLED AT {_fmt_usd(called_mc)}", called_label_f, (255, 255, 255))
+    y += int(h * 0.115)
+    text((x, y), f"{called_age} ago", age_f, (245, 245, 245))
+    y += int(h * 0.135)
+    text((x, y), "SINCE CALL", since_f, (255, 255, 255))
+    y += int(h * 0.075)
+    text((x, y), f"{sign}{pct:.1f}%", gain_f, gain_colour)
 
     buf = BytesIO()
     im.save(buf, format="PNG", optimize=True)
