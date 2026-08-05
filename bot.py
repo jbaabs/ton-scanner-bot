@@ -1532,6 +1532,28 @@ def _chart_axis_price(v, _pos=None):
     if a >= .000001: return f"{v:.8f}".rstrip("0").rstrip(".")
     return f"{v:.10f}".rstrip("0").rstrip(".")
 
+def _normalize_chart_ohlcv(ohlcv: list | None) -> list:
+    """Return valid OHLCV rows deduplicated by timestamp in chronological order."""
+    by_ts = {}
+    for row in (ohlcv or []):
+        if not isinstance(row, (list, tuple)) or len(row) < 5:
+            continue
+        try:
+            ts = int(row[0])
+            # Copy the row so chart rendering never mutates shared candle state.
+            clean = list(row)
+            clean[0] = ts
+            by_ts[ts] = clean
+        except (TypeError, ValueError, IndexError):
+            continue
+    return [by_ts[ts] for ts in sorted(by_ts)]
+
+
+def _chart_time_format(timeframe_label: str) -> str:
+    """Use clock labels for every intraday chart timeframe."""
+    return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
+
+
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
@@ -1541,6 +1563,9 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     from datetime import datetime, timezone
     from io import BytesIO
 
+    ohlcv = _normalize_chart_ohlcv(ohlcv)
+    if not ohlcv:
+        raise ValueError("No valid OHLCV candles to render")
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
     lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
@@ -1581,7 +1606,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
     ax.set_ylim(min(lows)-pad,max(highs)+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
-    ids=sorted(set(ids)); fmt="%H:%M" if timeframe_label.lower() in ("1m","5m","15m","30m","1h","4h") else "%b %d"
+    ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
     ax.yaxis.tick_right()
@@ -1620,6 +1645,9 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     bg="#050607"; panel="#090b0d"; cell="#0b0f13"; line="#343b43"; text="#ffffff"; muted="#b7c0ca"; green="#55e0ad"; red="#ff7478"; purple="#a968ff"
     def pc(v):
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
+    ohlcv = _normalize_chart_ohlcv(ohlcv)
+    if not ohlcv:
+        raise ValueError("No valid OHLCV candles to render")
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
     fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
@@ -1665,7 +1693,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
-    fmt="%H:%M" if timeframe_label in ("1m","5m","1H","4H") else "%b %d"
+    fmt=_chart_time_format(timeframe_label)
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors="#b5bbc2",labelsize=8.5,length=0,pad=8); ax.yaxis.tick_right()
     ax.set_axisbelow(False)
@@ -2423,7 +2451,7 @@ def _merge_live_swaps_into_ohlcv(ohlcv,pool,timeframe_key):
         _apply_swap_to_book(pool,timeframe_key,swap)
     rows=GRX_CANDLE_BOOK.get((pool,timeframe_key), rows)
     visible = 120 if timeframe_key == "1m" else 90
-    return [list(r) for r in rows[-visible:]]
+    return _normalize_chart_ohlcv(rows)[-visible:]
 
 def _apply_swap_to_all_live_timeframes(pool: str, swap: dict) -> None:
     # Keep every selectable chart ready before the user presses its button.
