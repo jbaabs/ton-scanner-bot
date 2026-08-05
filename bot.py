@@ -183,6 +183,40 @@ HOLDERS_CACHE_TTL = 45
 ATH_CACHE: dict[str, tuple[float, object]] = {}
 ATH_CACHE_TTL = 15 * 60
 SCAN_INFLIGHT: dict[str, asyncio.Task] = {}
+TOKEN_STATE_CACHE: dict[str, tuple[float, dict]] = {}
+TOKEN_STATE_TTL = max(2.0, float(os.getenv("TOKEN_STATE_TTL", "6")))
+TOKEN_STATE_STALE_TTL = max(TOKEN_STATE_TTL, float(os.getenv("TOKEN_STATE_STALE_TTL", "45")))
+TOKEN_STATE_LOCKS: dict[str, asyncio.Lock] = {}
+PERF_ENABLED = os.getenv("GRX_PERF_LOG", "0") == "1"
+
+def _perf_log(label: str, started: float) -> None:
+    if PERF_ENABLED:
+        logger.info("PERF %-24s %.0fms", label, (time.perf_counter() - started) * 1000)
+
+def _token_state_get(address: str, ttl: float = TOKEN_STATE_TTL):
+    item=TOKEN_STATE_CACHE.get(str(address or "").strip())
+    if not item: return None
+    ts,report=item
+    return report if time.monotonic()-ts <= ttl else None
+
+def _token_state_put(address: str, report: dict):
+    key=str(address or "").strip()
+    if key and report:
+        TOKEN_STATE_CACHE[key]=(time.monotonic(),report)
+        if len(TOKEN_STATE_CACHE)>1000:
+            cutoff=time.monotonic()-TOKEN_STATE_STALE_TTL
+            for k,(ts,_) in list(TOKEN_STATE_CACHE.items()):
+                if ts<cutoff:
+                    TOKEN_STATE_CACHE.pop(k,None); TOKEN_STATE_LOCKS.pop(k,None)
+    return report
+
+def _token_state_lock(address: str):
+    key=str(address or "").strip()
+    lock=TOKEN_STATE_LOCKS.get(key)
+    if lock is None:
+        lock=TOKEN_STATE_LOCKS[key]=asyncio.Lock()
+    return lock
+
 RENDER_SEMAPHORE = asyncio.Semaphore(3)
 
 def _refresh_lock(key: str) -> asyncio.Lock:
@@ -396,6 +430,8 @@ async def alert_watcher():
                 for address in addresses:
                     try:
                         report = await scan_token(session, address)
+                        _token_state_put(address, report)
+                        _register_report_live_pool(report)
                         save_token_snapshot(report)
                     except Exception:
                         logger.exception("Background GRX snapshot failed for %s", address)
@@ -945,6 +981,7 @@ def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
     if scanner_meta:
         save_scan_history(report, scanner_meta)
 
+    _token_state_put(report.get("address"), report)
     REPORT_CACHE[key] = {
         "report": report,
         "show_info": False,
@@ -2539,10 +2576,24 @@ def _trim_perf_caches():
             oldest=sorted(cache.items(), key=lambda kv: kv[1][0])[:len(cache)-limit]
             for k,_ in oldest: cache.pop(k,None)
 
+_CACHE_INFLIGHT: dict[tuple, asyncio.Task] = {}
+
+async def _singleflight(cache_name: str, key, coro_factory):
+    flight_key=(cache_name,str(key))
+    task=_CACHE_INFLIGHT.get(flight_key)
+    if task is not None:
+        return await task
+    task=asyncio.create_task(coro_factory())
+    _CACHE_INFLIGHT[flight_key]=task
+    try:
+        return await task
+    finally:
+        _CACHE_INFLIGHT.pop(flight_key,None)
+
 async def _cached_jetton_info(session, address):
     cached=_ttl_get(JETTON_INFO_CACHE,address,JETTON_INFO_CACHE_TTL)
     if cached is not None: return cached
-    value=await get_jetton_info(session,address)
+    value=await _singleflight("jetton",address,lambda: get_jetton_info(session,address))
     if value: _ttl_put(JETTON_INFO_CACHE,address,value)
     return value
 
@@ -2550,21 +2601,49 @@ async def _cached_holders(session,address,limit=10):
     key=f"{address}:{limit}"
     cached=_ttl_get(HOLDERS_CACHE,key,HOLDERS_CACHE_TTL)
     if cached is not None: return cached
-    value=await get_jetton_holders(session,address,limit=limit)
+    value=await _singleflight("holders",key,lambda: get_jetton_holders(session,address,limit=limit))
     if value is not None: _ttl_put(HOLDERS_CACHE,key,value)
     return value
 
 async def _cached_ath(session,pool):
     cached=_ttl_get(ATH_CACHE,pool,ATH_CACHE_TTL)
     if cached is not None: return cached
-    value=await get_gecko_ath(session,pool)
+    value=await _singleflight("ath",pool,lambda: get_gecko_ath(session,pool))
     if value is not None: _ttl_put(ATH_CACHE,pool,value)
     return value
 
 async def _render_offloop(func,*args):
     # Prevent a burst of users from starting too many Matplotlib jobs at once.
+    started=time.perf_counter()
     async with RENDER_SEMAPHORE:
-        return await asyncio.to_thread(func,*args)
+        result=await asyncio.to_thread(func,*args)
+    _perf_log(f"render {getattr(func, '__name__', 'image')}",started)
+    return result
+
+async def get_token_state(session: aiohttp.ClientSession, address: str, *, force: bool=False) -> dict:
+    """Shared short-lived state; duplicate concurrent requests collapse into one scan."""
+    started=time.perf_counter()
+    if not force:
+        cached=_token_state_get(address)
+        if cached is not None:
+            _perf_log("token cache hit",started); return cached
+    async with _token_state_lock(address):
+        if not force:
+            cached=_token_state_get(address)
+            if cached is not None:
+                _perf_log("token cache hit lock",started); return cached
+        stale=_token_state_get(address,TOKEN_STATE_STALE_TTL)
+        try:
+            report=await scan_token(session,address)
+            _token_state_put(address,report)
+            _perf_log("token scan",started)
+            return report
+        except Exception:
+            if stale is not None:
+                logger.warning("Using recent cached token state after provider failure: %s",address)
+                _perf_log("token stale fallback",started)
+                return stale
+            raise
 
 async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
     # TonAPI metadata and DEX discovery are independent: fetch them together.
