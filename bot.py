@@ -334,6 +334,22 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leaderboard_calls (
+            chat_id INTEGER NOT NULL,
+            token_key TEXT NOT NULL,
+            token_address TEXT NOT NULL,
+            token_symbol TEXT,
+            caller_id INTEGER,
+            caller_name TEXT,
+            called_market_cap REAL NOT NULL,
+            called_ts INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, token_key)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lb_chat_ts ON leaderboard_calls(chat_id, called_ts DESC)")
     conn.commit()
     conn.close()
 
@@ -795,6 +811,95 @@ def _live_trade_metrics(report: dict, seconds: int = 300) -> dict:
     pressure = (buy_value / (buy_value + sell_value) * 100.0) if valued and (buy_value + sell_value) > 0 else None
     flow = (buy_value - sell_value) if valued else None
     return {"trades": trades if trades else None, "buy_pressure": pressure, "net_flow": flow}
+
+
+LB_WINDOWS = {"1d": (86400, "1D"), "1w": (7 * 86400, "1W"), "2w": (14 * 86400, "2W"), "1m": (30 * 86400, "1M")}
+
+def save_leaderboard_call(message: Message, report: dict, scanner_meta: dict | None) -> None:
+    """Persist the first call for a token in this chat. Later scans never overwrite it."""
+    if not scanner_meta or not message.from_user:
+        return
+    token_key = _history_key(report)
+    address = str(report.get("address") or "").strip()
+    called_mc = _as_float((report.get("dex_data") or {}).get("market_cap"))
+    if not token_key or not address or not called_mc or called_mc <= 0:
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO leaderboard_calls
+            (chat_id, token_key, token_address, token_symbol, caller_id, caller_name, called_market_cap, called_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (message.chat.id, token_key, address, str((report.get("jetton_info") or {}).get("symbol") or "TOKEN"),
+             message.from_user.id, scanner_meta.get("scanner_name") or _fmt_username(message), called_mc,
+             int(scanner_meta.get("scan_ts") or time.time())),
+        )
+
+def _lb_keyboard(active: str):
+    b = InlineKeyboardBuilder()
+    b.row(*[InlineKeyboardButton(text=(f"• {label} •" if key == active else label), callback_data=f"lb:{key}")
+            for key, (_, label) in LB_WINDOWS.items()])
+    return b.as_markup()
+
+def _lb_caller_link(row: dict) -> str:
+    name = str(row.get("caller_name") or "Unknown")
+    shown = name if name.startswith("@") else name
+    caller_id = row.get("caller_id")
+    if caller_id:
+        return f'<a href="tg://user?id={int(caller_id)}">{html.escape(shown)}</a>'
+    return html.escape(shown)
+
+def _fmt_multiple(value: float) -> str:
+    if value >= 100:
+        return f"{value:.0f}x"
+    if value >= 10:
+        return f"{value:.1f}x".replace(".0x", "x")
+    shown = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{shown}x"
+
+async def _lb_current_mcap(session: aiohttp.ClientSession, address: str) -> float | None:
+    pairs = await get_dex_data(session, address)
+    if not pairs:
+        return None
+    ton_pairs = [p for p in pairs if _is_ton_pair(p)] or pairs
+    ton_pairs.sort(key=lambda p: _pair_liquidity(p), reverse=True)
+    best = ton_pairs[0]
+    return _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
+
+async def build_leaderboard(chat_id: int, timeframe: str) -> str:
+    seconds, label = LB_WINDOWS.get(timeframe, LB_WINDOWS["1d"])
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM leaderboard_calls WHERE chat_id=? AND called_ts>=? ORDER BY called_ts DESC",
+            (chat_id, cutoff),
+        ).fetchall()]
+    if not rows:
+        return f"🔥 <b>GRX LEADERBOARD</b>\nTop Calls · <b>{label}</b>\n\nNo qualifying scans yet."
+    sem = asyncio.Semaphore(8)
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300)) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+    ranked.sort(key=lambda r: r["multiple"], reverse=True)
+    ranked = ranked[:10]
+    lines = ["🔥 <b>GRX LEADERBOARD</b>", f"Top Calls · <b>{label}</b>", ""]
+    medals = ["🥇", "🥈", "🥉"]
+    for i, row in enumerate(ranked, 1):
+        rank = medals[i - 1] if i <= 3 else f"{i}."
+        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        lines.append(f"{rank} <b>${symbol}</b> — {_lb_caller_link(row)} — <b>{_fmt_multiple(row['multiple'])}</b>")
+    if not ranked:
+        lines.append("No leaderboard prices are available right now.")
+    return "\n".join(lines)
 
 
 def save_recent_chat_scan(message: Message, report: dict, sent_message: Message) -> None:
@@ -3817,6 +3922,7 @@ async def handle_address(message: Message):
                 return
 
             scanner_meta = _build_scanner_meta(message, report)
+            save_leaderboard_call(message, report, scanner_meta)
             save_token_snapshot(report)
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
@@ -4138,6 +4244,26 @@ async def handle_alert_choice(callback: CallbackQuery):
 async def cancel_alert_input(message: Message):
     if message.from_user: PENDING_ALERT_INPUT.pop(message.from_user.id,None)
     await message.answer("Alert setup cancelled.")
+
+@dp.message(Command("lb", ignore_case=True))
+async def show_leaderboard(message: Message):
+    text = await build_leaderboard(message.chat.id, "1d")
+    await message.answer(text, reply_markup=_lb_keyboard("1d"), disable_web_page_preview=True)
+
+@dp.callback_query(F.data.startswith("lb:"))
+async def handle_leaderboard_timeframe(callback: CallbackQuery):
+    timeframe = callback.data.split(":", 1)[1].lower()
+    if timeframe not in LB_WINDOWS:
+        await callback.answer()
+        return
+    await callback.answer("Updating leaderboard...")
+    text = await build_leaderboard(callback.message.chat.id, timeframe)
+    try:
+        await callback.message.edit_text(text, reply_markup=_lb_keyboard(timeframe), disable_web_page_preview=True)
+    except Exception:
+        logger.exception("Error updating leaderboard")
+        await callback.answer("Couldn't update the leaderboard right now.", show_alert=True)
+
 
 @dp.message(Command("wl", ignore_case=True))
 async def show_watchlist(message: Message):
