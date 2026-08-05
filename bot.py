@@ -3495,6 +3495,83 @@ bot = Bot(
 dp = Dispatcher()
 
 
+
+def build_test_trending_card() -> bytes:
+    """Deterministic GRAMX6900-style preview card for /testtrending."""
+    from PIL import Image, ImageDraw, ImageFont
+    from io import BytesIO
+
+    W, H = 1080, 1350
+    bg=(2,5,18); navy=(3,10,31); panel=(3,8,27); cyan=(32,194,255); blue=(25,118,255)
+    yellow=(255,220,24); green=(65,255,91); white=(232,238,248); muted=(139,157,184); magenta=(255,72,213)
+    im=Image.new('RGB',(W,H),bg); d=ImageDraw.Draw(im)
+    # CRT scanlines / subtle terminal texture.
+    for y in range(0,H,5): d.line((0,y,W,y),fill=(4,11,29),width=1)
+    for x in range(0,W,90): d.line((x,0,x,H),fill=(3,9,25),width=1)
+    def font(size,bold=False):
+        paths=['/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+               '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf']
+        for fp in paths:
+            try:return ImageFont.truetype(fp,size)
+            except:pass
+        return ImageFont.load_default()
+    def box(x1,y1,x2,y2,outline=cyan,w=2):
+        d.rectangle((x1,y1,x2,y2),fill=panel,outline=outline,width=w)
+    def txt(x,y,t,size=28,c=white,b=False,anchor=None): d.text((x,y),str(t),font=font(size,b),fill=c,anchor=anchor)
+    def metric(cx, y, value, label, c):
+        txt(cx,y,value,44,c,True,'ma'); txt(cx,y+45,label,20,muted,False,'ma')
+
+    # Outer terminal frame.
+    d.rectangle((24,24,W-24,H-24),outline=(16,83,145),width=2)
+    d.line((24,112,W-24,112),fill=cyan,width=3)
+    txt(52,52,'GRX TRENDING',36,green,True); txt(W-54,52,'#1',54,yellow,True,'ra')
+    txt(52,130,'EST. 2026  •  FINANCIAL RESISTANCE NETWORK',19,green,True)
+
+    # Token identity.
+    d.ellipse((55,188,205,338),outline=blue,width=5); txt(130,262,'G',72,cyan,True,'mm')
+    txt(240,195,'$TOKEN',58,cyan,True); txt(242,260,'TOKEN NAME',24,muted,True)
+    txt(242,305,'TON',21,cyan,True); txt(330,305,'STON.fi',21,magenta,True)
+    txt(W-70,202,'TRENDING SCORE',18,cyan,True,'ra'); txt(W-70,236,'94',66,blue,True,'ra')
+
+    box(48,370,W-48,520,(14,93,160),2)
+    metric(205,405,'47','SCANS',blue); metric(540,405,'31','UNIQUE SCANNERS',cyan); metric(870,405,'+18','SCANNERS / 1H',yellow)
+    d.line((365,390,365,500),fill=(15,105,171),width=2); d.line((710,390,710,500),fill=(15,105,171),width=2)
+
+    # Stats table, no chart.
+    box(48,555,W-48,890,cyan,2)
+    rows=[('CURRENT MARKET CAP','$184K',yellow),('FIRST SCAN MARKET CAP','$101K',yellow),('ATH SINCE FIRST SCAN','$231K',yellow),('SINCE FIRST SCAN','+82.4%',green)]
+    yy=585
+    for i,(lab,val,col) in enumerate(rows):
+        txt(82,yy,lab,25,cyan,True); txt(W-82,yy,val,30,col,True,'ra')
+        if i<3:d.line((78,yy+57,W-78,yy+57),fill=(11,87,151),width=1)
+        yy+=78
+
+    box(48,925,W-48,1080,(17,103,174),2)
+    txt(82,955,'FIRST SCANNED BY',22,yellow,True); txt(82,995,'@Josh',34,white,True); txt(82,1037,'43 minutes ago',19,muted)
+    d.line((610,945,610,1060),fill=(14,99,165),width=2)
+    txt(650,955,'FIRST SCAN',22,blue,True); txt(650,1000,'43m ago',34,white,True)
+
+    # Brand footer + contract strip.
+    txt(W//2,1140,'GRX6900',56,cyan,True,'ma'); txt(W//2,1192,'REAL SCANS. REAL EDGE.',20,green,True,'ma')
+    box(48,1230,W-48,1310,cyan,2); txt(72,1247,'CONTRACT ADDRESS',18,green,True); txt(72,1277,'EQAS6ZqfngpjbXn7SJdBjIY6o0xt_NusP4ULLXYCVauQy',16,cyan)
+    out=BytesIO(); im.save(out,'PNG',optimize=True); return out.getvalue()
+
+
+@dp.message(Command("testtrending", ignore_case=True))
+async def cmd_test_trending(message: Message):
+    """Preview only: does not write scan/trending data or post to @GRXStats."""
+    try:
+        png = await _render_offloop(build_test_trending_card)
+        await message.answer_photo(
+            BufferedInputFile(png, filename="grx_trending_test.png"),
+            caption=("🧪 <b>GRX Trending — TEST CARD</b>\n"
+                     "Preview only. No leaderboard/trending data was changed and nothing was posted to @GRXStats."),
+        )
+    except Exception:
+        logger.exception("Error rendering /testtrending preview")
+        await message.answer("Could not render the test trending card. Check the bot logs for the error.")
+
+
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     await message.answer(
