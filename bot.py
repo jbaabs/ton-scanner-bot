@@ -3551,9 +3551,11 @@ def build_test_trending_card() -> bytes:
     d.line((610,945,610,1060),fill=(14,99,165),width=2)
     txt(650,955,'FIRST SCAN',22,blue,True); txt(650,1000,'43m ago',34,white,True)
 
-    # Brand footer + contract strip.
-    txt(W//2,1140,'GRX6900',56,cyan,True,'ma'); txt(W//2,1192,'REAL SCANS. REAL EDGE.',20,green,True,'ma')
-    box(48,1230,W-48,1310,cyan,2); txt(72,1247,'CONTRACT ADDRESS',18,green,True); txt(72,1277,'EQAS6ZqfngpjbXn7SJdBjIY6o0xt_NusP4ULLXYCVauQy',16,cyan)
+    # Prominent website-style brand footer + contract strip.
+    txt(W//2,1118,'GRAMX6900',78,cyan,True,'ma')
+    txt(W//2,1190,'GRX SCAN',38,yellow,True,'ma')
+    txt(W//2,1228,'REAL SCANS. REAL EDGE.',18,green,True,'ma')
+    box(48,1260,W-48,1325,cyan,2); txt(72,1272,'CONTRACT ADDRESS',16,green,True); txt(72,1298,'EQAS6ZqfngpjbXn7SJdBjIY6o0xt_NusP4ULLXYCVauQy',15,cyan)
     out=BytesIO(); im.save(out,'PNG',optimize=True); return out.getvalue()
 
 
