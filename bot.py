@@ -1782,14 +1782,13 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
-    # Subtle GRX signature in the otherwise-unused black footer area.
+    # Subtle footer branding across the central span beneath the stat grid.
+    # Sized to roughly match the horizontal distance from the BUYS card to the SELLS card.
     fig.text(
         .5, .085, "POWERED BY GRX",
         color=(1.0, 1.0, 1.0, 0.38),
-        fontsize=10.5,
-        fontweight="bold",
-        ha="center",
-        va="center",
+        fontsize=18.0, fontweight="bold",
+        ha="center", va="center",
     )
 
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
@@ -3556,12 +3555,27 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
 
     current_mc = float(current_mc or 0)
     called_mc = float(called_mc or 0)
-    pct = ((current_mc / called_mc) - 1.0) * 100.0 if called_mc > 0 else 0.0
-    sign = "+" if pct >= 0 else ""
-    gain_colour = (88, 255, 20) if pct >= 0 else (255, 65, 75)
+    multiple = (current_mc / called_mc) if called_mc > 0 else 0.0
+    gain_colour = (88, 255, 20) if multiple >= 1.0 else (255, 65, 75)
 
     called_text = f"CALLED AT {_fmt_usd(called_mc)}"
-    gain_text = f"{sign}{pct:.1f}%"
+
+    def _fmt_multiple(value: float) -> str:
+        if value >= 100:
+            return f"{value:.0f}x"
+        if value >= 10:
+            return f"{value:.1f}x".replace(".0x", "x")
+        return f"{value:.2f}x".rstrip("0").rstrip(".") + ("" if str(value).endswith("x") else "")
+
+    # Keep the PNL card focused on the multiple from called MC to current MC.
+    if multiple < 10:
+        gain_text = f"{multiple:.2f}x".rstrip("0").rstrip(".")
+        if not gain_text.endswith("x"):
+            gain_text += "x"
+    elif multiple < 100:
+        gain_text = f"{multiple:.1f}x".replace(".0x", "x")
+    else:
+        gain_text = f"{multiple:.0f}x"
 
     # Right-side PNL typography area. Font sizes are fitted to pixel width,
     # not hard-coded, so Telegram scaling cannot turn them microscopic.
@@ -3605,7 +3619,7 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
         font=gain_font,
         fill=gain_colour,
         stroke_width=stroke_gain,
-        stroke_fill=(10, 45, 0) if pct >= 0 else (55, 0, 0),
+        stroke_fill=(10, 45, 0) if multiple >= 1.0 else (55, 0, 0),
     )
 
     # Log exactly what the live renderer used, so font fallback/scaling issues
