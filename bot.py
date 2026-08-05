@@ -1594,11 +1594,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
+    fig=plt.figure(figsize=(8,7.45),dpi=160,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
-    fig.text(.965,.974,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
+    fig.text(.965,.968,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
     # Token artwork + identity, DTrade-inspired but kept in GRX styling.
@@ -1614,18 +1614,18 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             mask = Image.new("L", (128, 128), 0)
             ImageDraw.Draw(mask).ellipse((1, 1, 127, 127), fill=255)
             icon.putalpha(mask)
-            iax = fig.add_axes([.04, .895, .055, .055], zorder=20)
+            iax = fig.add_axes([.04, .884, .055, .067], zorder=20)
             iax.imshow(icon)
             iax.axis("off")
             title_x = .108
         except Exception:
             pass
 
-    fig.text(title_x,.927,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
-    fig.text(title_x,.899,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
+    fig.text(title_x,.918,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.884,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
-    fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
-    ax=fig.add_axes([.045,.595,.90,.275],facecolor=bg)
+    fig.text(.96,.916,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
+    ax=fig.add_axes([.045, .472,.90,.325],facecolor=bg)
     n=len(ohlcv)
     width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
@@ -1650,11 +1650,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
 
     # Compact pulse/caller band.
-    box(.025,.445,.465,.115); box(.51,.445,.465,.115)
-    fig.text(.045,.535,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
+    box(.025,.365,.465,.135); box(.51,.365,.465,.135)
+    fig.text(.045,.472,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
     for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
-        y=.507-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.535,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
+        y=.438-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
+    fig.text(.53,.472,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
     first=get_first_scan_resolved(report)
     if first:
         caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL); then_txt=str(first.get("scan_market_cap") or "N/A")
@@ -1665,10 +1665,10 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             try:return float(t)*m
             except:return None
         now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
-        fig.text(.53,.507,caller,color=text,fontsize=9.5,fontweight="bold")
-        fig.text(.53,.480,"THEN",color=muted,fontsize=7.5); fig.text(.72,.480,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.75,.480,"NOW",color=muted,fontsize=7.5); fig.text(.955,.480,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.53, .438,caller,color=text,fontsize=9.5,fontweight="bold")
+        fig.text(.53, .405,"THEN",color=muted,fontsize=7.5); fig.text(.72, .405,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.75, .405,"NOW",color=muted,fontsize=7.5); fig.text(.955, .405,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.53, .375,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955, .375,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
     else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
 
     # Compact 3 x 2 stat grid on each side. The centre split remains aligned
@@ -1696,8 +1696,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     half_w = .465
     col_gap = .007
     row_gap = .010
-    grid_top = .425
-    grid_bottom = .185
+    grid_top = .345
+    grid_bottom = .035
     card_h = (grid_top - grid_bottom - row_gap) / 2
     card_w = (half_w - 2 * col_gap) / 3
 
