@@ -39,6 +39,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TONAPI_KEY = os.getenv("TONAPI_KEY", "")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 DB_PATH = os.getenv("SCAN_DB_PATH", "scan_history.db")
+GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXStats").strip()
+BOT_USERNAME = ""
 
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 DEXSCREENER_SEARCH_API = "https://api.dexscreener.com/latest/dex/search"
@@ -351,6 +353,33 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_lb_chat_ts ON leaderboard_calls(chat_id, called_ts DESC)")
+    # Global scan-event ledger. Unlike the short display history, this is not capped.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_key TEXT NOT NULL,
+            token_address TEXT NOT NULL,
+            token_symbol TEXT,
+            scanner_id INTEGER,
+            scanner_name TEXT,
+            chat_id INTEGER,
+            chat_type TEXT,
+            source_key TEXT NOT NULL,
+            scan_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_events_token_ts ON scan_events(token_key, scan_ts DESC)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trending_alerts (
+            token_key TEXT PRIMARY KEY,
+            last_alert_ts INTEGER NOT NULL,
+            last_tier INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -814,6 +843,136 @@ def _live_trade_metrics(report: dict, seconds: int = 300) -> dict:
     return {"trades": trades if trades else None, "buy_pressure": pressure, "net_flow": flow}
 
 
+
+def _scan_source_key(message: Message) -> str:
+    """A stable unique source: private user, group/channel, or user-in-group."""
+    chat_type = str(getattr(message.chat, "type", "") or "")
+    if chat_type == "private" and message.from_user:
+        return f"user:{message.from_user.id}"
+    # A group/channel is one discovery source regardless of repeated users inside it.
+    return f"chat:{message.chat.id}"
+
+def record_scan_event(message: Message, report: dict, scanner_meta: dict | None) -> None:
+    token_key = _history_key(report)
+    address = str(report.get("address") or "").strip()
+    if not token_key or not address:
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO scan_events
+            (token_key, token_address, token_symbol, scanner_id, scanner_name,
+             chat_id, chat_type, source_key, scan_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                token_key,
+                address,
+                str((report.get("jetton_info") or {}).get("symbol") or "TOKEN"),
+                message.from_user.id if message.from_user else None,
+                (scanner_meta or {}).get("scanner_name"),
+                message.chat.id,
+                str(getattr(message.chat, "type", "") or ""),
+                _scan_source_key(message),
+                int(time.time()),
+            ),
+        )
+
+def get_scan_activity(report: dict, seconds: int | None = None) -> dict:
+    token_key = _history_key(report)
+    if not token_key:
+        return {"scans": 0, "sources": 0, "users": 0}
+    where = "token_key=?"
+    args = [token_key]
+    if seconds:
+        where += " AND scan_ts>=?"
+        args.append(int(time.time()) - int(seconds))
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS scans,
+                   COUNT(DISTINCT source_key) AS sources,
+                   COUNT(DISTINCT CASE WHEN scanner_id IS NOT NULL THEN scanner_id END) AS users
+            FROM scan_events WHERE {where}
+            """,
+            args,
+        ).fetchone()
+    return {"scans": int(row[0] or 0), "sources": int(row[1] or 0), "users": int(row[2] or 0)}
+
+def _trending_snapshot(report: dict) -> dict:
+    """Choose the strongest qualifying velocity window and tier."""
+    windows = [
+        # tier, seconds, minimum scans, minimum independent sources, display label
+        (3, 10 * 60, 40, 15, "10m"),
+        (2, 10 * 60, 20, 10, "10m"),
+        (1, 10 * 60, 10, 6, "10m"),
+        (1, 30 * 60, 18, 8, "30m"),
+        (1, 60 * 60, 28, 10, "1h"),
+    ]
+    for tier, seconds, min_scans, min_sources, label in windows:
+        stats = get_scan_activity(report, seconds)
+        if stats["scans"] >= min_scans and stats["sources"] >= min_sources:
+            return {**stats, "tier": tier, "window": label}
+    return {"tier": 0}
+
+def _deep_scan_url(address: str) -> str | None:
+    if not BOT_USERNAME or not address:
+        return None
+    return f"https://t.me/{BOT_USERNAME}?start=scan_{address}"
+
+async def maybe_announce_trending(report: dict) -> None:
+    if not GRX_TRENDING_CHANNEL:
+        return
+    snap = _trending_snapshot(report)
+    tier = int(snap.get("tier") or 0)
+    if tier <= 0:
+        return
+
+    token_key = _history_key(report)
+    now = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT last_alert_ts,last_tier FROM trending_alerts WHERE token_key=?",
+            (token_key,),
+        ).fetchone()
+        # Do not spam: same tier has a 6h cooldown. A higher tier may alert immediately.
+        if row and tier <= int(row[1] or 0) and now - int(row[0] or 0) < 6 * 3600:
+            return
+
+    info = report.get("jetton_info") or {}
+    symbol = str(info.get("symbol") or "TOKEN").lstrip("$")
+    address = str(report.get("address") or "")
+    scan_url = _deep_scan_url(address)
+    title = html.escape(symbol)
+    lines = [
+        f'{_ce("leaderboard", "📈")} <b>{title} ENTERED GRX TRENDING</b>',
+        "",
+        f'<b>{snap["scans"]} Scans</b> · <b>{snap["sources"]} Independent Scanners</b> · <b>{snap["window"]}</b>',
+    ]
+    if scan_url:
+        lines += ["", f'🔎 <a href="{html.escape(scan_url, quote=True)}">Click for {title} scan</a>']
+    try:
+        await bot.send_message(
+            GRX_TRENDING_CHANNEL,
+            "\n".join(lines),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logger.exception("Failed to post GRX Trending alert to %s", GRX_TRENDING_CHANNEL)
+        return
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO trending_alerts(token_key,last_alert_ts,last_tier)
+            VALUES(?,?,?)
+            ON CONFLICT(token_key) DO UPDATE SET
+                last_alert_ts=excluded.last_alert_ts,
+                last_tier=MAX(trending_alerts.last_tier, excluded.last_tier)
+            """,
+            (token_key, now, tier),
+        )
+
 LB_WINDOWS = {"1d": (86400, "1D"), "1w": (7 * 86400, "1W"), "2w": (14 * 86400, "2W"), "1m": (30 * 86400, "1M")}
 
 def save_leaderboard_call(message: Message, report: dict, scanner_meta: dict | None) -> None:
@@ -921,8 +1080,14 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     for i, row in enumerate(ranked, 1):
         rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
         symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        address = str(row.get("token_address") or "").strip()
+        gt_url = f"https://www.geckoterminal.com/ton/tokens/{address}" if address else ""
+        ticker = (
+            f'<a href="{html.escape(gt_url, quote=True)}"><b>${symbol}</b></a>'
+            if gt_url else f"<b>${symbol}</b>"
+        )
         ranking_lines.append(
-            f"{rank} <b>${symbol}</b> » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
+            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
         )
 
     # Telegram blockquote styling gives the Top 10 a clean visual rail without adding clutter.
@@ -3456,9 +3621,16 @@ def format_token_report(
         # must not affect the centring calculation.
         social_line = _centre_html_line(social_line, 34)
 
+    activity = get_scan_activity(report)
+    activity_line = (
+        f"📡 <b>Scans</b> {activity['scans']}  •  "
+        f"👥 <b>Independent Scanners</b> {activity['sources']}"
+    ) if activity["scans"] else ""
+
     lines = [
         _centred_token_title(symbol, name, title_suffix),
         *([social_line] if social_line else []),
+        *([_centre_html_line(activity_line, 34)] if activity_line else []),
     ]
 
     if bonding and not bonding.get("bonded", False):
@@ -3790,6 +3962,22 @@ dp = Dispatcher()
 
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload.startswith("scan_"):
+        address = payload[5:]
+        if is_valid_ton_address(address):
+            # Feed the deep-linked address through the exact same scanner handler.
+            # aiogram Message models are immutable, so create a validated copy with
+            # only the text changed; chat/from_user/message context is preserved.
+            try:
+                scan_message = message.model_copy(update={"text": address})
+                await handle_address(scan_message)
+                return
+            except Exception:
+                logger.exception("Deep-link scan failed")
+                await message.answer("I couldn't open that scan. Please send the token address directly.")
+                return
     await message.answer(
         "<b>TON Meme Token Scanner</b>\n\n"
         "Send a TON jetton contract address or ticker."
@@ -3951,6 +4139,7 @@ async def handle_address(message: Message):
 
             scanner_meta = _build_scanner_meta(message, report)
             save_leaderboard_call(message, report, scanner_meta)
+            record_scan_event(message, report, scanner_meta)
             save_token_snapshot(report)
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
@@ -4011,6 +4200,9 @@ async def handle_address(message: Message):
                     reply_markup=keyboard,
                 )
                 save_recent_chat_scan(message, report, sent_scan)
+
+            # Evaluate velocity only after a real scan has been successfully delivered.
+            await maybe_announce_trending(report)
 
     except Exception as e:
         logger.exception("Error scanning token")
@@ -4405,7 +4597,13 @@ async def handle_timeframe(callback: CallbackQuery):
 
 
 async def main():
+    global BOT_USERNAME
     init_db()
+    try:
+        me = await bot.get_me()
+        BOT_USERNAME = str(me.username or "")
+    except Exception:
+        logger.exception("Could not resolve bot username for GRX deep links")
     logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON_ALERTS")
     watcher = asyncio.create_task(alert_watcher())
     live_stream = asyncio.create_task(ton_live_stream_engine())
