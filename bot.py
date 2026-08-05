@@ -3496,7 +3496,7 @@ dp = Dispatcher()
 
 
 
-def build_test_trending_card() -> bytes:
+def build_test_trending_card(report: dict | None = None, icon_bytes: bytes | None = None) -> bytes:
     """Deterministic GRAMX6900-style preview card for /testtrending."""
     from PIL import Image, ImageDraw, ImageFont
     from io import BytesIO
@@ -3537,16 +3537,38 @@ def build_test_trending_card() -> bytes:
             return f"{hours}h"
         return f"{hours // 24}d"
 
+    report = report or {}
+    dex = report.get('dex_data') or {}
+    jet = report.get('jetton_info') or {}
+    symbol = str(jet.get('symbol') or 'TOKEN').upper()
+    name = str(jet.get('name') or 'TOKEN NAME')
+    current_mc = _as_float(dex.get('market_cap')) or _as_float(dex.get('fdv')) or 0
+    # Simulate a scan 43 minutes ago at 82.4% below the current move, while keeping live current market data.
+    first_mc = current_mc / 1.824 if current_mc else 0
+    ath_mc = max(current_mc, current_mc * 1.255) if current_mc else 0
+    dex_name = str(dex.get('dex_id') or 'DEX').upper().replace('_',' ')
+
     # Outer terminal frame.
     d.rectangle((24,24,W-24,H-24),outline=(16,83,145),width=2)
     d.line((24,112,W-24,112),fill=cyan,width=3)
     txt(52,52,'GRX TRENDING',36,green,True); txt(W-54,52,'#1',54,yellow,True,'ra')
     txt(52,130,'EST. 2026  •  FINANCIAL RESISTANCE NETWORK',19,green,True)
 
-    # Token identity.
-    d.ellipse((55,188,205,338),outline=blue,width=5); txt(130,262,'G',72,cyan,True,'mm')
-    txt(240,195,'$TOKEN',58,cyan,True); txt(242,260,'TOKEN NAME',24,muted,True)
-    txt(242,305,'TON',21,cyan,True); txt(330,305,'STON.fi',21,magenta,True)
+    # Token identity using the real token image when available.
+    d.ellipse((55,188,205,338),outline=blue,width=5)
+    if icon_bytes:
+        try:
+            from PIL import ImageOps
+            icon = Image.open(BytesIO(icon_bytes)).convert('RGBA')
+            icon = ImageOps.fit(icon, (138,138), method=Image.Resampling.LANCZOS)
+            mask = Image.new('L',(138,138),0); ImageDraw.Draw(mask).ellipse((0,0,137,137),fill=255)
+            im.paste(icon,(61,194),mask)
+        except Exception:
+            txt(130,262,symbol[:1],72,cyan,True,'mm')
+    else:
+        txt(130,262,symbol[:1],72,cyan,True,'mm')
+    txt(240,195,f'${symbol}',58,cyan,True); txt(242,260,name[:28],24,muted,True)
+    txt(242,305,'TON',21,cyan,True); txt(330,305,dex_name[:18],21,magenta,True)
     txt(W-70,202,'TRENDING SCORE',18,cyan,True,'ra'); txt(W-70,236,'94',66,blue,True,'ra')
 
     # Five equal headline metrics. First Scan now lives here with caller + elapsed time.
@@ -3565,7 +3587,7 @@ def build_test_trending_card() -> bytes:
 
     # Stats table, no chart.
     box(48,570,W-48,905,cyan,2)
-    rows=[('CURRENT MARKET CAP','$184K',yellow),('FIRST SCAN MARKET CAP','$101K',yellow),('ATH SINCE FIRST SCAN','$231K',yellow),('SINCE FIRST SCAN','+82.4%',green)]
+    rows=[('CURRENT MARKET CAP',_fmt_usd(current_mc),yellow),('FIRST SCAN MARKET CAP',_fmt_usd(first_mc),yellow),('ATH SINCE FIRST SCAN',_fmt_usd(ath_mc),yellow),('SINCE FIRST SCAN','+82.4%',green)]
     yy=600
     for i,(lab,val,col) in enumerate(rows):
         txt(82,yy,lab,25,cyan,True); txt(W-82,yy,val,30,col,True,'ra')
@@ -3586,7 +3608,11 @@ def build_test_trending_card() -> bytes:
 async def cmd_test_trending(message: Message):
     """Preview only: does not write scan/trending data or post to @GRXStats."""
     try:
-        png = await _render_offloop(build_test_trending_card)
+        test_ca = 'EQBaCgUwOoc6gHCNln_oJzb0mVs79YG7wYoavh-o1ItaneLA'
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            report = await scan_token(session, test_ca)
+            icon_bytes = await _download_image_bytes(session, _safe_image_url(report))
+        png = await _render_offloop(build_test_trending_card, report, icon_bytes)
         await message.answer_photo(
             BufferedInputFile(png, filename="grx_trending_test.png"),
             caption=("🧪 <b>GRX Trending — TEST CARD</b>\n"
