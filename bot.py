@@ -1661,7 +1661,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    fig=plt.figure(figsize=(8,8.05),dpi=160,facecolor=bg)
+    fig=plt.figure(figsize=(8,7.45),dpi=160,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
@@ -1717,11 +1717,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
 
     # Compact pulse/caller band.
-    box(.025,.405,.465,.115); box(.51,.405,.465,.115)
-    fig.text(.045,.495,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
+    box(.025,.365,.465,.135); box(.51,.365,.465,.135)
+    fig.text(.045,.472,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
     for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
         y=.438-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.495,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
+    fig.text(.53,.472,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
     first=get_first_scan_resolved(report)
     if first:
         caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL); then_txt=str(first.get("scan_market_cap") or "N/A")
@@ -1763,8 +1763,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     half_w = .465
     col_gap = .007
     row_gap = .010
-    grid_top = .385
-    grid_bottom = .075
+    grid_top = .345
+    grid_bottom = .035
     card_h = (grid_top - grid_bottom - row_gap) / 2
     card_w = (half_w - 2 * col_gap) / 3
 
