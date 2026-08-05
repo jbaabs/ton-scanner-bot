@@ -41,6 +41,36 @@ DEBUG = os.getenv("DEBUG", "0") == "1"
 DB_PATH = os.getenv("SCAN_DB_PATH", "scan_history.db")
 GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXStats").strip()
 BOT_USERNAME = ""
+OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "5580192046") or 0)
+
+# Lightweight abuse protection. Legitimate users should rarely notice these.
+_RATE_LIMITS = {
+    "scan": 2.5,       # per user
+    "refresh": 5.0,    # per user
+    "chart": 2.0,      # per user
+    "leaderboard": 10.0,  # per chat
+}
+_RATE_LAST: dict[tuple[str, int], float] = {}
+
+def _rate_limited(bucket: str, identity: int | None) -> float:
+    """Return remaining cooldown seconds, or 0 when allowed."""
+    if not identity:
+        return 0.0
+    now = time.monotonic()
+    key = (bucket, int(identity))
+    cooldown = float(_RATE_LIMITS.get(bucket, 0))
+    last = _RATE_LAST.get(key, 0.0)
+    remaining = cooldown - (now - last)
+    if remaining > 0:
+        return remaining
+    _RATE_LAST[key] = now
+    # Opportunistic cleanup prevents this tiny in-memory map growing forever.
+    if len(_RATE_LAST) > 10000:
+        cutoff = now - 3600
+        for k, ts in list(_RATE_LAST.items()):
+            if ts < cutoff:
+                _RATE_LAST.pop(k, None)
+    return 0.0
 
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 DEXSCREENER_SEARCH_API = "https://api.dexscreener.com/latest/dex/search"
@@ -881,7 +911,7 @@ def record_scan_event(message: Message, report: dict, scanner_meta: dict | None)
 def get_scan_activity(report: dict, seconds: int | None = None) -> dict:
     token_key = _history_key(report)
     if not token_key:
-        return {"scans": 0, "sources": 0, "users": 0}
+        return {"scans": 0, "sources": 0, "users": 0, "groups": 0, "capped_scans": 0}
     where = "token_key=?"
     args = [token_key]
     if seconds:
@@ -892,26 +922,44 @@ def get_scan_activity(report: dict, seconds: int | None = None) -> dict:
             f"""
             SELECT COUNT(*) AS scans,
                    COUNT(DISTINCT source_key) AS sources,
-                   COUNT(DISTINCT CASE WHEN scanner_id IS NOT NULL THEN scanner_id END) AS users
+                   COUNT(DISTINCT CASE WHEN scanner_id IS NOT NULL THEN scanner_id END) AS users,
+                   COUNT(DISTINCT CASE WHEN chat_type IN ('group','supergroup','channel') THEN chat_id END) AS groups
             FROM scan_events WHERE {where}
             """,
             args,
         ).fetchone()
-    return {"scans": int(row[0] or 0), "sources": int(row[1] or 0), "users": int(row[2] or 0)}
+        # Anti-gaming count: any single source can contribute at most 5 scans
+        # toward a Trending trigger inside a velocity window.
+        source_rows = conn.execute(
+            f"SELECT source_key, COUNT(*) FROM scan_events WHERE {where} GROUP BY source_key",
+            args,
+        ).fetchall()
+    capped = sum(min(int(r[1] or 0), 5) for r in source_rows)
+    return {
+        "scans": int(row[0] or 0),
+        "sources": int(row[1] or 0),
+        "users": int(row[2] or 0),
+        "groups": int(row[3] or 0),
+        "capped_scans": int(capped),
+    }
 
 def _trending_snapshot(report: dict) -> dict:
     """Choose the strongest qualifying velocity window and tier."""
     windows = [
-        # tier, seconds, minimum scans, minimum independent sources, display label
-        (3, 10 * 60, 40, 15, "10m"),
-        (2, 10 * 60, 20, 10, "10m"),
-        (1, 10 * 60, 10, 6, "10m"),
-        (1, 30 * 60, 18, 8, "30m"),
-        (1, 60 * 60, 28, 10, "1h"),
+        # tier, seconds, min anti-gaming scans, min sources, min users, display label
+        (3, 10 * 60, 40, 15, 12, "10m"),
+        (2, 10 * 60, 20, 10, 8, "10m"),
+        (1, 10 * 60, 10, 6, 5, "10m"),
+        (1, 30 * 60, 18, 8, 6, "30m"),
+        (1, 60 * 60, 28, 10, 8, "1h"),
     ]
-    for tier, seconds, min_scans, min_sources, label in windows:
+    for tier, seconds, min_scans, min_sources, min_users, label in windows:
         stats = get_scan_activity(report, seconds)
-        if stats["scans"] >= min_scans and stats["sources"] >= min_sources:
+        if (
+            stats["capped_scans"] >= min_scans
+            and stats["sources"] >= min_sources
+            and stats["users"] >= min_users
+        ):
             return {**stats, "tier": tier, "window": label}
     return {"tier": 0}
 
@@ -3622,21 +3670,15 @@ def format_token_report(
         social_line = _centre_html_line(social_line, 34)
 
     activity = get_scan_activity(report)
-    activity_lines = []
-    if activity["scans"]:
-        # Keep scan metrics on separate rows with a blank line after socials.
-        # Group Scans counts unique group/channel sources; Individual Scans
-        # counts unique Telegram user accounts that have scanned the token.
-        activity_lines = [
-            "",
-            f"👥 <b>Group Scans</b> {activity['sources']}",
-            f"👤 <b>Individual Scans</b> {activity['users']}",
-        ]
+    activity_line = (
+        f"📡 <b>Scans</b> {activity['scans']}  •  "
+        f"👥 <b>Independent Scanners</b> {activity['sources']}"
+    ) if activity["scans"] else ""
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
         *([social_line] if social_line else []),
-        *activity_lines,
+        *([_centre_html_line(activity_line, 34)] if activity_line else []),
     ]
 
     if bonding and not bonding.get("bonded", False):
@@ -3994,7 +4036,10 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("testtrending"))
 async def cmd_testtrending(message: Message):
-    """Preview the new GRX call card without enabling leaderboard/trending automation."""
+    """Owner-only preview of the GRX call card."""
+    if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
+        await message.answer("This command is restricted to the GRX bot owner.")
+        return
     status = await message.answer("Building GRX test card…")
     try:
         async with aiohttp.ClientSession(
@@ -4072,6 +4117,14 @@ async def handle_address(message: Message):
             logger.debug("Could not delete alert confirmation message", exc_info=True)
         return
     status_msg = None
+
+    # Do not rate-limit ordinary group conversation or alert-target input.
+    # The cooldown is applied only when the message actually looks like a scan.
+    if is_valid_ton_address(text) or is_valid_ticker(text):
+        remaining = _rate_limited("scan", message.from_user.id if message.from_user else None)
+        if remaining > 0:
+            await message.answer(f"Scan cooldown — try again in {max(1, int(remaining + 0.99))}s.")
+            return
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
@@ -4238,6 +4291,10 @@ async def handle_toggle(callback: CallbackQuery):
     entry["ts"] = time.time()
 
     if section == "refresh":
+        remaining = _rate_limited("refresh", callback.from_user.id if callback.from_user else None)
+        if remaining > 0:
+            await callback.answer(f"Refresh cooldown — {max(1, int(remaining + 0.99))}s")
+            return
         address = str(entry["report"].get("address") or "").strip()
         if not address:
             await callback.answer("No token address found to refresh.", show_alert=True)
@@ -4473,11 +4530,19 @@ async def cancel_alert_input(message: Message):
 
 @dp.message(Command("lb", ignore_case=True))
 async def show_leaderboard(message: Message):
+    remaining = _rate_limited("leaderboard", message.chat.id)
+    if remaining > 0:
+        await message.answer(f"Leaderboard cooldown — try again in {max(1, int(remaining + 0.99))}s.")
+        return
     text = await build_leaderboard(message.chat.id, "1d")
     await message.answer(text, reply_markup=_lb_keyboard("1d"), disable_web_page_preview=True)
 
 @dp.callback_query(F.data.startswith("lb:"))
 async def handle_leaderboard_timeframe(callback: CallbackQuery):
+    remaining = _rate_limited("leaderboard", callback.message.chat.id if callback.message else None)
+    if remaining > 0:
+        await callback.answer(f"Leaderboard cooldown — {max(1, int(remaining + 0.99))}s")
+        return
     timeframe = callback.data.split(":", 1)[1].lower()
     if timeframe not in LB_WINDOWS:
         await callback.answer()
@@ -4543,6 +4608,10 @@ async def show_alert_list(message: Message):
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe(callback: CallbackQuery):
+    remaining = _rate_limited("chart", callback.from_user.id if callback.from_user else None)
+    if remaining > 0:
+        await callback.answer(f"Chart cooldown — {max(1, int(remaining + 0.99))}s")
+        return
     try:
         _, timeframe, key = callback.data.split(":", 2)
     except ValueError:
