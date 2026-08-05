@@ -3501,7 +3501,7 @@ def build_test_trending_card() -> bytes:
     from PIL import Image, ImageDraw, ImageFont
     from io import BytesIO
 
-    W, H = 1080, 1350
+    W, H = 1080, 1220
     bg=(2,5,18); navy=(3,10,31); panel=(3,8,27); cyan=(32,194,255); blue=(25,118,255)
     yellow=(255,220,24); green=(65,255,91); white=(232,238,248); muted=(139,157,184); magenta=(255,72,213)
     im=Image.new('RGB',(W,H),bg); d=ImageDraw.Draw(im)
@@ -3518,8 +3518,24 @@ def build_test_trending_card() -> bytes:
     def box(x1,y1,x2,y2,outline=cyan,w=2):
         d.rectangle((x1,y1,x2,y2),fill=panel,outline=outline,width=w)
     def txt(x,y,t,size=28,c=white,b=False,anchor=None): d.text((x,y),str(t),font=font(size,b),fill=c,anchor=anchor)
-    def metric(cx, y, value, label, c):
-        txt(cx,y,value,44,c,True,'ma'); txt(cx,y+45,label,20,muted,False,'ma')
+    def metric(cx, y, value, label, c, sub=None):
+        txt(cx,y,value,40,c,True,'ma')
+        if sub:
+            txt(cx,y+39,sub,18,cyan,True,'ma')
+            txt(cx,y+66,label,18,muted,False,'ma')
+        else:
+            txt(cx,y+45,label,18,muted,False,'ma')
+
+    def first_scan_age(minutes: int) -> str:
+        # Minutes under 1 hour, hours under 24 hours, then whole days.
+        # Examples: 43m, 1h, 23h, 1d, 2d, 7d.
+        minutes = max(0, int(minutes))
+        if minutes < 60:
+            return f"{minutes}m"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h"
+        return f"{hours // 24}d"
 
     # Outer terminal frame.
     d.rectangle((24,24,W-24,H-24),outline=(16,83,145),width=2)
@@ -3533,29 +3549,36 @@ def build_test_trending_card() -> bytes:
     txt(242,305,'TON',21,cyan,True); txt(330,305,'STON.fi',21,magenta,True)
     txt(W-70,202,'TRENDING SCORE',18,cyan,True,'ra'); txt(W-70,236,'94',66,blue,True,'ra')
 
-    box(48,370,W-48,520,(14,93,160),2)
-    metric(205,405,'47','SCANS',blue); metric(540,405,'31','UNIQUE SCANNERS',cyan); metric(870,405,'+18','SCANNERS / 1H',yellow)
-    d.line((365,390,365,500),fill=(15,105,171),width=2); d.line((710,390,710,500),fill=(15,105,171),width=2)
+    # Five equal headline metrics. First Scan now lives here with caller + elapsed time.
+    box(48,370,W-48,535,(14,93,160),2)
+    left, right = 48, W-48
+    stat_w = (right-left) / 5
+    centers = [left + stat_w*(i+0.5) for i in range(5)]
+    metric(centers[0],405,'47','SCANS',blue)
+    metric(centers[1],405,'31','UNIQUE SCANNERS',cyan)
+    metric(centers[2],405,'+18','SCANNERS / 1H',yellow)
+    metric(centers[3],405,first_scan_age(43),'FIRST SCAN',blue,sub='@Josh')
+    metric(centers[4],405,'+82.4%','SINCE FIRST SCAN',green)
+    for i in range(1,5):
+        xx = int(left + stat_w*i)
+        d.line((xx,390,xx,515),fill=(15,105,171),width=2)
 
     # Stats table, no chart.
-    box(48,555,W-48,890,cyan,2)
+    box(48,570,W-48,905,cyan,2)
     rows=[('CURRENT MARKET CAP','$184K',yellow),('FIRST SCAN MARKET CAP','$101K',yellow),('ATH SINCE FIRST SCAN','$231K',yellow),('SINCE FIRST SCAN','+82.4%',green)]
-    yy=585
+    yy=600
     for i,(lab,val,col) in enumerate(rows):
         txt(82,yy,lab,25,cyan,True); txt(W-82,yy,val,30,col,True,'ra')
         if i<3:d.line((78,yy+57,W-78,yy+57),fill=(11,87,151),width=1)
         yy+=78
 
-    box(48,925,W-48,1080,(17,103,174),2)
-    txt(82,955,'FIRST SCANNED BY',22,yellow,True); txt(82,995,'@Josh',34,white,True); txt(82,1037,'43 minutes ago',19,muted)
-    d.line((610,945,610,1060),fill=(14,99,165),width=2)
-    txt(650,955,'FIRST SCAN',22,blue,True); txt(650,1000,'43m ago',34,white,True)
-
     # Prominent website-style brand footer + contract strip.
-    txt(W//2,1118,'GRAMX6900',78,cyan,True,'ma')
-    txt(W//2,1190,'GRX SCAN',38,yellow,True,'ma')
-    txt(W//2,1228,'REAL SCANS. REAL EDGE.',18,green,True,'ma')
-    box(48,1260,W-48,1325,cyan,2); txt(72,1272,'CONTRACT ADDRESS',16,green,True); txt(72,1298,'EQAS6ZqfngpjbXn7SJdBjIY6o0xt_NusP4ULLXYCVauQy',15,cyan)
+    txt(W//2,965,'GRAMX6900',72,cyan,True,'ma')
+    txt(W//2,1030,'GRX SCAN',34,yellow,True,'ma')
+    txt(W//2,1065,'REAL SCANS. REAL EDGE.',18,green,True,'ma')
+    box(48,1100,W-48,1185,cyan,2)
+    txt(72,1114,'CONTRACT ADDRESS',16,green,True)
+    txt(72,1146,'EQAS6ZqfngpjbXn7SJdBjIY6o0xt_NusP4ULLXYCVauQy',15,cyan)
     out=BytesIO(); im.save(out,'PNG',optimize=True); return out.getvalue()
 
 
