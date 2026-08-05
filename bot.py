@@ -3511,7 +3511,11 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     # scalable built-in font via load_default(size=...). That keeps the bot
     # self-contained and avoids the microscopic load_default() fallback that
     # caused the earlier cards.
+    # Prefer the bundled Anton font so the PNL card renders identically on every host.
+    # Put Anton-Regular.ttf in the same directory as this bot file.
+    bundled_anton = Path(__file__).resolve().with_name("Anton-Regular.ttf")
     font_candidates = [
+        str(bundled_anton),
         "/usr/share/fonts/opentype/inter/InterDisplay-Black.otf",
         "/usr/share/fonts/opentype/inter/InterDisplay-Bold.otf",
         "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf",
