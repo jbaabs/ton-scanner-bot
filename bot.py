@@ -1782,6 +1782,16 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
+    # Subtle GRX signature in the otherwise-unused black footer area.
+    fig.text(
+        .5, .085, "POWERED BY GRX",
+        color=(1.0, 1.0, 1.0, 0.38),
+        fontsize=10.5,
+        fontweight="bold",
+        ha="center",
+        va="center",
+    )
+
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
 
 
