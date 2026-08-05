@@ -3498,6 +3498,7 @@ GRX_TIMES_CALLED_EMOJI_ID = "5366424034189811245"
 
 def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_age: str) -> bytes:
     from io import BytesIO
+    from pathlib import Path
     from PIL import Image, ImageDraw, ImageFont
 
     raw = base64.b64decode(GRX_TRENDING_BG_B64)
@@ -3505,46 +3506,84 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     draw = ImageDraw.Draw(im)
     w, h = im.size
 
-    def font(size, bold=False):
-        candidates = ([
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-        ] if bold else [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        ])
-        for p in candidates:
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                pass
-        return ImageFont.load_default()
+    # IMPORTANT: never silently fall back to PIL's tiny bitmap font.
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+    ]
+    font_path = next((p for p in font_candidates if Path(p).is_file()), None)
+    if not font_path:
+        raise RuntimeError(
+            "No scalable bold font found. Checked: " + ", ".join(font_candidates)
+        )
 
     current_mc = float(current_mc or 0)
     called_mc = float(called_mc or 0)
     pct = ((current_mc / called_mc) - 1.0) * 100.0 if called_mc > 0 else 0.0
     sign = "+" if pct >= 0 else ""
-    gain_colour = (35, 235, 75) if pct >= 0 else (255, 70, 85)
+    gain_colour = (88, 255, 20) if pct >= 0 else (255, 65, 75)
 
-    # Phanes-style hierarchy: ONLY the two requested stats, rendered huge.
-    # Size is based on the full image width so it remains bold/readable after
-    # Telegram scales the card down on mobile. No panel, border or divider.
-    x = int(w * 0.585)
-    y = int(h * 0.255)
-    shadow = max(3, int(w * 0.0035))
+    called_text = f"CALLED AT {_fmt_usd(called_mc)}"
+    gain_text = f"{sign}{pct:.1f}%"
 
-    called_label_f = font(max(64, int(w * 0.055)), True)
-    gain_f = font(max(120, int(w * 0.115)), True)
+    # Right-side PNL typography area. Font sizes are fitted to pixel width,
+    # not hard-coded, so Telegram scaling cannot turn them microscopic.
+    left = int(w * 0.48)
+    right = int(w * 0.965)
+    max_width = right - left
 
-    def text(pos, value, fnt, fill):
-        draw.text(
-            pos, value, font=fnt, fill=fill,
-            stroke_width=shadow, stroke_fill=(0, 0, 0)
-        )
+    def fit_font(value: str, max_w: int, max_size: int, min_size: int):
+        for size in range(max_size, min_size - 1, -2):
+            fnt = ImageFont.truetype(font_path, size=size)
+            box = draw.textbbox((0, 0), value, font=fnt, stroke_width=0)
+            if (box[2] - box[0]) <= max_w:
+                return fnt
+        raise RuntimeError(f"Could not fit text with scalable font: {value}")
 
-    text((x, y), f"CALLED AT {_fmt_usd(called_mc)}", called_label_f, (255, 255, 255))
-    y += int(h * 0.18)
-    text((x, y), f"{sign}{pct:.1f}%", gain_f, gain_colour)
+    called_font = fit_font(called_text, max_width, int(h * 0.145), int(h * 0.065))
+    gain_font = fit_font(gain_text, max_width, int(h * 0.34), int(h * 0.16))
+
+    def centered_x(value: str, fnt) -> int:
+        box = draw.textbbox((0, 0), value, font=fnt)
+        tw = box[2] - box[0]
+        return left + max(0, (max_width - tw) // 2)
+
+    stroke_called = max(2, int(h * 0.006))
+    stroke_gain = max(3, int(h * 0.009))
+
+    # ONLY these two pieces of text are drawn on the image.
+    called_y = int(h * 0.29)
+    gain_y = int(h * 0.45)
+    draw.text(
+        (centered_x(called_text, called_font), called_y),
+        called_text,
+        font=called_font,
+        fill=(255, 255, 255),
+        stroke_width=stroke_called,
+        stroke_fill=(0, 0, 0),
+    )
+    draw.text(
+        (centered_x(gain_text, gain_font), gain_y),
+        gain_text,
+        font=gain_font,
+        fill=gain_colour,
+        stroke_width=stroke_gain,
+        stroke_fill=(10, 45, 0) if pct >= 0 else (55, 0, 0),
+    )
+
+    # Log exactly what the live renderer used, so font fallback/scaling issues
+    # are visible immediately in server logs.
+    called_box = draw.textbbox((0, 0), called_text, font=called_font)
+    gain_box = draw.textbbox((0, 0), gain_text, font=gain_font)
+    logger.info(
+        "GRX card render font=%s canvas=%sx%s called_px=%s gain_px=%s called_w=%s gain_w=%s",
+        font_path, w, h, getattr(called_font, "size", "?"), getattr(gain_font, "size", "?"),
+        called_box[2] - called_box[0], gain_box[2] - gain_box[0],
+    )
 
     buf = BytesIO()
     im.save(buf, format="PNG", optimize=True)
