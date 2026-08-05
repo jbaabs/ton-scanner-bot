@@ -3506,20 +3506,39 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     draw = ImageDraw.Draw(im)
     w, h = im.size
 
-    # IMPORTANT: never silently fall back to PIL's tiny bitmap font.
+    # Prefer a real bold/condensed system font when one exists.
+    # Crucially, if the host has no fonts installed, Pillow >= 10.1 ships a
+    # scalable built-in font via load_default(size=...). That keeps the bot
+    # self-contained and avoids the microscopic load_default() fallback that
+    # caused the earlier cards.
     font_candidates = [
+        "/usr/share/fonts/opentype/inter/InterDisplay-Black.otf",
+        "/usr/share/fonts/opentype/inter/InterDisplay-Bold.otf",
+        "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-CondensedBlack.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
     ]
     font_path = next((p for p in font_candidates if Path(p).is_file()), None)
-    if not font_path:
-        raise RuntimeError(
-            "No scalable bold font found. Checked: " + ", ".join(font_candidates)
-        )
+
+    def scalable_font(size: int):
+        if font_path:
+            return ImageFont.truetype(font_path, size=size)
+        try:
+            # IMPORTANT: pass size. Calling load_default() with no size is what
+            # produced the tiny text in the previous test builds.
+            return ImageFont.load_default(size=size)
+        except TypeError as exc:
+            raise RuntimeError(
+                "This server has no usable font and its Pillow version is too old "
+                "for scalable built-in fonts. Upgrade Pillow to >=10.1 (prefer latest)."
+            ) from exc
 
     current_mc = float(current_mc or 0)
     called_mc = float(called_mc or 0)
@@ -3538,7 +3557,7 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
 
     def fit_font(value: str, max_w: int, max_size: int, min_size: int):
         for size in range(max_size, min_size - 1, -2):
-            fnt = ImageFont.truetype(font_path, size=size)
+            fnt = scalable_font(size)
             box = draw.textbbox((0, 0), value, font=fnt, stroke_width=0)
             if (box[2] - box[0]) <= max_w:
                 return fnt
@@ -3581,7 +3600,7 @@ def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_ag
     gain_box = draw.textbbox((0, 0), gain_text, font=gain_font)
     logger.info(
         "GRX card render font=%s canvas=%sx%s called_px=%s gain_px=%s called_w=%s gain_w=%s",
-        font_path, w, h, getattr(called_font, "size", "?"), getattr(gain_font, "size", "?"),
+        font_path or "Pillow built-in scalable font", w, h, getattr(called_font, "size", "?"), getattr(gain_font, "size", "?"),
         called_box[2] - called_box[0], gain_box[2] - gain_box[0],
     )
 
