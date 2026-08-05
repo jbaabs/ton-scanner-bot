@@ -109,6 +109,7 @@ CUSTOM_EMOJI = {
     "coingecko": "6256011039360426071",
     "groypfi": "6305307926659605381",
     "topblast": "6118187720675173301",
+    "leaderboard": "5820933489385544881",
 }
 
 def _ce(name: str, fallback: str) -> str:
@@ -123,7 +124,7 @@ def _ce(name: str, fallback: str) -> str:
         "percent": "💯", "social": "💬", "wallet": "👛",
         "price": "💰", "mcap": "📈", "holders": "👥",
         "liquidity": "💧", "age": "🌱", "ath": "🏆", "uranus": "🪐", "gram": "💎",
-        "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀",
+        "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀", "leaderboard": "🏆",
     }
     safe = safe_fallbacks.get(name, "✨")
     return f'<tg-emoji emoji-id="{emoji_id}">{safe}</tg-emoji>'
@@ -876,10 +877,19 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
             "SELECT * FROM leaderboard_calls WHERE chat_id=? AND called_ts>=? ORDER BY called_ts DESC",
             (chat_id, cutoff),
         ).fetchall()]
+
+    header = f'{_ce("leaderboard", "🏆")} <b>GRX LEADERBOARD</b>'
     if not rows:
-        return f"🔥 <b>GRX LEADERBOARD</b>\nTop Calls · <b>{label}</b>\n\nNo qualifying scans yet."
+        return f"{header}\n\n🏆 <b>TOP SCANS · {label}</b>\n\nNo qualifying scans yet."
+
+    scan_count = len(rows)
+    caller_count = len({int(r["caller_id"]) for r in rows if r.get("caller_id")})
+
     sem = asyncio.Semaphore(8)
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300)) as session:
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+    ) as session:
         async def enrich(row):
             async with sem:
                 mc = await _lb_current_mcap(session, row["token_address"])
@@ -888,17 +898,35 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
                 return None
             row["multiple"] = mc / called
             return row
-        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
-    ranked.sort(key=lambda r: r["multiple"], reverse=True)
-    ranked = ranked[:10]
-    lines = ["🔥 <b>GRX LEADERBOARD</b>", f"Top Calls · <b>{label}</b>", ""]
-    medals = ["🥇", "🥈", "🥉"]
-    for i, row in enumerate(ranked, 1):
-        rank = medals[i - 1] if i <= 3 else f"{i}."
-        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
-        lines.append(f"{rank} <b>${symbol}</b> — {_lb_caller_link(row)} — <b>{_fmt_multiple(row['multiple'])}</b>")
+
+        ranked_all = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+
+    ranked_all.sort(key=lambda r: r["multiple"], reverse=True)
+    ranked = ranked_all[:10]
+
     if not ranked:
-        lines.append("No leaderboard prices are available right now.")
+        return f"{header}\n\n🏆 <b>TOP SCANS · {label}</b>\n\nNo leaderboard prices are available right now."
+
+    best = ranked[0]["multiple"]
+    lines = [
+        header,
+        "",
+        f"🏆 <b>TOP SCANS · {label}</b>",
+        f"<b>Scans:</b> {scan_count} · <b>Callers:</b> {caller_count} · <b>Best:</b> {_fmt_multiple(best)}",
+        "",
+    ]
+
+    medals = ["🥇", "🥈", "🥉"]
+    ranking_lines = []
+    for i, row in enumerate(ranked, 1):
+        rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
+        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        ranking_lines.append(
+            f"{rank} <b>${symbol}</b> » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
+        )
+
+    # Telegram blockquote styling gives the Top 10 a clean visual rail without adding clutter.
+    lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
     return "\n".join(lines)
 
 
