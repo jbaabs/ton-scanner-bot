@@ -844,62 +844,47 @@ def _fmt_signal_change(value: float | None) -> str:
 
 
 def format_grx_stats(report: dict) -> str:
-    """Classic GRX Stats presentation, backed by the safer rolling snapshot data."""
     dex = report.get("dex_data") or {}
     info = report.get("jetton_info") or {}
     holders = report.get("holders") or {}
-
     symbol = html.escape(str(info.get("symbol") or "???"))
-    name = html.escape(str(info.get("name") or symbol))
 
     snap_5m = get_snapshot_after(report, 5 * 60)
     snap_10m = get_snapshot_after(report, 10 * 60)
 
-    # Only compare genuine non-zero rolling buckets. This avoids the old
-    # misleading -100% result when a provider/snapshot simply had no 5m value.
+    # Rolling volume: current provider 5m bucket vs the 5m bucket recorded
+    # around five minutes ago. Suppress false -100% when either side is absent.
     now_v5 = _as_float(dex.get("volume_5m"))
     old_v5 = _as_float((snap_5m or {}).get("volume_5m"))
-    vol_change = (
-        _pct_change(now_v5, old_v5)
-        if now_v5 is not None and old_v5 not in (None, 0)
-        else None
-    )
+    vol_change = _pct_change(now_v5, old_v5) if now_v5 is not None and old_v5 not in (None, 0) else None
 
     holder_now = int(info.get("holders_count") or 0)
     old_holders = (snap_10m or {}).get("holders_count")
-    holder_delta = (
-        holder_now - int(old_holders)
-        if old_holders is not None
-        else None
-    )
+    holder_delta = holder_now - int(old_holders) if old_holders is not None else None
 
     top_now = _as_float(holders.get("top_concentration"))
     top_old = _as_float((snap_10m or {}).get("top10_pct"))
-    top_delta = (
-        top_now - top_old
-        if top_now is not None and top_old is not None
-        else None
-    )
+    top_delta = top_now - top_old if top_now is not None and top_old is not None else None
 
-    liq_change = _pct_change(
-        dex.get("liquidity_usd"),
-        (snap_10m or {}).get("liquidity_usd"),
-    )
+    liq_change = _pct_change(dex.get("liquidity_usd"), (snap_10m or {}).get("liquidity_usd"))
+    price_change = _pct_change(dex.get("price_usd"), (snap_10m or {}).get("price_usd"))
 
-    # Prefer decoded GRX swaps for pressure. Fall back to the provider's
-    # explicit 5m buy/sell counts; never invent pressure when neither exists.
     live = _live_trade_metrics(report, 5 * 60)
+    tx5 = dex.get("txns_5m") or {}
+    provider_buys = int(tx5.get("buys") or 0)
+    provider_sells = int(tx5.get("sells") or 0)
+    provider_total = provider_buys + provider_sells
+
+    # Prefer GRX's decoded swap stream. Provider counts are a fallback for
+    # trade count / pressure only; Net Flow is never guessed from counts.
+    trades_5m = live.get("trades") if live.get("trades") is not None else (provider_total or None)
     buy_pressure = live.get("buy_pressure")
-    if buy_pressure is None:
-        tx5 = dex.get("txns_5m") or {}
-        buys = int(tx5.get("buys") or 0)
-        sells = int(tx5.get("sells") or 0)
-        total = buys + sells
-        buy_pressure = (buys / total * 100.0) if total else None
+    if buy_pressure is None and provider_total:
+        buy_pressure = provider_buys / provider_total * 100.0
+    net_flow = live.get("net_flow")
 
     first = get_first_scan_resolved(report)
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
-    current_mc = _as_float(dex.get("market_cap"))
 
     def parse_compact_usd(value):
         if not value or value == "N/A":
@@ -917,32 +902,38 @@ def format_grx_stats(report: dict) -> str:
         except ValueError:
             return None
 
+    current_mc = _as_float(dex.get("market_cap"))
     first_mc_value = parse_compact_usd(first_mc_text)
     performance = _pct_change(current_mc, first_mc_value)
+    ath_since = get_ath_mcap_since(report, (first or {}).get("scan_ts"))
+    ath_perf = _pct_change(ath_since, first_mc_value)
 
-    def trend(v, decimals=1, points=False):
+    def signed(v, suffix="%", decimals=1):
         if v is None:
-            return "N/A"
-        arrow = "↑" if v > 0 else ("↓" if v < 0 else "•")
-        suffix = " pts" if points else "%"
-        return f"{arrow} {abs(v):.{decimals}f}{suffix}"
+            return "Collecting data"
+        return f"{v:+.{decimals}f}{suffix}"
 
-    # Reuse the scanner's established custom-emoji pack. Telegram renders the
-    # custom glyphs; fallbacks are only used where a client cannot display them.
     lines = [
         f"<b>🔥 GRX SIGNALS — {symbol}</b>",
-        f"<i>{name}</i>",
         "",
-        f"{_ce('mcap', '📊')} 5m Volume: <b>{trend(vol_change)}</b>",
-        f"{_ce('holders', '👥')} Holders 10m: <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'N/A')}</b>",
-        f"{_ce('percent', '👤')} Top 10 10m: <b>{trend(top_delta, decimals=2, points=True)}</b>",
-        f"{_ce('buy', '🟢')} Buy Pressure 5m: <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'N/A')}</b>",
-        f"{_ce('liquidity', '💧')} Liquidity 10m: <b>{trend(liq_change)}</b>",
-        f"{_ce('mcap', '📊')} MC since call: <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
-        f"🔥 Call performance: <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
+        "<b>MOMENTUM</b>",
+        f"5m Volume        <b>{signed(vol_change)}</b>",
+        f"Buy Pressure     <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'Collecting data')}</b>",
+        f"Net Flow         <b>{(_fmt_usd(net_flow) if net_flow is not None else 'Collecting data')}</b>",
+        f"Trades 5m        <b>{(f'{trades_5m:,}' if trades_5m is not None else 'Collecting data')}</b>",
         "",
-        "<i>GRX Stats improve as GRX collects more",
-        "snapshots of the token.</i>",
+        "<b>HOLDERS</b>",
+        f"Holders 10m      <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
+        f"Top 10           <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
+        "",
+        "<b>MARKET</b>",
+        f"Liquidity 10m    <b>{signed(liq_change)}</b>",
+        f"Price 10m        <b>{signed(price_change)}</b>",
+        "",
+        "<b>CALL</b>",
+        f"Performance      <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
+        f"ATH Since Call   <b>{(_fmt_pct(ath_perf) if ath_perf is not None else 'Collecting data')}</b>",
+        f"MC Since Call    <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
     ]
     return "\n".join(lines)
 
@@ -1594,11 +1585,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    fig=plt.figure(figsize=(8,7.45),dpi=160,facecolor=bg)
+    fig=plt.figure(figsize=(8,8.35),dpi=160,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
-    fig.text(.965,.968,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
+    fig.text(.965,.974,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
 
     # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
     # Token artwork + identity, DTrade-inspired but kept in GRX styling.
@@ -1614,18 +1605,18 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             mask = Image.new("L", (128, 128), 0)
             ImageDraw.Draw(mask).ellipse((1, 1, 127, 127), fill=255)
             icon.putalpha(mask)
-            iax = fig.add_axes([.04, .884, .055, .067], zorder=20)
+            iax = fig.add_axes([.04, .895, .055, .055], zorder=20)
             iax.imshow(icon)
             iax.axis("off")
             title_x = .108
         except Exception:
             pass
 
-    fig.text(title_x,.918,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
-    fig.text(title_x,.884,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
+    fig.text(title_x,.927,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.899,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
-    fig.text(.96,.916,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
-    ax=fig.add_axes([.045, .472,.90,.325],facecolor=bg)
+    fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
+    ax=fig.add_axes([.045,.555,.90,.285],facecolor=bg)
     n=len(ohlcv)
     width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
@@ -1650,11 +1641,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
 
     # Compact pulse/caller band.
-    box(.025,.365,.465,.135); box(.51,.365,.465,.135)
-    fig.text(.045,.472,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
+    box(.025,.445,.465,.115); box(.51,.445,.465,.115)
+    fig.text(.045,.535,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
     for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
-        y=.438-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.472,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
+        y=.507-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
+    fig.text(.53,0.487,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
     first=get_first_scan_resolved(report)
     if first:
         caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL); then_txt=str(first.get("scan_market_cap") or "N/A")
@@ -1665,11 +1656,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             try:return float(t)*m
             except:return None
         now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
-        fig.text(.53, .438,caller,color=text,fontsize=9.5,fontweight="bold")
-        fig.text(.53, .405,"THEN",color=muted,fontsize=7.5); fig.text(.72, .405,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.75, .405,"NOW",color=muted,fontsize=7.5); fig.text(.955, .405,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.53, .375,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955, .375,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
-    else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
+        fig.text(.53,0.458,caller,color=text,fontsize=9.5,fontweight="bold")
+        fig.text(.53,0.407,"THEN",color=muted,fontsize=7.5); fig.text(.72,0.407,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.75,0.407,"NOW",color=muted,fontsize=7.5); fig.text(.955,0.407,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.53,0.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,0.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
+    else: fig.text(.53,0.432,"First scan",color=muted,fontsize=10)
 
     # Compact 3 x 2 stat grid on each side. The centre split remains aligned
     # exactly with MARKET PULSE / FIRST CALLED BY, but the previous dead space
@@ -1696,8 +1687,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     half_w = .465
     col_gap = .007
     row_gap = .010
-    grid_top = .345
-    grid_bottom = .035
+    grid_top = .370
+    grid_bottom = .075
     card_h = (grid_top - grid_bottom - row_gap) / 2
     card_w = (half_w - 2 * col_gap) / 3
 
