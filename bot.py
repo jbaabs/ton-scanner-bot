@@ -210,7 +210,9 @@ REPORT_CACHE_TTL = 60 * 60
 
 # Lightweight hot caches: reduce repeated API/image work while keeping market data fresh.
 OHLCV_CACHE: dict[tuple, tuple[float, list]] = {}
-OHLCV_CACHE_TTL = 12
+OHLCV_CACHE_TTL = 18
+OHLCV_STALE_CACHE_TTL = 10 * 60
+OHLCV_INFLIGHT: dict[tuple, asyncio.Task] = {}
 IMAGE_CACHE: dict[str, tuple[float, bytes]] = {}
 IMAGE_CACHE_TTL = 60 * 60
 CHART_POOL_CACHE: dict[str, tuple[float, str]] = {}
@@ -1700,6 +1702,36 @@ def _pair_name(pair: dict) -> str:
     return str((pair.get("baseToken") or {}).get("name", "")).upper()
 
 
+def _explicit_liquidity_locked(pair: dict) -> bool:
+    """Return True only for an explicit positive LP/liquidity-lock signal."""
+    if not isinstance(pair, dict):
+        return False
+    candidates = [
+        pair.get("liquidityLocked"),
+        pair.get("liquidity_locked"),
+        pair.get("lpLocked"),
+        pair.get("lp_locked"),
+        pair.get("lockedLiquidity"),
+        pair.get("locked_liquidity"),
+    ]
+    info = pair.get("info") or {}
+    if isinstance(info, dict):
+        candidates.extend([
+            info.get("liquidityLocked"),
+            info.get("liquidity_locked"),
+            info.get("lpLocked"),
+            info.get("lp_locked"),
+        ])
+    for value in candidates:
+        if value is True:
+            return True
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"true", "yes", "locked", "burned", "burnt"}:
+            return True
+    return False
+
+
 def _pair_liquidity(pair: dict) -> float:
     try:
         return float((pair.get("liquidity") or {}).get("usd", 0) or 0)
@@ -1818,36 +1850,50 @@ async def get_ohlcv(
     timeframe_key: str,
     token_address: str | None = None,
 ) -> list | None:
-    """Fetch chart candles with supported GeckoTerminal intervals and local resampling.
+    """Fast/resilient chart candles.
 
-    GeckoTerminal does not support every arbitrary aggregate. In particular,
-    30-minute and 4-day views are built from supported 15m and 1d candles.
+    Fresh candles are cached briefly. Concurrent requests for the same
+    token/pool/timeframe share one upstream request. If GeckoTerminal is slow,
+    rate-limited or temporarily returns no data, the last known-good chart is
+    returned for up to 10 minutes rather than making a working chart disappear.
     """
     cache_key = (str(pool_address or ""), str(timeframe_key), str(token_address or ""))
-    cached = _ttl_get(OHLCV_CACHE, cache_key, OHLCV_CACHE_TTL)
-    if cached:
-        return cached
+    now = time.time()
+    cache_entry = OHLCV_CACHE.get(cache_key)
+    if cache_entry:
+        ts, cached_value = cache_entry
+        if now - ts <= OHLCV_CACHE_TTL and cached_value:
+            return cached_value
+
+    stale_value = None
+    if cache_entry and now - cache_entry[0] <= OHLCV_STALE_CACHE_TTL:
+        stale_value = cache_entry[1]
+
+    existing = OHLCV_INFLIGHT.get(cache_key)
+    if existing and not existing.done():
+        try:
+            result = await existing
+            return result or stale_value
+        except Exception:
+            return stale_value
 
     requested = CHART_TIMEFRAMES.get(
         timeframe_key, CHART_TIMEFRAMES[DEFAULT_CHART_TIMEFRAME]
     )
-
-    # (API timeframe, API aggregate, fetch limit, local resample factor)
     route = {
-        "1m":  ("minute", 1,  60, 1),
-        "5m":  ("minute", 5,  60, 1),
-        "15m": ("minute", 15, 60, 1),
+        "1m":  ("minute", 1,  120, 1),
+        "5m":  ("minute", 5,   60, 1),
+        "15m": ("minute", 15,  60, 1),
         "30m": ("minute", 15, 120, 2),
-        "1h":  ("hour",   1,  60, 1),
-        "4h":  ("hour",   4,  60, 1),
-        "1d":  ("day",    1,  60, 1),
-        "4d":  ("day",    1, 120, 4),
+        "1h":  ("hour",   1,   48, 1),
+        "4h":  ("hour",   4,   42, 1),
+        "1d":  ("day",    1,   30, 1),
+        "4d":  ("day",    1,  120, 4),
     }
     api_tf, api_agg, api_limit, factor = route.get(
         timeframe_key,
         (requested["timeframe"], requested["aggregate"], requested["limit"], 1),
     )
-
     url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/{api_tf}"
     params = {
         "aggregate": api_agg,
@@ -1856,46 +1902,59 @@ async def get_ohlcv(
         "token": "base",
     }
 
-    async def _request(params_to_use):
-        try:
-            async with session.get(
-                url,
-                params=params_to_use,
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as resp:
-                if resp.status != 200:
+    async def _fetch():
+        async def _request(params_to_use):
+            for attempt in range(2):
+                try:
+                    async with session.get(
+                        url,
+                        params=params_to_use,
+                        timeout=aiohttp.ClientTimeout(total=min(REQUEST_TIMEOUT, 8)),
+                    ) as resp:
+                        if resp.status == 429:
+                            if attempt == 0:
+                                await asyncio.sleep(0.8)
+                                continue
+                            return None
+                        if resp.status != 200:
+                            return None
+                        data = await resp.json()
+                        items = (
+                            (data.get("data") or {})
+                            .get("attributes", {})
+                            .get("ohlcv_list")
+                        )
+                        return sorted(items, key=lambda c: c[0]) if items else None
+                except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
+                    if attempt == 0:
+                        await asyncio.sleep(0.35)
+                        continue
                     return None
-                data = await resp.json()
-                items = (
-                    (data.get("data") or {})
-                    .get("attributes", {})
-                    .get("ohlcv_list")
-                )
-                return sorted(items, key=lambda c: c[0]) if items else None
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
             return None
 
-    candles = await _request(params)
+        candles = await _request(params)
+        if not candles:
+            quote_params = dict(params)
+            quote_params["token"] = "quote"
+            candles = await _request(quote_params)
+        if not candles:
+            return None
+        if factor > 1:
+            candles = _resample_ohlcv(candles, factor)
+        display_limit = requested.get("limit", 60)
+        result = candles[-display_limit:] if candles else None
+        if result:
+            OHLCV_CACHE[cache_key] = (time.time(), result)
+        return result
 
-    # Some pools expose the scanned jetton as quote rather than base.
-    # If base produces no candles, try quote before declaring the timeframe unavailable.
-    if not candles:
-        quote_params = dict(params)
-        quote_params["token"] = "quote"
-        candles = await _request(quote_params)
-
-    if not candles:
-        return None
-
-    if factor > 1:
-        candles = _resample_ohlcv(candles, factor)
-
-    # Keep the visible chart clean and consistent.
-    display_limit = requested.get("limit", 60)
-    result = candles[-display_limit:] if candles else None
-    if result:
-        _ttl_put(OHLCV_CACHE, cache_key, result)
-    return result
+    task = asyncio.create_task(_fetch())
+    OHLCV_INFLIGHT[cache_key] = task
+    try:
+        result = await task
+        return result or stale_value
+    finally:
+        if OHLCV_INFLIGHT.get(cache_key) is task:
+            OHLCV_INFLIGHT.pop(cache_key, None)
 
 
 async def select_chart_pool(
@@ -2103,7 +2162,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price=None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -2144,7 +2203,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
 
     ax=fig.add_axes([.055,.12,.875,.67],facecolor=bg)
     n=len(ohlcv)
-    width=max(.22,min(.54,18.0/max(n,1)))
+    width=max(.26,min(.62,21.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
         ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
@@ -2169,6 +2228,22 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
                 bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
+    scan_price_num = _parse_stored_price(scan_price)
+    if scan_price_num:
+        scan_blue = "#45a8ff"
+        chart_lo, chart_hi = ax.get_ylim()
+        if chart_lo <= scan_price_num <= chart_hi:
+            ax.axhline(scan_price_num,color=scan_blue,linewidth=.78,alpha=.84,linestyle=(0,(4,3)))
+            ax.text(.025,scan_price_num,f"GRX SCAN  {_fmt_price_compact(scan_price_num)}",
+                    color=scan_blue,fontsize=7.5,fontweight="bold",ha="left",va="bottom",
+                    transform=ax.get_yaxis_transform(),clip_on=True)
+        else:
+            y_edge = chart_hi if scan_price_num > chart_hi else chart_lo
+            edge_va = "top" if scan_price_num > chart_hi else "bottom"
+            arrow = "↑" if scan_price_num > chart_hi else "↓"
+            ax.text(.025,y_edge,f"{arrow} GRX SCAN  {_fmt_price_compact(scan_price_num)}",
+                    color=scan_blue,fontsize=7.5,fontweight="bold",ha="left",va=edge_va,
+                    transform=ax.get_yaxis_transform(),clip_on=True)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
 
 
@@ -2244,7 +2319,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax=fig.add_axes([.045,.655,.875,.205],facecolor=bg)
     ax.tick_params(axis='x', pad=3)
     n=len(ohlcv)
-    width=max(.22,min(.54,18.0/max(n,1)))
+    width=max(.26,min(.62,21.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
         ax.vlines(i,l,h,color=col,linewidth=.68,alpha=.95)
@@ -2261,7 +2336,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
-    ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
+    ax.grid(axis="y",color="#24282c",linewidth=.42,alpha=.30); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     # Current price reference.
     ax.axhline(last,color=pc(move),linewidth=.8,alpha=.55,linestyle=(0,(4,3)))
@@ -2290,17 +2365,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             ax.text(.025, y_edge, f"{arrow} GRX SCAN  {_fmt_price_compact(call_price)}",
                     color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va=edge_va,
                     transform=ax.get_yaxis_transform(),clip_on=True)
-
-    # Compact aligned volume strip beneath the candles. It is deliberately small
-    # so the dashboard keeps the same overall proportions.
-    if any(v > 0 for v in volumes):
-        vax=fig.add_axes([.045,.610,.875,.038],facecolor=bg,sharex=ax)
-        vmax=max(volumes) or 1.0
-        for i,(v,o,c) in enumerate(zip(volumes,opens,closes)):
-            vax.bar(i,v,width=width,color=(green if c>=o else red),alpha=.42,linewidth=0)
-        vax.set_ylim(0,vmax*1.12)
-        vax.set_xlim(ax.get_xlim())
-        vax.axis("off")
 
     # Compact pulse/caller band.
     box(.025,.445,.465,.115); box(.51,.445,.465,.115)
@@ -2331,7 +2395,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ("PRICE", _fmt_price_compact(dex.get("price_usd")), text),
         ("MARKET CAP", _fmt_usd(dex.get("market_cap")), text),
         ("AGE", age, text),
-        ("LIQUIDITY", _fmt_usd(dex.get("liquidity_usd")), text),
+        ("LIQUIDITY", f"{_fmt_usd(dex.get('liquidity_usd'))}  🔒" if dex.get("liquidity_locked") else _fmt_usd(dex.get("liquidity_usd")), text),
         ("BUYS", f"{buys:,} · {buy_pct:.0f}%", green),
         ("HOLDERS", _fmt_num(info.get("holders_count")), text),
     ]
@@ -2858,6 +2922,7 @@ async def fast_refresh_report(session: aiohttp.ClientSession, old_report: dict) 
         old_dex.update({
             "price_usd": best.get("priceUsd") or old_dex.get("price_usd"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+            "liquidity_locked": _explicit_liquidity_locked(best),
             "total_liquidity_usd": total_liq,
             "volume_24h": total_vol,
             "market_cap": best.get("marketCap") or best.get("fdv") or old_dex.get("market_cap"),
@@ -3379,6 +3444,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
+            "liquidity_locked": _explicit_liquidity_locked(best),
             "volume_24h": total_vol,
             "volume_1h": (best.get("volume") or {}).get("h1"),
             "volume_5m": (best.get("volume") or {}).get("m5"),
@@ -4747,6 +4813,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price"),
     )
 
     media = InputMediaPhoto(
@@ -4929,6 +4996,7 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price"),
     )
 
     media = InputMediaPhoto(
