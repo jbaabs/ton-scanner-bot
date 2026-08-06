@@ -218,6 +218,14 @@ CHART_POOL_CACHE_TTL = 5 * 60
 REFRESH_LOCKS: dict[str, asyncio.Lock] = {}
 FAST_MARKET_CACHE: dict[str, tuple[float, list]] = {}
 FAST_MARKET_CACHE_TTL = 2.0
+
+# Ticker resolution is much less volatile than price data. Cache successful
+# resolutions and deduplicate concurrent lookups to protect DexScreener search.
+TICKER_ADDRESS_CACHE: dict[str, tuple[float, str]] = {}
+TICKER_ADDRESS_CACHE_TTL = 30 * 60
+TICKER_SEARCH_CACHE: dict[str, tuple[float, list]] = {}
+TICKER_SEARCH_CACHE_TTL = 60
+TICKER_SEARCH_INFLIGHT: dict[str, asyncio.Task] = {}
 JETTON_INFO_CACHE: dict[str, tuple[float, dict]] = {}
 JETTON_INFO_CACHE_TTL = 10 * 60
 HOLDERS_CACHE: dict[str, tuple[float, object]] = {}
@@ -1619,41 +1627,65 @@ async def get_dex_data(session: aiohttp.ClientSession, address: str) -> list[dic
         return None
 
 
-async def search_dex_pairs(session: aiohttp.ClientSession, query: str, retries: int = 2) -> list[dict] | None:
-    last_status = None
-    for attempt in range(retries + 1):
+async def search_dex_pairs(session: aiohttp.ClientSession, query: str, retries: int = 3) -> list[dict] | None:
+    """Rate-limit-resilient DexScreener search with short cache + request coalescing."""
+    cache_key = str(query or "").strip().upper()
+    cached = _ttl_get(TICKER_SEARCH_CACHE, cache_key, TICKER_SEARCH_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    existing = TICKER_SEARCH_INFLIGHT.get(cache_key)
+    if existing and not existing.done():
         try:
-            async with session.get(
-                DEXSCREENER_SEARCH_API,
-                params={"q": query},
-                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (ton-scanner-bot)"},
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as resp:
-                last_status = resp.status
-                if resp.status == 429:
-                    # Rate-limited by DexScreener - back off briefly and retry.
-                    logger.warning("DexScreener search 429 for %r (attempt %s)", query, attempt + 1)
-                    if attempt < retries:
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                        continue
-                    return None
-                if resp.status != 200:
-                    logger.warning(
-                        "DexScreener search returned status %s for %r", resp.status, query
-                    )
-                    return None
-                data = await resp.json()
-                return data.get("pairs", [])
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            logger.warning(
-                "DexScreener search error for %r (attempt %s): %s", query, attempt + 1, e
-            )
-            if attempt < retries:
-                await asyncio.sleep(1.0 * (attempt + 1))
-                continue
+            return await existing
+        except Exception:
             return None
-    logger.warning("DexScreener search exhausted retries for %r, last_status=%s", query, last_status)
-    return None
+
+    async def _fetch():
+        last_status = None
+        for attempt in range(retries + 1):
+            try:
+                async with session.get(
+                    DEXSCREENER_SEARCH_API,
+                    params={"q": query},
+                    headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 (ton-scanner-bot)"},
+                    timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                ) as resp:
+                    last_status = resp.status
+                    if resp.status == 429:
+                        retry_after = resp.headers.get("Retry-After")
+                        try:
+                            wait = max(1.0, min(float(retry_after), 8.0)) if retry_after else min(1.25 * (2 ** attempt), 8.0)
+                        except (TypeError, ValueError):
+                            wait = min(1.25 * (2 ** attempt), 8.0)
+                        logger.warning("DexScreener search 429 for %r (attempt %s, wait %.1fs)", query, attempt + 1, wait)
+                        if attempt < retries:
+                            await asyncio.sleep(wait)
+                            continue
+                        return None
+                    if resp.status != 200:
+                        logger.warning("DexScreener search returned status %s for %r", resp.status, query)
+                        return None
+                    data = await resp.json()
+                    pairs = data.get("pairs", []) or []
+                    _ttl_put(TICKER_SEARCH_CACHE, cache_key, pairs)
+                    return pairs
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                logger.warning("DexScreener search error for %r (attempt %s): %s", query, attempt + 1, e)
+                if attempt < retries:
+                    await asyncio.sleep(min(1.0 * (2 ** attempt), 6.0))
+                    continue
+                return None
+        logger.warning("DexScreener search exhausted retries for %r, last_status=%s", query, last_status)
+        return None
+
+    task = asyncio.create_task(_fetch())
+    TICKER_SEARCH_INFLIGHT[cache_key] = task
+    try:
+        return await task
+    finally:
+        if TICKER_SEARCH_INFLIGHT.get(cache_key) is task:
+            TICKER_SEARCH_INFLIGHT.pop(cache_key, None)
 
 
 def _is_ton_pair(pair: dict) -> bool:
@@ -1686,6 +1718,11 @@ async def resolve_ticker_to_address(
     session: aiohttp.ClientSession, ticker_text: str
 ) -> tuple[str | None, str | None]:
     ticker = normalize_ticker(ticker_text)
+
+    cached_address = _ttl_get(TICKER_ADDRESS_CACHE, ticker, TICKER_ADDRESS_CACHE_TTL)
+    if cached_address:
+        return cached_address, None
+
     pairs = await search_dex_pairs(session, ticker)
 
     if pairs is None:
@@ -1709,6 +1746,7 @@ async def resolve_ticker_to_address(
     address = (best.get("baseToken") or {}).get("address")
     if not address:
         return None, f"Found TON results for ${ticker}, but no contract address was available."
+    _ttl_put(TICKER_ADDRESS_CACHE, ticker, address)
     return address, None
 
 
@@ -2240,7 +2278,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         if chart_lo <= call_price <= chart_hi:
             # The original GRX call is inside the visible candle range.
             ax.axhline(call_price,color=call_blue,linewidth=.82,alpha=.88,linestyle=(0,(4,3)))
-            ax.text(.025, call_price, f"GRX CALL  {_fmt_price_compact(call_price)}",
+            ax.text(.025, call_price, f"GRX SCAN  {_fmt_price_compact(call_price)}",
                     color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va="bottom",
                     transform=ax.get_yaxis_transform(),clip_on=True)
         else:
@@ -2249,7 +2287,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             y_edge = chart_hi if call_price > chart_hi else chart_lo
             edge_va = "top" if call_price > chart_hi else "bottom"
             arrow = "↑" if call_price > chart_hi else "↓"
-            ax.text(.025, y_edge, f"{arrow} GRX CALL  {_fmt_price_compact(call_price)}",
+            ax.text(.025, y_edge, f"{arrow} GRX SCAN  {_fmt_price_compact(call_price)}",
                     color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va=edge_va,
                     transform=ax.get_yaxis_transform(),clip_on=True)
 
