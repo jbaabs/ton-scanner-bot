@@ -142,6 +142,10 @@ CUSTOM_EMOJI = {
     "groypfi": "6305307926659605381",
     "topblast": "6118187720675173301",
     "leaderboard": "5820933489385544881",
+    "signal_buy_pressure": "5334830752976642837",
+    "signal_buy_sell_ratio": "5334787408166692203",
+    "signal_volume_24h": "5366561632057075362",
+    "signal_momentum_1h": "5363870616002794528",
 }
 
 def _ce(name: str, fallback: str) -> str:
@@ -157,6 +161,8 @@ def _ce(name: str, fallback: str) -> str:
         "price": "💰", "mcap": "📈", "holders": "👥",
         "liquidity": "💧", "age": "🌱", "ath": "🏆", "uranus": "🪐", "gram": "💎",
         "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀", "leaderboard": "🏆",
+        "signal_buy_pressure": "🟢", "signal_buy_sell_ratio": "⚖️",
+        "signal_volume_24h": "📊", "signal_momentum_1h": "📈",
     }
     safe = safe_fallbacks.get(name, "✨")
     return f'<tg-emoji emoji-id="{emoji_id}">{safe}</tg-emoji>'
@@ -1141,10 +1147,10 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
         rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
         symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
         address = str(row.get("token_address") or "").strip()
-        gt_url = f"https://www.geckoterminal.com/ton/tokens/{address}" if address else ""
+        grx_scan_url = _deep_scan_url(address) if address else None
         ticker = (
-            f'<a href="{html.escape(gt_url, quote=True)}"><b>${symbol}</b></a>'
-            if gt_url else f"<b>${symbol}</b>"
+            f'<a href="{html.escape(grx_scan_url, quote=True)}"><b>${symbol}</b></a>'
+            if grx_scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
             f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
@@ -1277,6 +1283,17 @@ def format_grx_stats(report: dict) -> str:
         buy_pressure = provider_buys / provider_total * 100.0
     net_flow = live.get("net_flow")
 
+    # Always-available GRX SIGNALS metrics from the current provider snapshot.
+    # These avoid the historical warm-up that caused "Collecting data".
+    tx24 = dex.get("txns_24h") or {}
+    buys_now = int(tx24.get("buys") or dex.get("buys_24h") or dex.get("buys") or 0)
+    sells_now = int(tx24.get("sells") or dex.get("sells_24h") or dex.get("sells") or 0)
+    total_now = buys_now + sells_now
+    buy_pressure_now = (buys_now / total_now * 100.0) if total_now else None
+    buy_sell_ratio = (buys_now / sells_now) if sells_now > 0 else None
+    volume_24h = _as_float(dex.get("volume_24h")) or 0.0
+    momentum_1h = _as_float(dex.get("price_change_1h"))
+
     first = get_first_scan_resolved(report)
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
 
@@ -1311,10 +1328,10 @@ def format_grx_stats(report: dict) -> str:
         f"<b>🔥 GRX SIGNALS — {symbol}</b>",
         "",
         "<b>MOMENTUM</b>",
-        f"5m Volume        <b>{signed(vol_change)}</b>",
-        f"Buy Pressure     <b>{(f'{buy_pressure:.0f}%' if buy_pressure is not None else 'Collecting data')}</b>",
-        f"Net Flow         <b>{(_fmt_usd(net_flow) if net_flow is not None else 'Collecting data')}</b>",
-        f"Trades 5m        <b>{(f'{trades_5m:,}' if trades_5m is not None else 'Collecting data')}</b>",
+        f"{_ce('signal_buy_pressure', '🟢')} Buy Pressure     <b>{(f'{buy_pressure_now:.0f}%' if buy_pressure_now is not None else 'N/A')}</b>",
+        f"{_ce('signal_buy_sell_ratio', '⚖️')} Buy / Sell Ratio <b>{(f'{buy_sell_ratio:.2f}x' if buy_sell_ratio is not None else ('∞' if buys_now > 0 and sells_now == 0 else 'N/A'))}</b>",
+        f"{_ce('signal_volume_24h', '📊')} 24H Volume       <b>{_fmt_usd(volume_24h)}</b>",
+        f"{_ce('signal_momentum_1h', '📈')} 1H Momentum      <b>{(_fmt_pct(momentum_1h) if momentum_1h is not None else 'N/A')}</b>",
         "",
         "<b>HOLDERS</b>",
         f"Holders 10m      <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
