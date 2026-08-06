@@ -2012,6 +2012,23 @@ async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> fl
     return max(highs) if highs else None
 
 
+def _parse_stored_price(value) -> float | None:
+    """Parse a persisted GRX scan price whether stored as numeric or formatted text."""
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            n = float(value)
+        else:
+            raw = str(value).strip().replace("$", "").replace(",", "")
+            if not raw or raw.upper() == "N/A":
+                return None
+            n = float(raw)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _chart_axis_price(v, _pos=None):
     """Human price labels without Matplotlib scientific-offset notation."""
     try:
@@ -2150,7 +2167,12 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             volumes.append(max(0.0, float(c[5])) if len(c) > 5 else 0.0)
         except (TypeError, ValueError, IndexError):
             volumes.append(0.0)
-    fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
+    # Render the exact same dashboard at 2x internal resolution, then
+    # downsample to the original 1280x1448 output. This improves antialiasing
+    # and sharpness without changing layout, sizing, colours or appearance.
+    output_dpi = 160
+    render_scale = 2
+    fig=plt.figure(figsize=(8,9.05),dpi=output_dpi * render_scale,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
 
@@ -2211,17 +2233,25 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # GRX first-call reference: visually anchors performance to the original scan.
     first_for_chart = get_first_scan_resolved(report)
-    call_price = None
-    try:
-        call_price = float((first_for_chart or {}).get("scan_price") or 0)
-    except (TypeError, ValueError):
-        call_price = None
-    if call_price and call_price > 0 and (lo-pad) <= call_price <= (hi+pad):
+    call_price = _parse_stored_price((first_for_chart or {}).get("scan_price"))
+    if call_price:
         call_blue = "#45a8ff"
-        ax.axhline(call_price,color=call_blue,linewidth=.78,alpha=.82,linestyle=(0,(4,3)))
-        ax.text(.15, call_price, f"GRX CALL  {_fmt_price_compact(call_price)}",
-                color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va="bottom",
-                transform=ax.get_yaxis_transform(),clip_on=True)
+        chart_lo, chart_hi = ax.get_ylim()
+        if chart_lo <= call_price <= chart_hi:
+            # The original GRX call is inside the visible candle range.
+            ax.axhline(call_price,color=call_blue,linewidth=.82,alpha=.88,linestyle=(0,(4,3)))
+            ax.text(.025, call_price, f"GRX CALL  {_fmt_price_compact(call_price)}",
+                    color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va="bottom",
+                    transform=ax.get_yaxis_transform(),clip_on=True)
+        else:
+            # Keep the call visible even when price has moved outside the current
+            # candle range; pin a labelled marker to the nearest chart edge.
+            y_edge = chart_hi if call_price > chart_hi else chart_lo
+            edge_va = "top" if call_price > chart_hi else "bottom"
+            arrow = "↑" if call_price > chart_hi else "↓"
+            ax.text(.025, y_edge, f"{arrow} GRX CALL  {_fmt_price_compact(call_price)}",
+                    color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va=edge_va,
+                    transform=ax.get_yaxis_transform(),clip_on=True)
 
     # Compact aligned volume strip beneath the candles. It is deliberately small
     # so the dashboard keeps the same overall proportions.
@@ -2319,7 +2349,27 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ha="center", va="center",
     )
 
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
+    hi_res_buf=BytesIO()
+    fig.savefig(hi_res_buf,format="png",facecolor=bg,bbox_inches=None,dpi=output_dpi * render_scale)
+    plt.close(fig)
+    hi_res_buf.seek(0)
+
+    # High-quality supersampling/downsampling keeps the final Telegram image
+    # exactly the same pixel dimensions while producing cleaner text, borders,
+    # candles and fine chart lines.
+    try:
+        from PIL import Image
+        rendered = Image.open(hi_res_buf).convert("RGB")
+        target_size = (int(round(8 * output_dpi)), int(round(9.05 * output_dpi)))
+        if rendered.size != target_size:
+            rendered = rendered.resize(target_size, Image.Resampling.LANCZOS)
+        out_buf = BytesIO()
+        rendered.save(out_buf, format="PNG", optimize=True)
+        return out_buf.getvalue()
+    except Exception:
+        # Safe fallback: preserve a valid dashboard even if Pillow processing fails.
+        hi_res_buf.seek(0)
+        return hi_res_buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
