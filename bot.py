@@ -1252,6 +1252,14 @@ def format_grx_stats(report: dict) -> str:
     snap_5m = get_snapshot_after(report, 5 * 60)
     snap_10m = get_snapshot_after(report, 10 * 60)
 
+    # Only use historical observations that are reasonably close to the requested
+    # boundary. This avoids presenting stale snapshots as genuine 5m/10m changes.
+    now_ts = int(time.time())
+    if snap_5m and abs(int(snap_5m.get("snapshot_ts") or 0) - (now_ts - 5 * 60)) > 5 * 60:
+        snap_5m = None
+    if snap_10m and abs(int(snap_10m.get("snapshot_ts") or 0) - (now_ts - 10 * 60)) > 7 * 60:
+        snap_10m = None
+
     # Rolling volume: current provider 5m bucket vs the 5m bucket recorded
     # around five minutes ago. Suppress false -100% when either side is absent.
     now_v5 = _as_float(dex.get("volume_5m"))
@@ -1324,27 +1332,43 @@ def format_grx_stats(report: dict) -> str:
             return "Collecting data"
         return f"{v:+.{decimals}f}{suffix}"
 
+    momentum_rows = [
+        f"{_ce('signal_buy_pressure', '🟢')} Buy Pressure — <b>{(f'{buy_pressure_now:.0f}%' if buy_pressure_now is not None else 'N/A')}</b>",
+        f"{_ce('signal_buy_sell_ratio', '⚖️')} Buy / Sell Ratio — <b>{(f'{buy_sell_ratio:.2f}x' if buy_sell_ratio is not None else ('∞' if buys_now > 0 and sells_now == 0 else 'N/A'))}</b>",
+        f"{_ce('signal_volume_24h', '📊')} 24H Volume — <b>{_fmt_usd(volume_24h)}</b>",
+        f"{_ce('signal_momentum_1h', '📈')} 1H Momentum — <b>{(_fmt_pct(momentum_1h) if momentum_1h is not None else 'N/A')}</b>",
+    ]
+    holder_rows = [
+        f"Holders 10m — <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
+        f"Top 10 — <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
+    ]
+    market_rows = [
+        f"Liquidity 10m — <b>{signed(liq_change)}</b>",
+        f"Price 10m — <b>{signed(price_change)}</b>",
+    ]
+    call_rows = [
+        f"Performance — <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
+        f"ATH Since Call — <b>{(_fmt_pct(ath_perf) if ath_perf is not None else 'Collecting data')}</b>",
+        f"MC Since Call — <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
+    ]
+
+    panel = "\n".join([
+        "<b>MOMENTUM</b>",
+        *momentum_rows,
+        "",
+        "<b>HOLDERS</b>",
+        *holder_rows,
+        "",
+        "<b>MARKET</b>",
+        *market_rows,
+        "",
+        "<b>CALL</b>",
+        *call_rows,
+    ])
     lines = [
         f"<b>🔥 GRX SIGNALS — {symbol}</b>",
         "",
-        "<b>MOMENTUM</b>",
-        f"{_ce('signal_buy_pressure', '🟢')} Buy Pressure     <b>{(f'{buy_pressure_now:.0f}%' if buy_pressure_now is not None else 'N/A')}</b>",
-        f"{_ce('signal_buy_sell_ratio', '⚖️')} Buy / Sell Ratio <b>{(f'{buy_sell_ratio:.2f}x' if buy_sell_ratio is not None else ('∞' if buys_now > 0 and sells_now == 0 else 'N/A'))}</b>",
-        f"{_ce('signal_volume_24h', '📊')} 24H Volume       <b>{_fmt_usd(volume_24h)}</b>",
-        f"{_ce('signal_momentum_1h', '📈')} 1H Momentum      <b>{(_fmt_pct(momentum_1h) if momentum_1h is not None else 'N/A')}</b>",
-        "",
-        "<b>HOLDERS</b>",
-        f"Holders 10m      <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
-        f"Top 10           <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
-        "",
-        "<b>MARKET</b>",
-        f"Liquidity 10m    <b>{signed(liq_change)}</b>",
-        f"Price 10m        <b>{signed(price_change)}</b>",
-        "",
-        "<b>CALL</b>",
-        f"Performance      <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
-        f"ATH Since Call   <b>{(_fmt_pct(ath_perf) if ath_perf is not None else 'Collecting data')}</b>",
-        f"MC Since Call    <b>{html.escape(first_mc_text)} → {html.escape(_fmt_usd(current_mc))}</b>",
+        f"<blockquote>{panel}</blockquote>",
     ]
     return "\n".join(lines)
 
@@ -4510,6 +4534,9 @@ async def handle_toggle(callback: CallbackQuery):
         # Keep the stats view focused; holders are part of the scanner view.
         if entry["show_stats"]:
             entry["show_holders"] = False
+            # Capture a local baseline whenever Signals is viewed. This improves
+            # future 10m holder/liquidity/price deltas for tokens that are not watched.
+            save_token_snapshot(entry["report"])
     elif section == "holders":
         entry["show_stats"] = False
         entry["show_holders"] = not entry["show_holders"]
