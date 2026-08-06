@@ -401,6 +401,18 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_events_token_ts ON scan_events(token_key, scan_ts DESC)")
+    # Persist report button keys so Refresh/Chart can recover after cache expiry/restart.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_callbacks (
+            report_key TEXT PRIMARY KEY,
+            token_address TEXT NOT NULL,
+            created_ts INTEGER NOT NULL,
+            last_used_ts INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_report_callbacks_used ON report_callbacks(last_used_ts)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS trending_alerts (
@@ -1328,6 +1340,18 @@ def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
         save_scan_history(report, scanner_meta)
 
     _token_state_put(report.get("address"), report)
+    address = str(report.get("address") or "").strip()
+    if address:
+        now_ts = int(time.time())
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """INSERT INTO report_callbacks(report_key, token_address, created_ts, last_used_ts)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(report_key) DO UPDATE SET
+                     token_address=excluded.token_address, last_used_ts=excluded.last_used_ts""",
+                (key, address, now_ts, now_ts),
+            )
+            conn.execute("DELETE FROM report_callbacks WHERE last_used_ts < ?", (now_ts - 90*24*60*60,))
     REPORT_CACHE[key] = {
         "report": report,
         "show_info": False,
@@ -1347,6 +1371,36 @@ def _prune_report_cache():
     expired = [k for k, v in REPORT_CACHE.items() if now - v["ts"] > REPORT_CACHE_TTL]
     for k in expired:
         REPORT_CACHE.pop(k, None)
+
+
+async def _recover_report_cache_entry(key: str) -> dict | None:
+    """Rebuild an expired in-memory report from the persisted callback mapping."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT token_address FROM report_callbacks WHERE report_key=?", (key,)).fetchone()
+    if not row or not row[0]:
+        return None
+    address = str(row[0]).strip()
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300),
+        ) as session:
+            report = await scan_token(session, address)
+    except Exception:
+        logger.exception("Failed recovering report cache key %s", key)
+        return None
+    if not report or not report.get("found"):
+        return None
+    REPORT_CACHE[key] = {
+        "report": report, "show_info": False, "show_holders": False,
+        "show_stats": False, "chart_tf": DEFAULT_CHART_TIMEFRAME,
+        "has_image": bool(_safe_image_url(report)), "scanner_meta": {},
+        "scan_history": get_scan_history(report), "ts": time.time(),
+    }
+    _token_state_put(address, report)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE report_callbacks SET last_used_ts=? WHERE report_key=?", (int(time.time()), key))
+    return REPORT_CACHE[key]
 
 
 def is_valid_ton_address(text: str) -> bool:
@@ -3670,20 +3724,15 @@ def format_token_report(
         social_line = _centre_html_line(social_line, 34)
 
     activity = get_scan_activity(report)
-    group_scans = int(activity.get("groups", 0) or 0)
-    individual_scans = int(activity.get("users", 0) or 0)
-    activity_lines = []
-    if activity["scans"]:
-        activity_lines = [
-            f"👥 <b>Group Scans</b> {group_scans}",
-            f"👤 <b>Individual Scans</b> {individual_scans}",
-        ]
+    activity_line = (
+        f"📡 <b>Scans</b> {activity['scans']}  •  "
+        f"👥 <b>Independent Scanners</b> {activity['sources']}"
+    ) if activity["scans"] else ""
 
     lines = [
         _centred_token_title(symbol, name, title_suffix),
         *([social_line] if social_line else []),
-        *([""] if activity_lines else []),
-        *activity_lines,
+        *([_centre_html_line(activity_line, 34)] if activity_line else []),
     ]
 
     if bonding and not bonding.get("bonded", False):
@@ -4290,8 +4339,10 @@ async def handle_toggle(callback: CallbackQuery):
 
     entry = REPORT_CACHE.get(key)
     if not entry:
-        await callback.answer("This report has expired — please scan the token again.", show_alert=True)
-        return
+        entry = await _recover_report_cache_entry(key)
+        if not entry:
+            await callback.answer("Couldn't recover this scan right now. Please try again.", show_alert=True)
+            return
 
     entry["ts"] = time.time()
 
@@ -4448,8 +4499,10 @@ async def handle_toggle(callback: CallbackQuery):
 async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     entry = REPORT_CACHE.get(key)
     if not entry:
-        await callback.answer("This report has expired — please scan the token again.", show_alert=True)
-        return
+        entry = await _recover_report_cache_entry(key)
+        if not entry:
+            await callback.answer("Couldn't recover this scan right now. Please try again.", show_alert=True)
+            return
 
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
@@ -4625,8 +4678,10 @@ async def handle_timeframe(callback: CallbackQuery):
 
     entry = REPORT_CACHE.get(key)
     if not entry:
-        await callback.answer("This report has expired — please scan the token again.", show_alert=True)
-        return
+        entry = await _recover_report_cache_entry(key)
+        if not entry:
+            await callback.answer("Couldn't recover this scan right now. Please try again.", show_alert=True)
+            return
 
     entry["ts"] = time.time()
     entry["chart_tf"] = timeframe
