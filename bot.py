@@ -146,6 +146,8 @@ CUSTOM_EMOJI = {
     "signal_buy_sell_ratio": "5334787408166692203",
     "signal_volume_24h": "5366561632057075362",
     "signal_momentum_1h": "5363870616002794528",
+    "holders_up": "5366167405598906304",
+    "holders_down": "5366417544494225573",
 }
 
 def _ce(name: str, fallback: str) -> str:
@@ -163,6 +165,7 @@ def _ce(name: str, fallback: str) -> str:
         "coingecko": "🦎", "groypfi": "🟣", "topblast": "🚀", "leaderboard": "🏆",
         "signal_buy_pressure": "🟢", "signal_buy_sell_ratio": "⚖️",
         "signal_volume_24h": "📊", "signal_momentum_1h": "📈",
+        "holders_up": "📈", "holders_down": "📉",
     }
     safe = safe_fallbacks.get(name, "✨")
     return f'<tg-emoji emoji-id="{emoji_id}">{safe}</tg-emoji>'
@@ -316,6 +319,11 @@ def init_db():
         )
         """
     )
+    # Migration: preserve the holder count from the first GRX scan/call.
+    scan_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_history)").fetchall()}
+    if "scan_holders" not in scan_cols:
+        conn.execute("ALTER TABLE scan_history ADD COLUMN scan_holders INTEGER")
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scan_token_key ON scan_history(token_key, scan_ts DESC)"
     )
@@ -603,6 +611,7 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
     scanner_name = scanner_meta.get("scanner_name")
     scan_price = scanner_meta.get("scan_price")
     scan_market_cap = scanner_meta.get("scan_market_cap")
+    scan_holders = int((report.get("jetton_info") or {}).get("holders_count") or 0)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -630,8 +639,8 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
         """
         INSERT INTO scan_history (
             token_key, token_address, token_symbol, scanner_id, scanner_name,
-            scan_price, scan_market_cap, scan_ts
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            scan_price, scan_market_cap, scan_ts, scan_holders
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             token_key,
@@ -642,6 +651,7 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
             scan_price,
             scan_market_cap,
             scan_ts,
+            scan_holders,
         ),
     )
     conn.commit()
@@ -678,7 +688,7 @@ def get_first_scan(report: dict) -> dict | None:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         """
-        SELECT id, scanner_id, scanner_name, scan_price, scan_market_cap, scan_ts
+        SELECT id, scanner_id, scanner_name, scan_price, scan_market_cap, scan_ts, scan_holders
         FROM scan_history
         WHERE token_key = ?
         ORDER BY scan_ts ASC, id ASC
@@ -688,6 +698,33 @@ def get_first_scan(report: dict) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def resolve_first_scan_holders(report: dict, first_scan: dict | None) -> int | None:
+    if not first_scan:
+        return None
+    stored = first_scan.get("scan_holders")
+    if stored not in (None, 0, "0"):
+        return int(stored)
+
+    token_key = _history_key(report)
+    scan_ts = int(first_scan.get("scan_ts") or 0)
+    if not token_key or not scan_ts:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """SELECT holders_count FROM token_snapshots
+               WHERE token_key=? AND snapshot_ts>=? AND holders_count IS NOT NULL
+               ORDER BY snapshot_ts ASC LIMIT 1""",
+            (token_key, scan_ts),
+        ).fetchone()
+        if row and row[0] is not None:
+            baseline = int(row[0])
+            if first_scan.get("id") is not None:
+                conn.execute("UPDATE scan_history SET scan_holders=? WHERE id=?", (baseline, first_scan["id"]))
+            return baseline
+    return None
 
 
 def _is_missing_value(value) -> bool:
@@ -1304,6 +1341,11 @@ def format_grx_stats(report: dict) -> str:
 
     first = get_first_scan_resolved(report)
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
+    first_holders = resolve_first_scan_holders(report, first)
+    current_holders = int(info.get("holders_count") or 0)
+    activity = get_scan_activity(report)
+    group_scans = int(activity.get("groups", 0) or 0)
+    individual_scans = int(activity.get("users", 0) or 0)
 
     def parse_compact_usd(value):
         if not value or value == "N/A":
@@ -1338,13 +1380,24 @@ def format_grx_stats(report: dict) -> str:
         f"{_ce('signal_volume_24h', '📊')} 24H Volume — <b>{_fmt_usd(volume_24h)}</b>",
         f"{_ce('signal_momentum_1h', '📈')} 1H Momentum — <b>{(_fmt_pct(momentum_1h) if momentum_1h is not None else 'N/A')}</b>",
     ]
+    if first_holders is not None and current_holders:
+        if current_holders > first_holders:
+            holder_direction = _ce("holders_up", "📈")
+        elif current_holders < first_holders:
+            holder_direction = _ce("holders_down", "📉")
+        else:
+            holder_direction = "•"
+        new_holders_text = f"{holder_direction} <b>{first_holders:,} / {current_holders:,}</b>"
+    else:
+        new_holders_text = "<b>Baseline unavailable</b>"
+
     holder_rows = [
-        f"Holders 10m — <b>{(f'{holder_delta:+d}' if holder_delta is not None else 'Collecting data')}</b>",
-        f"Top 10 — <b>{(f'{top_now:.2f}%  {top_delta:+.2f}%' if top_now is not None and top_delta is not None else (f'{top_now:.2f}%' if top_now is not None else 'Collecting data'))}</b>",
+        f"New Holders — {new_holders_text}",
+        f"Top 10 — <b>{(f'{top_now:.2f}%' if top_now is not None else 'N/A')}</b>",
     ]
-    market_rows = [
-        f"Liquidity 10m — <b>{signed(liq_change)}</b>",
-        f"Price 10m — <b>{signed(price_change)}</b>",
+    scan_rows = [
+        f"Group Scans — <b>{group_scans}</b>",
+        f"Individual Scans — <b>{individual_scans}</b>",
     ]
     call_rows = [
         f"Performance — <b>{(_fmt_pct(performance) if performance is not None else 'N/A')}</b>",
@@ -1359,8 +1412,8 @@ def format_grx_stats(report: dict) -> str:
         "<b>HOLDERS</b>",
         *holder_rows,
         "",
-        "<b>MARKET</b>",
-        *market_rows,
+        "<b>SCANS</b>",
+        *scan_rows,
         "",
         "<b>CALL</b>",
         *call_rows,
@@ -3764,21 +3817,9 @@ def format_token_report(
         # must not affect the centring calculation.
         social_line = _centre_html_line(social_line, 34)
 
-    activity = get_scan_activity(report)
-    group_scans = int(activity.get("groups", 0) or 0)
-    individual_scans = int(activity.get("users", 0) or 0)
-    activity_lines = []
-    if activity["scans"]:
-        activity_lines = [
-            f"👥 <b>Group Scans</b> {group_scans}",
-            f"👤 <b>Individual Scans</b> {individual_scans}",
-        ]
-
     lines = [
         _centred_token_title(symbol, name, title_suffix),
         *([social_line] if social_line else []),
-        *([""] if activity_lines else []),
-        *activity_lines,
     ]
 
     if bonding and not bonding.get("bonded", False):
