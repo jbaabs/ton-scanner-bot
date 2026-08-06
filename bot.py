@@ -2144,6 +2144,12 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         raise ValueError("No valid OHLCV candles to render")
     times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
+    volumes=[]
+    for c in ohlcv:
+        try:
+            volumes.append(max(0.0, float(c[5])) if len(c) > 5 else 0.0)
+        except (TypeError, ValueError, IndexError):
+            volumes.append(0.0)
     fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
     def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
         fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
@@ -2175,7 +2181,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     fig.text(title_x,.899,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
     last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
     fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
-    ax=fig.add_axes([.045,.625,.90,.235],facecolor=bg)
+    ax=fig.add_axes([.045,.655,.875,.205],facecolor=bg)
     ax.tick_params(axis='x', pad=3)
     n=len(ohlcv)
     width=max(.22,min(.54,18.0/max(n,1)))
@@ -2197,8 +2203,36 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.yaxis.get_offset_text().set_visible(False)
     ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
-    ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
+    # Current price reference.
+    ax.axhline(last,color=pc(move),linewidth=.8,alpha=.55,linestyle=(0,(4,3)))
+    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.58,last),textcoords="data",
+                ha="left",va="center",fontsize=7.8,color="#ffffff",fontweight="bold",
+                bbox=dict(boxstyle="round,pad=.24",fc=pc(move),ec="none"),clip_on=False)
+
+    # GRX first-call reference: visually anchors performance to the original scan.
+    first_for_chart = get_first_scan_resolved(report)
+    call_price = None
+    try:
+        call_price = float((first_for_chart or {}).get("scan_price") or 0)
+    except (TypeError, ValueError):
+        call_price = None
+    if call_price and call_price > 0 and (lo-pad) <= call_price <= (hi+pad):
+        call_blue = "#45a8ff"
+        ax.axhline(call_price,color=call_blue,linewidth=.78,alpha=.82,linestyle=(0,(4,3)))
+        ax.text(.15, call_price, f"GRX CALL  {_fmt_price_compact(call_price)}",
+                color=call_blue,fontsize=7.5,fontweight="bold",ha="left",va="bottom",
+                transform=ax.get_yaxis_transform(),clip_on=True)
+
+    # Compact aligned volume strip beneath the candles. It is deliberately small
+    # so the dashboard keeps the same overall proportions.
+    if any(v > 0 for v in volumes):
+        vax=fig.add_axes([.045,.610,.875,.038],facecolor=bg,sharex=ax)
+        vmax=max(volumes) or 1.0
+        for i,(v,o,c) in enumerate(zip(volumes,opens,closes)):
+            vax.bar(i,v,width=width,color=(green if c>=o else red),alpha=.42,linewidth=0)
+        vax.set_ylim(0,vmax*1.12)
+        vax.set_xlim(ax.get_xlim())
+        vax.axis("off")
 
     # Compact pulse/caller band.
     box(.025,.445,.465,.115); box(.51,.445,.465,.115)
@@ -2280,8 +2314,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     # Sized to roughly match the horizontal distance from the BUYS card to the SELLS card.
     fig.text(
         .5, .085, "POWERED BY GRX",
-        color=(1.0, 1.0, 1.0, 0.38),
-        fontsize=18.0, fontweight="bold",
+        color=(1.0, 1.0, 1.0, 0.30),
+        fontsize=11.5, fontweight="bold",
         ha="center", va="center",
     )
 
