@@ -1089,8 +1089,21 @@ async def maybe_announce_trending(report: dict) -> None:
             "\n".join(lines),
             disable_web_page_preview=True,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to post GRX Trending alert to %s", GRX_TRENDING_CHANNEL)
+        # Surface channel permission / username / chat-id failures during the real
+        # two-account test instead of failing silently in logs.
+        if OWNER_TELEGRAM_ID:
+            try:
+                await bot.send_message(
+                    OWNER_TELEGRAM_ID,
+                    "⚠️ <b>GRX Trending post failed</b>\n\n"
+                    f"Channel: <code>{html.escape(str(GRX_TRENDING_CHANNEL))}</code>\n"
+                    f"Error: <code>{html.escape(str(exc))}</code>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("Could not notify owner about Trending channel failure")
         return
 
     with sqlite3.connect(DB_PATH) as conn:
@@ -2077,7 +2090,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_ts: int | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -2124,6 +2137,23 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
+
+    # Mark the first GRX scan/call on every timeframe chart when that timestamp
+    # is inside the candles currently being displayed.
+    if scan_ts:
+        try:
+            scan_ts_i = int(scan_ts)
+            candle_ts = [int(c[0]) for c in ohlcv]
+            if candle_ts and candle_ts[0] <= scan_ts_i <= candle_ts[-1]:
+                scan_x = min(range(len(candle_ts)), key=lambda i: abs(candle_ts[i] - scan_ts_i))
+                scan_blue = "#168BFF"
+                ax.axvline(scan_x, color=scan_blue, linewidth=1.35, alpha=.95, zorder=8)
+                ax.text(scan_x, .985, "GRX SCAN", transform=ax.get_xaxis_transform(),
+                        ha="center", va="top", color=scan_blue, fontsize=8.2, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=.20", fc=bg, ec=scan_blue, lw=.7, alpha=.92),
+                        zorder=9)
+        except Exception:
+            pass
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
@@ -4654,6 +4684,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
     )
 
     media = InputMediaPhoto(
@@ -4836,6 +4867,7 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
     )
 
     media = InputMediaPhoto(
