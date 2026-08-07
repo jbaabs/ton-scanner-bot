@@ -142,6 +142,7 @@ CUSTOM_EMOJI = {
     "groypfi": "6305307926659605381",
     "topblast": "6118187720675173301",
     "leaderboard": "5820933489385544881",
+    "trending_entry": "6028627988877156793",
     "signal_buy_pressure": "5334830752976642837",
     "signal_buy_sell_ratio": "5334787408166692203",
     "signal_volume_24h": "5366561632057075362",
@@ -1077,16 +1078,18 @@ async def maybe_announce_trending(report: dict) -> None:
     scan_url = _deep_scan_url(address)
     title = html.escape(symbol)
     lines = [
-        f'{_ce("leaderboard", "📈")} <b>{title} ENTERED GRX TRENDING</b>',
-        "",
-        f'<b>{snap["individual_scans"]} Individual Scans</b> · <b>{snap["individual_scans"]} Unique Accounts</b> · <b>{snap["window"]}</b>',
+        f'{_ce("trending_entry", "🔥")} <b>{title} HAS ENTERED GRX TRENDING</b>',
     ]
+    reply_markup = None
     if scan_url:
-        lines += ["", f'🔎 <a href="{html.escape(scan_url, quote=True)}">Click for {title} scan</a>']
+        keyboard = InlineKeyboardBuilder()
+        keyboard.row(InlineKeyboardButton(text=f"${symbol}", url=scan_url))
+        reply_markup = keyboard.as_markup()
     try:
         await bot.send_message(
             GRX_TRENDING_CHANNEL,
             "\n".join(lines),
+            reply_markup=reply_markup,
             disable_web_page_preview=True,
         )
     except Exception as exc:
