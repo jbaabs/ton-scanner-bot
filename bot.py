@@ -143,6 +143,7 @@ CUSTOM_EMOJI = {
     "topblast": "6118187720675173301",
     "leaderboard": "5820933489385544881",
     "trending_entry": "5364342783232481866",
+    "trending_scan": "5366424034189811245",
     "signal_buy_pressure": "5334830752976642837",
     "signal_buy_sell_ratio": "5334787408166692203",
     "signal_volume_24h": "5366561632057075362",
@@ -1273,7 +1274,7 @@ async def maybe_announce_trending(report: dict) -> None:
     # headline as a cashtag. The visible text remains "$TICKER". The only
     # clickable ticker is the inline scanner button below.
     display_ticker = f"$&#8203;{title}"
-    lines = [f'{_ce("trending_entry", "🔥")} <b>{display_ticker} HAS ENTERED GRX TRENDING</b>']
+    lines = [f'<b>{display_ticker} HAS ENTERED GRX TRENDING</b>']
     if description:
         safe_description = html.escape(description)
         # Long descriptions stay fully available in-message via Telegram's native
@@ -1286,7 +1287,7 @@ async def maybe_announce_trending(report: dict) -> None:
     reply_markup = None
     if scan_url:
         keyboard = InlineKeyboardBuilder()
-        keyboard.row(InlineKeyboardButton(text=f"${symbol}", url=scan_url))
+        keyboard.row(_custom_icon_button(text=f"Scan ${symbol} on GRX", url=scan_url, emoji_name="trending_scan"))
         reply_markup = keyboard.as_markup()
 
     try:
