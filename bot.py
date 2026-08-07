@@ -1455,6 +1455,14 @@ def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
 
     if scanner_meta:
         save_scan_history(report, scanner_meta)
+        # Preserve the ORIGINAL GRX first-scan timestamp on the report used by
+        # both chart renderers. This avoids losing the marker on later renders.
+        first_saved_scan = get_first_scan(report)
+        report["_grx_first_scan_ts"] = int(
+            (first_saved_scan or {}).get("scan_ts")
+            or scanner_meta.get("scan_ts")
+            or time.time()
+        )
 
     _token_state_put(report.get("address"), report)
     address = str(report.get("address") or "").strip()
@@ -2164,7 +2172,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     # Original GRX scan: bright blue vertical marker + label.
     scan_i = _grx_scan_candle_index(times, grx_scan_ts)
     if scan_i is not None:
-        ax.axvline(scan_i, color="#168BFF", linewidth=1.55, alpha=1.0, zorder=20)
+        ax.axvline(scan_i, color="#168BFF", linewidth=2.4, alpha=1.0, zorder=50)
         y_top = ax.get_ylim()[1]
         y_span = ax.get_ylim()[1] - ax.get_ylim()[0]
         label_x = max(-.55, min(scan_i + .18, len(ohlcv) - 3.0))
@@ -2263,9 +2271,14 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # Original GRX scan marker on the main dashboard.
     first_scan_marker = get_first_scan_resolved(report)
-    scan_i = _grx_scan_candle_index(times, (first_scan_marker or {}).get("scan_ts"))
+    grx_scan_ts = int(
+        report.get("_grx_first_scan_ts")
+        or (first_scan_marker or {}).get("scan_ts")
+        or 0
+    ) or None
+    scan_i = _grx_scan_candle_index(times, grx_scan_ts)
     if scan_i is not None:
-        ax.axvline(scan_i, color="#168BFF", linewidth=1.55, alpha=1.0, zorder=20)
+        ax.axvline(scan_i, color="#168BFF", linewidth=2.4, alpha=1.0, zorder=50)
         y_top = ax.get_ylim()[1]
         y_span = ax.get_ylim()[1] - ax.get_ylim()[0]
         label_x = max(-.55, min(scan_i + .18, len(ohlcv) - 3.0))
@@ -4702,7 +4715,11 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        int((get_first_scan_resolved(entry["report"]) or {}).get("scan_ts") or 0) or None,
+        int(
+            entry["report"].get("_grx_first_scan_ts")
+            or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts")
+            or 0
+        ) or None,
     )
 
     media = InputMediaPhoto(
@@ -4885,7 +4902,11 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        int((get_first_scan_resolved(entry["report"]) or {}).get("scan_ts") or 0) or None,
+        int(
+            entry["report"].get("_grx_first_scan_ts")
+            or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts")
+            or 0
+        ) or None,
     )
 
     media = InputMediaPhoto(
