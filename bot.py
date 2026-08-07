@@ -1031,7 +1031,7 @@ def _trending_snapshot(report: dict) -> dict:
         tier = 3
     elif individual_scans >= 25:
         tier = 2
-    elif individual_scans >= 10:
+    elif individual_scans >= 2:
         tier = 1
     else:
         tier = 0
