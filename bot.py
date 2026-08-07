@@ -1000,47 +1000,70 @@ def get_scan_activity(report: dict, seconds: int | None = None) -> dict:
         "capped_scans": int(capped),
     }
 
-def _trending_snapshot(report: dict) -> dict:
+def _get_trending_score(report: dict) -> dict:
     """
-    Point-based Trending logic:
-    - Private scan = 1.0
-    - Group scan = 0.5
-    - 1 scan per user per 24h
-    - 30 min rolling window
+    Production Trending score, backed by the bot's persistent scan_events table.
+
+    Rules:
+    - Rolling 30-minute trigger window.
+    - One qualifying contribution per Telegram user per token per 24 hours.
+    - Private/DM contribution = 1.0 point.
+    - Group/supergroup/channel contribution = 0.5 point.
+    - A repeat scan inside the same 24-hour period does not add points.
     """
+    token_key = _history_key(report)
+    if not token_key:
+        return {"score": 0.0, "private": 0, "group": 0, "triggered": False}
 
-    scans = report.get("scans", [])
-    now = time.time()
+    now = int(time.time())
+    window_start = now - (30 * 60)
+    day_start = now - (24 * 60 * 60)
 
-    TIME_WINDOW = 30 * 60
-    USER_COOLDOWN = 24 * 60 * 60
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT scanner_id, chat_type, scan_ts
+            FROM scan_events
+            WHERE token_key=?
+              AND scan_ts>=?
+              AND scanner_id IS NOT NULL
+            ORDER BY scan_ts ASC
+            """,
+            (token_key, day_start),
+        ).fetchall()
 
-    seen_users = {}
+    # First scan by each user in the 24-hour period is their only contribution.
+    first_by_user = {}
+    for scanner_id, chat_type, scan_ts in rows:
+        uid = int(scanner_id)
+        if uid not in first_by_user:
+            first_by_user[uid] = (int(scan_ts), str(chat_type or ""))
+
+    private_count = 0
+    group_count = 0
     score = 0.0
 
-    for scan in scans:
-        user_id = scan.get("user_id")
-        ts = scan.get("timestamp", 0)
-        is_private = scan.get("is_private", False)
-
-        if now - ts > TIME_WINDOW:
+    for scan_ts, chat_type in first_by_user.values():
+        if scan_ts < window_start:
             continue
 
-        if user_id in seen_users:
-            if now - seen_users[user_id] < USER_COOLDOWN:
-                continue
-
-        seen_users[user_id] = ts
-
-        if is_private:
-            score += 1.0
-        else:
+        if chat_type in ("group", "supergroup", "channel"):
+            group_count += 1
             score += 0.5
+        else:
+            private_count += 1
+            score += 1.0
 
     return {
         "score": score,
-        "triggered": score >= 20
+        "private": private_count,
+        "group": group_count,
+        "triggered": score >= 20.0,
     }
+
+
+def _trending_snapshot(report: dict) -> dict:
+    return _get_trending_score(report)
 
 
 
@@ -4501,6 +4524,54 @@ async def cmd_testtrending(message: Message):
         except Exception: pass
 
 
+
+@dp.message(Command("score"))
+async def cmd_score(message: Message):
+    """Owner-only live Trending score for a token."""
+    if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
+        await message.answer("This command is restricted to the GRX bot owner.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/score FAST</code>")
+        return
+
+    query = parts[1].strip()
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+        ) as session:
+            if is_valid_ton_address(query):
+                address = query
+            else:
+                address, error_text = await resolve_ticker_to_address(session, query)
+                if error_text or not address:
+                    await message.answer(error_text or "Token not found.")
+                    return
+
+            report = await get_token_state(session, address, force=True)
+
+        if not report.get("found"):
+            await message.answer("Token not found.")
+            return
+
+        snap = _get_trending_score(report)
+        symbol = str((report.get("jetton_info") or {}).get("symbol") or query).upper()
+
+        await message.answer(
+            f"<b>${html.escape(symbol)} Trending score</b>\n\n"
+            f"Score: <b>{snap['score']:.1f}/20</b>\n"
+            f"Private: <b>{snap['private']}</b> × 1.0\n"
+            f"Group: <b>{snap['group']}</b> × 0.5\n\n"
+            f"{'🔥 TRENDING THRESHOLD REACHED' if snap['triggered'] else 'Not at threshold yet.'}"
+        )
+    except Exception as exc:
+        logger.exception("/score failed")
+        await message.answer(f"❌ Score lookup failed: {html.escape(str(exc))}")
+
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handle_address(message: Message):
     text = message.text.strip()
@@ -5134,59 +5205,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped.")
-
-
-# --- DEBUG SCORE COMMAND ---
-def get_token_score(report: dict):
-    scans = report.get("scans", [])
-    now = time.time()
-
-    TIME_WINDOW = 30 * 60
-    USER_COOLDOWN = 24 * 60 * 60
-
-    seen_users = {}
-    score = 0.0
-
-    for scan in scans:
-        user_id = scan.get("user_id")
-        ts = scan.get("timestamp", 0)
-        is_private = scan.get("is_private", False)
-
-        if now - ts > TIME_WINDOW:
-            continue
-
-        if user_id in seen_users:
-            if now - seen_users[user_id] < USER_COOLDOWN:
-                continue
-
-        seen_users[user_id] = ts
-
-        if is_private:
-            score += 1.0
-        else:
-            score += 0.5
-
-    return score
-
-
-@bot.message_handler(commands=['score'])
-def handle_score(message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            bot.reply_to(message, "Usage: /score TOKEN")
-            return
-
-        token = parts[1].upper()
-
-        report = get_report_for_token(token)  # uses your existing function
-        if not report:
-            bot.reply_to(message, "Token not found.")
-            return
-
-        score = get_token_score(report)
-
-        bot.reply_to(message, f"{token} current trending score: {score:.1f}/20")
-
-    except Exception as e:
-        bot.reply_to(message, f"Error: {str(e)}")
