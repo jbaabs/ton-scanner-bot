@@ -142,7 +142,7 @@ CUSTOM_EMOJI = {
     "groypfi": "6305307926659605381",
     "topblast": "6118187720675173301",
     "leaderboard": "5820933489385544881",
-    "trending_entry": "6028627988877156793",
+    "trending_entry": "5364342783232481866",
     "signal_buy_pressure": "5334830752976642837",
     "signal_buy_sell_ratio": "5334787408166692203",
     "signal_volume_24h": "5366561632057075362",
@@ -1053,6 +1053,152 @@ def _deep_scan_url(address: str) -> str | None:
         return None
     return f"https://t.me/{BOT_USERNAME}?start=scan_{address}"
 
+async def _get_trending_description(session: aiohttp.ClientSession, report: dict) -> str | None:
+    """Best-effort public project description for a Trending alert.
+
+    GeckoTerminal is queried directly for the token. DexScreener's public latest
+    token-profile feed is used as a secondary source when the token appears there.
+    Failure or missing metadata never blocks a Trending post.
+    """
+    address = str(report.get("address") or "").strip()
+    if not address:
+        return None
+
+    # GeckoTerminal token metadata.
+    try:
+        url = f"{GECKOTERMINAL_BASE}/networks/ton/tokens/{address}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                attrs = ((data.get("data") or {}).get("attributes") or {})
+                for key in ("description", "description_en"):
+                    value = attrs.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return " ".join(value.split())
+    except Exception:
+        logger.debug("GeckoTerminal Trending description lookup failed", exc_info=True)
+
+    # DexScreener token profiles (best effort; not every token has a profile).
+    try:
+        async with session.get(
+            "https://api.dexscreener.com/token-profiles/latest/v1",
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
+            if resp.status == 200:
+                profiles = await resp.json()
+                if isinstance(profiles, list):
+                    wanted = address.lower()
+                    for profile in profiles:
+                        if str(profile.get("chainId") or "").lower() != "ton":
+                            continue
+                        if str(profile.get("tokenAddress") or "").lower() != wanted:
+                            continue
+                        value = profile.get("description")
+                        if isinstance(value, str) and value.strip():
+                            return " ".join(value.split())
+    except Exception:
+        logger.debug("DexScreener Trending description lookup failed", exc_info=True)
+    return None
+
+
+def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
+                         token_icon_bytes: bytes | None = None,
+                         trending_price: str | float | None = None) -> bytes:
+    """Dedicated Trending-channel chart. Existing GRX SCAN renderers are untouched."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from datetime import datetime, timezone
+    from io import BytesIO
+
+    ohlcv = _normalize_chart_ohlcv(ohlcv)
+    if not ohlcv:
+        raise ValueError("No valid OHLCV candles to render")
+    times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
+    opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
+    lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
+    bg="#050607"; text="#ffffff"; muted="#b7c0ca"; grid="#282d33"
+    green="#42c99a"; red="#f06468"; trend_blue="#168BFF"
+    first=closes[0]; last=closes[-1]
+    move=((last-first)/first*100) if first else 0.0
+    move_col=green if move>=0 else red
+
+    fig=plt.figure(figsize=(8,5.0),dpi=150,facecolor=bg)
+    title_x=.055
+    if token_icon_bytes:
+        try:
+            from PIL import Image, ImageDraw
+            icon=Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
+            side=min(icon.size); lx=(icon.width-side)//2; ty=(icon.height-side)//2
+            icon=icon.crop((lx,ty,lx+side,ty+side)).resize((128,128))
+            mask=Image.new("L",(128,128),0); ImageDraw.Draw(mask).ellipse((1,1,127,127),fill=255)
+            icon.putalpha(mask)
+            iax=fig.add_axes([.055,.865,.065,.065],zorder=20); iax.imshow(icon); iax.axis("off")
+            title_x=.132
+        except Exception:
+            pass
+    fig.text(title_x,.92,f"{symbol} / USD",color=text,fontsize=16,fontweight="bold",ha="left",va="center")
+    fig.text(title_x,.865,timeframe_label,color=muted,fontsize=10,ha="left",va="center")
+    fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
+
+    ax=fig.add_axes([.055,.12,.875,.67],facecolor=bg)
+    n=len(ohlcv); width=max(.22,min(.54,18.0/max(n,1)))
+    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
+        col=green if c>=o else red
+        ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
+        bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
+        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
+
+    try:
+        raw=str(trending_price).replace("$","").replace(",","").strip()
+        price=float(raw)
+        if price > 0:
+            ax.axhline(price,color=trend_blue,linewidth=2.2,alpha=1.0,zorder=30)
+            ax.text(-.65,price,"GRX TRENDING",ha="left",va="bottom",color=trend_blue,
+                    fontsize=9.0,fontweight="bold",zorder=31,clip_on=False)
+    except Exception:
+        logger.debug("Could not draw GRX TRENDING marker", exc_info=True)
+
+    ax.set_xlim(-.8,len(ohlcv)+1.8)
+    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
+    # Ensure the Trending level remains visible even if price moved outside candle range.
+    y_min=min(lows); y_max=max(highs)
+    try:
+        tp=float(str(trending_price).replace("$","").replace(",",""))
+        if tp > 0: y_min=min(y_min,tp); y_max=max(y_max,tp)
+    except Exception: pass
+    span=max(y_max-y_min,abs(last)*.009,1e-12); pad=max(span*.055,pad)
+    ax.set_ylim(y_min-pad,y_max+pad)
+    ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
+    ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
+    ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
+    ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
+    ax.yaxis.tick_right()
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price)); ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.yaxis.get_offset_text().set_visible(False)
+    ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
+    for sp in ax.spines.values(): sp.set_visible(False)
+    ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
+    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
+                ha="left",va="center",fontsize=8.0,color="#ffffff",
+                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
+    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
+
+
+async def _build_trending_media(session: aiohttp.ClientSession, report: dict, symbol: str, trending_price) -> bytes | None:
+    """Build the one-off 1H image used only by the Trending channel alert."""
+    try:
+        chart_task=asyncio.create_task(get_routed_chart_data(session, report, "1h"))
+        icon_task=asyncio.create_task(_download_image_bytes(session, _safe_image_url(report)))
+        (_pool, ohlcv, _source), token_icon=await asyncio.gather(chart_task, icon_task)
+        if not ohlcv:
+            return None
+        return await _render_offloop(build_trending_chart, ohlcv, symbol, CHART_TIMEFRAMES["1h"]["label"], token_icon, trending_price)
+    except Exception:
+        logger.exception("Could not build dedicated GRX Trending chart")
+        return None
+
 async def maybe_announce_trending(report: dict) -> None:
     if not GRX_TRENDING_CHANNEL:
         return
@@ -1068,34 +1214,63 @@ async def maybe_announce_trending(report: dict) -> None:
             "SELECT last_alert_ts,last_tier FROM trending_alerts WHERE token_key=?",
             (token_key,),
         ).fetchone()
-        # Do not spam: same tier has a 6h cooldown. A higher tier may alert immediately.
         if row and tier <= int(row[1] or 0) and now - int(row[0] or 0) < 6 * 3600:
             return
 
     info = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
     symbol = str(info.get("symbol") or "TOKEN").lstrip("$")
     address = str(report.get("address") or "")
     scan_url = _deep_scan_url(address)
     title = html.escape(symbol)
-    lines = [
-        f'{_ce("trending_entry", "🔥")} <b>{title} HAS ENTERED GRX TRENDING</b>',
-    ]
+    trending_price = dex.get("price_usd")
+
+    description = None
+    trending_png = None
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=12, ttl_dns_cache=300),
+        ) as session:
+            desc_task = asyncio.create_task(_get_trending_description(session, report))
+            chart_task = asyncio.create_task(_build_trending_media(session, report, symbol, trending_price))
+            description, trending_png = await asyncio.gather(desc_task, chart_task)
+    except Exception:
+        logger.exception("Trending enrichment failed; posting basic alert")
+
+    lines = [f'{_ce("trending_entry", "🔥")} <b>${title} HAS ENTERED GRX TRENDING</b>']
+    if description:
+        safe_description = html.escape(description)
+        # Long descriptions stay fully available in-message via Telegram's native
+        # expandable blockquote / Show more interaction. No external See More button.
+        if len(description) > 300:
+            lines.extend(["", f"<b>ABOUT ${title}</b>", f"<blockquote expandable>{safe_description}</blockquote>"])
+        else:
+            lines.extend(["", f"<b>ABOUT ${title}</b>", f"<blockquote>{safe_description}</blockquote>"])
+
     reply_markup = None
     if scan_url:
         keyboard = InlineKeyboardBuilder()
         keyboard.row(InlineKeyboardButton(text=f"${symbol}", url=scan_url))
         reply_markup = keyboard.as_markup()
+
     try:
-        await bot.send_message(
-            GRX_TRENDING_CHANNEL,
-            "\n".join(lines),
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        if trending_png:
+            await bot.send_photo(
+                GRX_TRENDING_CHANNEL,
+                photo=BufferedInputFile(trending_png, filename="grx_trending.png"),
+                caption="\n".join(lines),
+                reply_markup=reply_markup,
+            )
+        else:
+            await bot.send_message(
+                GRX_TRENDING_CHANNEL,
+                "\n".join(lines),
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
     except Exception as exc:
         logger.exception("Failed to post GRX Trending alert to %s", GRX_TRENDING_CHANNEL)
-        # Surface channel permission / username / chat-id failures during the real
-        # two-account test instead of failing silently in logs.
         if OWNER_TELEGRAM_ID:
             try:
                 await bot.send_message(
