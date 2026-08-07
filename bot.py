@@ -39,7 +39,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TONAPI_KEY = os.getenv("TONAPI_KEY", "")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 DB_PATH = os.getenv("SCAN_DB_PATH", "scan_history.db")
-GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXStats").strip()
+GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXTrending").strip()
 BOT_USERNAME = ""
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "5580192046") or 0)
 
@@ -2138,22 +2138,31 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
 
-    # Mark the first GRX scan/call on every timeframe chart when that timestamp
-    # is inside the candles currently being displayed.
+    # GRX SCAN marker. Use the timestamp of THIS scan from the cached report.
+    # A fresh scan can be a few seconds newer than the newest closed candle, so
+    # clamp it to the right edge instead of silently hiding the marker.
     if scan_ts:
         try:
-            scan_ts_i = int(scan_ts)
-            candle_ts = [int(c[0]) for c in ohlcv]
-            if candle_ts and candle_ts[0] <= scan_ts_i <= candle_ts[-1]:
-                scan_x = min(range(len(candle_ts)), key=lambda i: abs(candle_ts[i] - scan_ts_i))
+            scan_ts_i = int(float(scan_ts))
+            if scan_ts_i > 10_000_000_000:  # tolerate millisecond timestamps
+                scan_ts_i //= 1000
+            candle_ts = [int(float(c[0])) for c in ohlcv]
+            candle_ts = [t // 1000 if t > 10_000_000_000 else t for t in candle_ts]
+            if candle_ts:
+                if scan_ts_i >= candle_ts[-1]:
+                    scan_x = len(candle_ts) - 0.5
+                elif scan_ts_i < candle_ts[0]:
+                    scan_x = 0.0
+                else:
+                    scan_x = min(range(len(candle_ts)), key=lambda i: abs(candle_ts[i] - scan_ts_i))
                 scan_blue = "#168BFF"
-                ax.axvline(scan_x, color=scan_blue, linewidth=1.35, alpha=.95, zorder=8)
-                ax.text(scan_x, .985, "GRX SCAN", transform=ax.get_xaxis_transform(),
-                        ha="center", va="top", color=scan_blue, fontsize=8.2, fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=.20", fc=bg, ec=scan_blue, lw=.7, alpha=.92),
-                        zorder=9)
+                ax.axvline(scan_x, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
+                ax.text(scan_x, .97, "GRX SCAN", transform=ax.get_xaxis_transform(),
+                        ha="center", va="top", color=scan_blue, fontsize=9.0, fontweight="bold",
+                        bbox=dict(boxstyle="round,pad=.24", fc=bg, ec=scan_blue, lw=1.0, alpha=.98),
+                        zorder=31, clip_on=False)
         except Exception:
-            pass
+            logger.exception("Could not draw GRX SCAN chart marker")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
@@ -4684,7 +4693,8 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
+        (entry.get("scanner_meta") or {}).get("scan_ts")
+        or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
     )
 
     media = InputMediaPhoto(
@@ -4867,7 +4877,8 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
+        (entry.get("scanner_meta") or {}).get("scan_ts")
+        or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
     )
 
     media = InputMediaPhoto(
