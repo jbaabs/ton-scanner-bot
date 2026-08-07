@@ -2090,7 +2090,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_ts: int | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -2138,31 +2138,18 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
 
-    # GRX SCAN marker. Use the timestamp of THIS scan from the cached report.
-    # A fresh scan can be a few seconds newer than the newest closed candle, so
-    # clamp it to the right edge instead of silently hiding the marker.
-    if scan_ts:
+    # GRX SCAN marker: horizontal line at the price where GRX first scanned/called the token.
+    if scan_price is not None:
         try:
-            scan_ts_i = int(float(scan_ts))
-            if scan_ts_i > 10_000_000_000:  # tolerate millisecond timestamps
-                scan_ts_i //= 1000
-            candle_ts = [int(float(c[0])) for c in ohlcv]
-            candle_ts = [t // 1000 if t > 10_000_000_000 else t for t in candle_ts]
-            if candle_ts:
-                if scan_ts_i >= candle_ts[-1]:
-                    scan_x = len(candle_ts) - 0.5
-                elif scan_ts_i < candle_ts[0]:
-                    scan_x = 0.0
-                else:
-                    scan_x = min(range(len(candle_ts)), key=lambda i: abs(candle_ts[i] - scan_ts_i))
+            raw_scan_price = str(scan_price).replace("$", "").replace(",", "").strip()
+            scan_price_f = float(raw_scan_price)
+            if scan_price_f > 0:
                 scan_blue = "#168BFF"
-                ax.axvline(scan_x, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
-                ax.text(scan_x, .97, "GRX SCAN", transform=ax.get_xaxis_transform(),
-                        ha="center", va="top", color=scan_blue, fontsize=9.0, fontweight="bold",
-                        bbox=dict(boxstyle="round,pad=.24", fc=bg, ec=scan_blue, lw=1.0, alpha=.98),
-                        zorder=31, clip_on=False)
+                ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
+                ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
+                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
         except Exception:
-            logger.exception("Could not draw GRX SCAN chart marker")
+            logger.exception("Could not draw horizontal GRX SCAN chart marker")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
@@ -2252,6 +2239,21 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ax.vlines(i,l,h,color=col,linewidth=.68,alpha=.95)
         bottom=min(o,c); height=max(abs(c-o),max(h,l)*1e-8)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
+
+    # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan price.
+    first_scan_for_line = get_first_scan_resolved(report) or {}
+    scan_price_for_line = first_scan_for_line.get("scan_price") or dex.get("price_usd")
+    try:
+        raw_scan_price = str(scan_price_for_line).replace("$", "").replace(",", "").strip()
+        scan_price_f = float(raw_scan_price)
+        if scan_price_f > 0:
+            scan_blue = "#168BFF"
+            ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
+            ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
+                    color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
+    except Exception:
+        logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
+
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
@@ -4693,8 +4695,9 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (entry.get("scanner_meta") or {}).get("scan_ts")
-        or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price")
+        or (entry.get("scanner_meta") or {}).get("scan_price")
+        or (entry["report"].get("dex_data") or {}).get("price_usd"),
     )
 
     media = InputMediaPhoto(
@@ -4877,8 +4880,9 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (entry.get("scanner_meta") or {}).get("scan_ts")
-        or (get_first_scan_resolved(entry["report"]) or {}).get("scan_ts"),
+        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price")
+        or (entry.get("scanner_meta") or {}).get("scan_price")
+        or (entry["report"].get("dex_data") or {}).get("price_usd"),
     )
 
     media = InputMediaPhoto(
