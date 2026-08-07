@@ -2070,6 +2070,33 @@ def _chart_time_format(timeframe_label: str) -> str:
     """Use clock labels for every intraday chart timeframe."""
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
+def _grx_scan_candle_index(times: list, scan_ts: int | None) -> int | None:
+    """Return the candle index containing/nearest the first GRX scan.
+
+    A brand-new scan normally happens seconds after the latest candle opened, so
+    scans slightly newer than the last candle must map to the final candle rather
+    than being discarded.
+    """
+    if not times or not scan_ts:
+        return None
+    try:
+        scan_dt = datetime.fromtimestamp(int(scan_ts), tz=timezone.utc)
+    except Exception:
+        return None
+
+    # If the first scan predates the visible chart, don't pretend it happened at
+    # the left edge. Larger timeframes will naturally reveal it when in range.
+    if scan_dt < times[0]:
+        return None
+
+    # New scans are commonly newer than the latest candle timestamp; pin them to
+    # the latest visible candle so the GRX SCAN marker appears immediately.
+    if scan_dt >= times[-1]:
+        return len(times) - 1
+
+    return min(range(len(times)), key=lambda i: abs((times[i] - scan_dt).total_seconds()))
+
+
 
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, grx_scan_ts: int | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
@@ -2134,18 +2161,17 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
 
-    # First GRX scan marker: blue vertical line at the candle nearest the original scan.
-    if grx_scan_ts:
-        try:
-            scan_dt = datetime.fromtimestamp(int(grx_scan_ts), tz=timezone.utc)
-            if times and times[0] <= scan_dt <= times[-1]:
-                scan_i = min(range(len(times)), key=lambda i: abs((times[i] - scan_dt).total_seconds()))
-                ax.axvline(scan_i, color="#2f80ff", linewidth=1.15, alpha=.95, zorder=8)
-                ax.text(scan_i + .12, ax.get_ylim()[1] - (ax.get_ylim()[1]-ax.get_ylim()[0])*.035,
-                        "GRX SCAN", color="#2f80ff", fontsize=7.6, fontweight="bold",
-                        ha="left", va="top", zorder=9)
-        except Exception:
-            pass
+    # Original GRX scan: bright blue vertical marker + label.
+    scan_i = _grx_scan_candle_index(times, grx_scan_ts)
+    if scan_i is not None:
+        ax.axvline(scan_i, color="#168BFF", linewidth=1.55, alpha=1.0, zorder=20)
+        y_top = ax.get_ylim()[1]
+        y_span = ax.get_ylim()[1] - ax.get_ylim()[0]
+        label_x = max(-.55, min(scan_i + .18, len(ohlcv) - 3.0))
+        ax.text(label_x, y_top - y_span * .035, "GRX SCAN",
+                color="#168BFF", fontsize=8.0, fontweight="bold",
+                ha="left", va="top", zorder=21,
+                path_effects=[pe.withStroke(linewidth=2.2, foreground=bg)])
 
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
@@ -2235,19 +2261,18 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
 
-    # First GRX scan marker: keep the original scan visible on the dashboard chart.
+    # Original GRX scan marker on the main dashboard.
     first_scan_marker = get_first_scan_resolved(report)
-    if first_scan_marker and first_scan_marker.get("scan_ts"):
-        try:
-            scan_dt = datetime.fromtimestamp(int(first_scan_marker["scan_ts"]), tz=timezone.utc)
-            if times and times[0] <= scan_dt <= times[-1]:
-                scan_i = min(range(len(times)), key=lambda i: abs((times[i] - scan_dt).total_seconds()))
-                ax.axvline(scan_i, color="#2f80ff", linewidth=1.15, alpha=.95, zorder=8)
-                ax.text(scan_i + .12, ax.get_ylim()[1] - (ax.get_ylim()[1]-ax.get_ylim()[0])*.035,
-                        "GRX SCAN", color="#2f80ff", fontsize=7.2, fontweight="bold",
-                        ha="left", va="top", zorder=9)
-        except Exception:
-            pass
+    scan_i = _grx_scan_candle_index(times, (first_scan_marker or {}).get("scan_ts"))
+    if scan_i is not None:
+        ax.axvline(scan_i, color="#168BFF", linewidth=1.55, alpha=1.0, zorder=20)
+        y_top = ax.get_ylim()[1]
+        y_span = ax.get_ylim()[1] - ax.get_ylim()[0]
+        label_x = max(-.55, min(scan_i + .18, len(ohlcv) - 3.0))
+        ax.text(label_x, y_top - y_span * .035, "GRX SCAN",
+                color="#168BFF", fontsize=7.5, fontweight="bold",
+                ha="left", va="top", zorder=21,
+                path_effects=[pe.withStroke(linewidth=2.0, foreground=bg)])
 
     ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
@@ -4860,6 +4885,7 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
+        int((get_first_scan_resolved(entry["report"]) or {}).get("scan_ts") or 0) or None,
     )
 
     media = InputMediaPhoto(
