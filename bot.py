@@ -1064,6 +1064,28 @@ async def _get_trending_description(session: aiohttp.ClientSession, report: dict
     if not address:
         return None
 
+    # Prefer description already returned with the scan's TonAPI metadata.
+    local_description = (report.get("jetton_info") or {}).get("description")
+    if isinstance(local_description, str) and local_description.strip():
+        return " ".join(local_description.split())
+
+    # TonAPI direct metadata fallback (some cached/older reports may not carry it).
+    try:
+        async with session.get(
+            f"{TONAPI_BASE}/jettons/{address}",
+            headers=_tonapi_headers(),
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                metadata = data.get("metadata") or {}
+                for key in ("description", "description_en"):
+                    value = metadata.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return " ".join(value.split())
+    except Exception:
+        logger.debug("TonAPI Trending description lookup failed", exc_info=True)
+
     # GeckoTerminal token metadata.
     try:
         url = f"{GECKOTERMINAL_BASE}/networks/ton/tokens/{address}"
@@ -1189,12 +1211,21 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
 async def _build_trending_media(session: aiohttp.ClientSession, report: dict, symbol: str, trending_price) -> bytes | None:
     """Build the one-off 1H image used only by the Trending channel alert."""
     try:
-        chart_task=asyncio.create_task(get_routed_chart_data(session, report, "1h"))
-        icon_task=asyncio.create_task(_download_image_bytes(session, _safe_image_url(report)))
-        (_pool, ohlcv, _source), token_icon=await asyncio.gather(chart_task, icon_task)
+        _pool, ohlcv, _source = await get_routed_chart_data(session, report, "1h")
         if not ohlcv:
             return None
-        return await _render_offloop(build_trending_chart, ohlcv, symbol, CHART_TIMEFRAMES["1h"]["label"], token_icon, trending_price)
+        token_icon = None
+        try:
+            token_icon = await _download_image_bytes(session, _safe_image_url(report))
+        except Exception:
+            logger.debug("Trending token icon lookup failed", exc_info=True)
+        marker_price = trending_price
+        try:
+            if not marker_price or float(str(marker_price).replace("$", "").replace(",", "")) <= 0:
+                marker_price = float(ohlcv[-1][4])
+        except Exception:
+            marker_price = float(ohlcv[-1][4])
+        return await _render_offloop(build_trending_chart, ohlcv, symbol, CHART_TIMEFRAMES["1h"]["label"], token_icon, marker_price)
     except Exception:
         logger.exception("Could not build dedicated GRX Trending chart")
         return None
@@ -1238,15 +1269,19 @@ async def maybe_announce_trending(report: dict) -> None:
     except Exception:
         logger.exception("Trending enrichment failed; posting basic alert")
 
-    lines = [f'{_ce("trending_entry", "🔥")} <b>${title} HAS ENTERED GRX TRENDING</b>']
+    # A zero-width separator after $ prevents Telegram from auto-linking the
+    # headline as a cashtag. The visible text remains "$TICKER". The only
+    # clickable ticker is the inline scanner button below.
+    display_ticker = f"$&#8203;{title}"
+    lines = [f'{_ce("trending_entry", "🔥")} <b>{display_ticker} HAS ENTERED GRX TRENDING</b>']
     if description:
         safe_description = html.escape(description)
         # Long descriptions stay fully available in-message via Telegram's native
         # expandable blockquote / Show more interaction. No external See More button.
         if len(description) > 300:
-            lines.extend(["", f"<b>ABOUT ${title}</b>", f"<blockquote expandable>{safe_description}</blockquote>"])
+            lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote expandable>{safe_description}</blockquote>"])
         else:
-            lines.extend(["", f"<b>ABOUT ${title}</b>", f"<blockquote>{safe_description}</blockquote>"])
+            lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote>{safe_description}</blockquote>"])
 
     reply_markup = None
     if scan_url:
@@ -3463,6 +3498,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             "symbol": metadata.get("symbol", "???"),
             "decimals": metadata.get("decimals", "9"),
             "image": metadata.get("image"),
+            "description": metadata.get("description") or metadata.get("description_en"),
             "website": social_candidates.get("website"),
             "telegram": social_candidates.get("telegram"),
             "twitter": social_candidates.get("twitter"),
