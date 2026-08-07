@@ -1001,53 +1001,48 @@ def get_scan_activity(report: dict, seconds: int | None = None) -> dict:
     }
 
 def _trending_snapshot(report: dict) -> dict:
-    """Return the strongest Trending tier reached by unique PRIVATE scanners.
-
-    Group/supergroup/channel scans remain recorded for GRX stats, but they do not
-    contribute to Trending. Each Telegram account can contribute at most one
-    individual scan per token inside the 30-minute Trending window.
     """
-    token_key = _history_key(report)
-    if not token_key:
-        return {"tier": 0}
+    Point-based Trending logic:
+    - Private scan = 1.0
+    - Group scan = 0.5
+    - 1 scan per user per 24h
+    - 30 min rolling window
+    """
 
-    cutoff = int(time.time()) - (30 * 60)
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            """
-            SELECT COUNT(DISTINCT scanner_id)
-            FROM scan_events
-            WHERE token_key=?
-              AND scan_ts>=?
-              AND chat_type='private'
-              AND scanner_id IS NOT NULL
-            """,
-            (token_key, cutoff),
-        ).fetchone()
+    scans = report.get("scans", [])
+    now = time.time()
 
-    individual_scans = int((row or [0])[0] or 0)
+    TIME_WINDOW = 30 * 60
+    USER_COOLDOWN = 24 * 60 * 60
 
-    # Trending is based only on unique Telegram accounts scanning privately.
-    # Repeated private scans by the same account count once; group scans count zero.
-    if individual_scans >= 50:
-        tier = 3
-    elif individual_scans >= 25:
-        tier = 2
-    elif individual_scans >= 2:
-        tier = 1
-    else:
-        tier = 0
+    seen_users = {}
+    score = 0.0
+
+    for scan in scans:
+        user_id = scan.get("user_id")
+        ts = scan.get("timestamp", 0)
+        is_private = scan.get("is_private", False)
+
+        if now - ts > TIME_WINDOW:
+            continue
+
+        if user_id in seen_users:
+            if now - seen_users[user_id] < USER_COOLDOWN:
+                continue
+
+        seen_users[user_id] = ts
+
+        if is_private:
+            score += 1.0
+        else:
+            score += 0.5
 
     return {
-        "tier": tier,
-        "individual_scans": individual_scans,
-        "scans": individual_scans,
-        "sources": individual_scans,
-        "users": individual_scans,
-        "groups": 0,
-        "capped_scans": individual_scans,
-        "window": "30m",
+        "score": score,
+        "triggered": score >= 20
     }
+
+
 
 def _deep_scan_url(address: str) -> str | None:
     if not BOT_USERNAME or not address:
@@ -5139,3 +5134,59 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped.")
+
+
+# --- DEBUG SCORE COMMAND ---
+def get_token_score(report: dict):
+    scans = report.get("scans", [])
+    now = time.time()
+
+    TIME_WINDOW = 30 * 60
+    USER_COOLDOWN = 24 * 60 * 60
+
+    seen_users = {}
+    score = 0.0
+
+    for scan in scans:
+        user_id = scan.get("user_id")
+        ts = scan.get("timestamp", 0)
+        is_private = scan.get("is_private", False)
+
+        if now - ts > TIME_WINDOW:
+            continue
+
+        if user_id in seen_users:
+            if now - seen_users[user_id] < USER_COOLDOWN:
+                continue
+
+        seen_users[user_id] = ts
+
+        if is_private:
+            score += 1.0
+        else:
+            score += 0.5
+
+    return score
+
+
+@bot.message_handler(commands=['score'])
+def handle_score(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: /score TOKEN")
+            return
+
+        token = parts[1].upper()
+
+        report = get_report_for_token(token)  # uses your existing function
+        if not report:
+            bot.reply_to(message, "Token not found.")
+            return
+
+        score = get_token_score(report)
+
+        bot.reply_to(message, f"{token} current trending score: {score:.1f}/20")
+
+    except Exception as e:
+        bot.reply_to(message, f"Error: {str(e)}")
