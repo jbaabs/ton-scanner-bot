@@ -5402,3 +5402,56 @@ def calculate_trending_score(cursor, token):
 #
 # Keep ONLY:
 # - "already scanned" message logic (do not remove)
+
+
+
+# --- TRENDING LEADERBOARD ---
+def get_trending_tokens(cursor, limit=10):
+    import time
+    now = int(time.time())
+    cutoff = now - 86400
+
+    cursor.execute("""
+        SELECT token, user_id, chat_type
+        FROM scan_events
+        WHERE timestamp >= ?
+    """, (cutoff,))
+
+    rows = cursor.fetchall()
+
+    token_data = {}
+
+    for token, user_id, chat_type in rows:
+        if token not in token_data:
+            token_data[token] = {"score": 0.0, "seen": set()}
+
+        key = (user_id, chat_type)
+
+        if key in token_data[token]["seen"]:
+            continue
+
+        token_data[token]["seen"].add(key)
+
+        if chat_type == "private":
+            token_data[token]["score"] += 1.0
+        else:
+            token_data[token]["score"] += 0.5
+
+    return sorted(token_data.items(), key=lambda x: x[1]["score"], reverse=True)[:limit]
+
+
+# --- CLOSE TO TRENDING ALERT ---
+alerted_tokens = set()
+
+def check_close_to_trending(token, score, bot, chat_id):
+    if 15 <= score < 20 and token not in alerted_tokens:
+        alerted_tokens.add(token)
+        try:
+            bot.send_message(chat_id, f"🚨 {token} is close to trending ({score:.1f}/20)")
+        except:
+            pass
+
+
+# --- SCAN FEEDBACK MESSAGE ---
+def format_scan_feedback(token, score):
+    return f"🔥 {token} — {score:.1f} / 20 to trend"
