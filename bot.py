@@ -5,10 +5,15 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 
 # =========================
@@ -75,7 +80,7 @@ def build_keyboard(token):
     ])
 
 # =========================
-# MESSAGE HANDLER (AUTO SCAN)
+# AUTO SCAN (NO /scan)
 # =========================
 
 @dp.message()
@@ -131,7 +136,7 @@ async def refresh(call: types.CallbackQuery):
     await call.answer()
 
 # =========================
-# CHART BUTTON (FIXED)
+# CHART BUTTON (WORKING)
 # =========================
 
 @dp.callback_query(lambda c: c.data.startswith("chart:"))
@@ -140,12 +145,11 @@ async def chart(call: types.CallbackQuery):
 
     await call.answer("Loading chart...")
 
-    # TEMP (Step 3 base)
-    chart_url = f"https://www.geckoterminal.com/ton/pools"
+    chart_url = "https://www.geckoterminal.com/ton"
 
     await call.message.answer(
         f"📊 <b>{token} Chart</b>\n\n"
-        f"View chart:\n{chart_url}"
+        f"View live chart:\n{chart_url}"
     )
 
 # =========================
