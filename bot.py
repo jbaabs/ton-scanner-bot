@@ -26,33 +26,119 @@ dp = Dispatcher()
 # =========================
 
 async def fetch_token_data(query: str):
-    url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
-
     async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
 
-            # ✅ FIX: handle bad responses
-            if resp.status != 200:
-                return None
+        # 1️⃣ STON.fi
+        try:
+            url = f"https://api.ston.fi/v1/assets/search?query={query}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("assets"):
+                        t = data["assets"][0]
+                        return {
+                            "name": t.get("symbol"),
+                            "price": float(t.get("price_usd", 0)),
+                            "liquidity": float(t.get("liquidity_usd", 0)),
+                            "volume": float(t.get("volume_24h", 0)),
+                            "source": "STON.fi"
+                        }
+        except:
+            pass
 
-            content_type = resp.headers.get("Content-Type", "")
-            if "application/json" not in content_type:
-                return None
+        # 2️⃣ DeDust
+        try:
+            url = "https://api.dedust.io/v2/pools"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for pool in data:
+                        if query.lower() in str(pool).lower():
+                            return {
+                                "name": query,
+                                "price": float(pool.get("price", 0)),
+                                "liquidity": float(pool.get("tvl", 0)),
+                                "volume": float(pool.get("volume24h", 0)),
+                                "source": "DeDust"
+                            }
+        except:
+            pass
 
-            data = await resp.json()
+        # 3️⃣ X1000.finance
+        try:
+            url = f"https://api.x1000.finance/api/tokens/search?query={query}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data:
+                        t = data[0]
+                        return {
+                            "name": t.get("symbol"),
+                            "price": float(t.get("price", 0)),
+                            "liquidity": float(t.get("liquidity", 0)),
+                            "volume": float(t.get("volume24h", 0)),
+                            "source": "X1000"
+                        }
+        except:
+            pass
 
-    try:
-        pair = data["data"][0]["attributes"]
+        # 4️⃣ GroypFi
+        try:
+            url = f"https://api.groyp.fi/api/token/search?q={query}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("tokens"):
+                        t = data["tokens"][0]
+                        return {
+                            "name": t.get("symbol"),
+                            "price": float(t.get("price", 0)),
+                            "liquidity": float(t.get("liquidity", 0)),
+                            "volume": float(t.get("volume24h", 0)),
+                            "source": "GroypFi"
+                        }
+        except:
+            pass
 
-        return {
-            "name": pair["name"],
-            "price": float(pair["price_usd"]),
-            "liquidity": float(pair["reserve_in_usd"]),
-            "volume": float(pair["volume_usd"]["h24"]),
-            "address": data["data"][0]["id"].split("_")[-1]
-        }
-    except:
-        return None
+        # 5️⃣ GeckoTerminal
+        try:
+            url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pools = data.get("data", [])
+                    if pools:
+                        attr = pools[0]["attributes"]
+                        return {
+                            "name": attr.get("name"),
+                            "price": float(attr.get("price_usd", 0)),
+                            "liquidity": float(attr.get("reserve_in_usd", 0)),
+                            "volume": float(attr.get("volume_usd", {}).get("h24", 0)),
+                            "source": "GeckoTerminal"
+                        }
+        except:
+            pass
+
+        # 6️⃣ DexScreener (last fallback)
+        try:
+            url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    pairs = data.get("pairs", [])
+                    if pairs:
+                        p = pairs[0]
+                        return {
+                            "name": p.get("baseToken", {}).get("symbol"),
+                            "price": float(p.get("priceUsd", 0)),
+                            "liquidity": float(p.get("liquidity", {}).get("usd", 0)),
+                            "volume": float(p.get("volume", {}).get("h24", 0)),
+                            "source": "DexScreener"
+                        }
+        except:
+            pass
+
+    return None
 
 
 # =========================
