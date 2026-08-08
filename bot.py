@@ -4476,7 +4476,34 @@ async def cmd_start(message: Message):
         "Send a TON jetton contract address or ticker."
     )
 
+@dp.message(Command("trending"))
+async def trending_command(message: Message):
+    import sqlite3
 
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    tokens = get_trending_tokens(cursor)
+
+    if not tokens:
+        await message.reply("No trending tokens yet.")
+        conn.close()
+        return
+
+    text = "🔥 <b>Trending Tokens</b>\n\n"
+
+    for i, (token, data) in enumerate(tokens, 1):
+        score = data.get("score", 0)
+        bar = build_progress_bar(score)
+
+        text += (
+            f"{i}. {token}\n"
+            f"{bar} {score:.1f}/20\n\n"
+        )
+
+    conn.close()
+
+    await message.reply(text, parse_mode="HTML")
 
 
 @dp.message(Command("testtrending"))
