@@ -2603,7 +2603,10 @@ if price is not None:
         ha="center", va="center",
     )
 
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg,bbox_inches=None); plt.close(fig); return buf.getvalue()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", facecolor=bg, bbox_inches=None)  
+        plt.close(fig)
+        return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
