@@ -1,3 +1,4 @@
+import sqlite3
 print("🚀 NEW VERSION LIVE")
 """
 TON Meme Token Scanner Bot — Single File Version
@@ -16,8 +17,6 @@ import base64
 import struct
 import logging
 import sys
-import sqlite3
-
 import aiohttp
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
@@ -2325,12 +2324,8 @@ def _chart_time_format(timeframe_label: str) -> str:
 
 def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
-    import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.patheffects as pe
-    from datetime import datetime, timezone
-    from io import BytesIO
 
     ohlcv = _normalize_chart_ohlcv(ohlcv)
     if not ohlcv:
@@ -2348,7 +2343,6 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     title_x=.055
     if token_icon_bytes:
         try:
-            from PIL import Image, ImageDraw
             icon=Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
             side=min(icon.size); lx=(icon.width-side)//2; ty=(icon.height-side)//2
             icon=icon.crop((lx,ty,lx+side,ty+side)).resize((128,128))
@@ -2392,7 +2386,6 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
     ax.yaxis.tick_right()
-    from matplotlib.ticker import FuncFormatter, MaxNLocator
     ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
@@ -2407,13 +2400,8 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
 
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
     """Render a cleaner trading-terminal GRX dashboard with large, icon-free stats."""
-    import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.patheffects as pe
     from matplotlib.patches import FancyBboxPatch
-    from datetime import datetime, timezone
-    from io import BytesIO
 
     info=report.get("jetton_info") or {}; dex=report.get("dex_data") or {}; holders=report.get("holders") or {}
     symbol=str(info.get("symbol") or "???"); age=_fmt_age(dex.get("pair_created_at"))
@@ -2443,7 +2431,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     title_x = .04
     if token_icon_bytes:
         try:
-            from PIL import Image, ImageDraw
             icon = Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
             side = min(icon.size)
             left = (icon.width - side) // 2
@@ -2494,7 +2481,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors="#b5bbc2",labelsize=8.5,length=0,pad=8); ax.yaxis.tick_right()
     ax.set_axisbelow(False)
-    from matplotlib.ticker import FuncFormatter, MaxNLocator
     ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
@@ -4304,7 +4290,6 @@ GRX_CALLER_EMOJI_ID = "5246974929194226712"
 GRX_TIMES_CALLED_EMOJI_ID = "5366424034189811245"
 
 def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_age: str) -> bytes:
-    from io import BytesIO
     from pathlib import Path
     from PIL import Image, ImageDraw, ImageFont
 
@@ -4467,7 +4452,6 @@ async def trending_command(message: Message):
     except Exception as e:
         print("Rate limit error:", e)
 
-    import sqlite3
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -4672,38 +4656,28 @@ async def handle_address(message: Message):
         return
     status_msg = None
 
-# Only run scanner if input is valid
-if is_valid_ton_address(text) or is_valid_ticker(text):
+    # Do not rate-limit ordinary group conversation or alert-target input.
+    # The cooldown is applied only when the message actually looks like a scan
+     is_valid_ton_address(text) or is_valid_ticker(text) 
 
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12),
-            connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
-        ) as session:
-
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
             if is_valid_ton_address(text):
                 lookup_value = text
                 status_msg = await message.answer("Scanning token...")
-
             elif is_valid_ticker(text):
                 status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
                 resolved_address, error_text = await resolve_ticker_to_address(session, text)
-
                 if error_text:
                     await status_msg.edit_text(error_text)
                     return
-
                 lookup_value = resolved_address
                 await status_msg.edit_text("Scanning token...")
-
-    except Exception:
-        logger.exception("Scan error")
-        await message.answer("❌ Failed to scan. Try again.")
-        return
-
-else:
-    # Ignore normal chat messages
-    return
+            else:
+                # Ignore ordinary conversation in both private chats and groups.
+                # The scanner only reacts to a full TON CA or a single ticker-like
+                # word (e.g. GRX6900 / $GRX6900). Commands are handled separately.
+                return
 
             duplicate_key = str(lookup_value or "").strip()
             recent = get_recent_chat_scan(message.chat.id, duplicate_key)
@@ -5345,7 +5319,6 @@ def get_recent_anchor(user_id, chat_id, token, is_private):
 
 
 # --- PERFORMANCE CACHE LAYER ---
-import time
 
 chart_data_cache = {}   # token -> (timestamp, data)
 chart_image_cache = {}  # (token, timeframe) -> (timestamp, image_bytes)
@@ -5408,7 +5381,6 @@ def get_live_chart_image(token, timeframe, render_func):
 
 
 # --- CAPTION LIVE TIMESTAMP ---
-from datetime import datetime
 
 def append_updated_time(caption: str) -> str:
     updated_time = datetime.utcnow().strftime("%H:%M:%S UTC")
@@ -5420,7 +5392,6 @@ def append_updated_time(caption: str) -> str:
 
 
 # --- ROLLING 24H TRENDING SYSTEM ---
-import time
 
 def calculate_trending_score(cursor, token):
     now = int(time.time())
@@ -5475,7 +5446,6 @@ def calculate_trending_score(cursor, token):
 
 # --- TRENDING LEADERBOARD ---
 def get_trending_tokens(cursor, limit=10):
-    import time
     now = int(time.time())
     cutoff = now - 86400
 
@@ -5536,7 +5506,6 @@ def build_progress_bar(score, max_score=20, length=10):
 # --- TRENDING COMMAND ---
 
 
-    import sqlite3
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
