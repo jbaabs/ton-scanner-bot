@@ -21,6 +21,25 @@ bot = Bot(
 dp = Dispatcher()
 
 # =========================
+# FORMAT FIX (NO BLUE LINKS)
+# =========================
+
+def format_number(value):
+    try:
+        value = float(value)
+
+        if value >= 1_000_000:
+            return f"{value/1_000_000:.2f}M"
+        elif value >= 1_000:
+            return f"{value/1_000:.2f}K"
+        elif value >= 1:
+            return f"{value:.4f}"
+        else:
+            return f"{value:.8f}"
+    except:
+        return "N/A"
+
+# =========================
 # DATA SOURCES (TON FIRST)
 # =========================
 
@@ -152,7 +171,6 @@ async def start_handler(message: types.Message):
 async def auto_scan(message: types.Message):
     query = message.text.strip()
 
-    # ignore commands
     if query.startswith("/"):
         return
 
@@ -167,9 +185,9 @@ async def auto_scan(message: types.Message):
     text = f"""
 <b>{query.upper()} scanned ✅</b>
 
-💰 Price: ${data['price']}
-💧 Liquidity: ${data['liquidity']}
-📊 Volume: ${data['volume']}
+💰 Price: ${format_number(data['price'])}
+💧 Liquidity: ${format_number(data['liquidity'])}
+📊 Volume: ${format_number(data['volume'])}
 👥 Holders: {data['holders']}
 
 📡 Source: {data['source']}
@@ -195,9 +213,9 @@ async def refresh_callback(callback: types.CallbackQuery):
     text = f"""
 <b>{query.upper()} updated 🔄</b>
 
-💰 Price: ${data['price']}
-💧 Liquidity: ${data['liquidity']}
-📊 Volume: ${data['volume']}
+💰 Price: ${format_number(data['price'])}
+💧 Liquidity: ${format_number(data['liquidity'])}
+📊 Volume: ${format_number(data['volume'])}
 👥 Holders: {data['holders']}
 
 📡 Source: {data['source']}
@@ -206,9 +224,16 @@ async def refresh_callback(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=build_keyboard(query))
 
 
+# =========================
+# STEP 4 (CHART ENGINE BASE)
+# =========================
+
 @dp.callback_query(lambda c: c.data.startswith("chart_"))
 async def chart_callback(callback: types.CallbackQuery):
-    await callback.answer("Chart engine coming in Step 4 📊")
+    query = callback.data.split("_")[1]
+
+    # Placeholder (next step = real chart image)
+    await callback.message.reply(f"📊 Generating chart for {query}...")
 
 
 # =========================
