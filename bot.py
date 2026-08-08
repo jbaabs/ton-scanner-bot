@@ -1,4 +1,3 @@
-# --- IMPORTS ---
 import asyncio
 import aiohttp
 import time
@@ -7,6 +6,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+# ================= CONFIG =================
 BOT_TOKEN = "8835642161:AAEX3XjrRtlQpn_BeycLhDQLao0lIhT-f3s"
 
 bot = Bot(
@@ -15,16 +15,20 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# --- STORAGE ---
+# ================= STORAGE =================
 SCAN_HISTORY = {}
 
-# --- TRENDING LOGIC ---
+# ================= VALIDATION =================
+def is_valid_ton_address(text: str):
+    return text.startswith("EQ") or text.startswith("UQ")
+
+def is_valid_ticker(text: str):
+    return text.isalpha() and 2 <= len(text) <= 10
+
+# ================= TRENDING =================
 def can_count_scan(token, user_id, chat_id):
     now = time.time()
-    if token not in SCAN_HISTORY:
-        SCAN_HISTORY[token] = []
-
-    for scan in SCAN_HISTORY[token]:
+    for scan in SCAN_HISTORY.get(token, []):
         if (
             scan["user"] == user_id and
             scan["chat"] == chat_id and
@@ -48,13 +52,13 @@ def record_scan(token, user_id, chat_id, is_private):
 
 def get_trending_score(token):
     now = time.time()
-    return sum(
+    return round(sum(
         s["points"]
         for s in SCAN_HISTORY.get(token, [])
         if now - s["time"] <= 86400
-    )
+    ), 2)
 
-# --- FETCH DATA ---
+# ================= DATA FETCH =================
 async def fetch_token_data(query):
     async with aiohttp.ClientSession() as session:
 
@@ -94,11 +98,19 @@ async def fetch_token_data(query):
                 async with session.get(url) as r:
                     if r.status != 200:
                         return None
+
                     d = await r.json()
                     pairs = d.get("data", [])
+
                     if not pairs:
                         return None
-                    best = pairs[0]["attributes"]
+
+                    best = sorted(
+                        pairs,
+                        key=lambda x: float(x["attributes"].get("reserve_in_usd", 0) or 0),
+                        reverse=True
+                    )[0]["attributes"]
+
                     return {
                         "source": "Gecko",
                         "price": best.get("base_token_price_usd"),
@@ -110,38 +122,43 @@ async def fetch_token_data(query):
 
         results = await asyncio.gather(dedust(), ston(), gecko())
         valid = [r for r in results if r]
+
         if not valid:
             return None
 
         return max(valid, key=lambda x: float(x.get("liquidity") or 0))
 
-# --- UI ---
+# ================= UI =================
 def build_keyboard(token):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Chart", callback_data=f"chart:{token}")],
         [InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{token}")]
     ])
 
-# --- HANDLER ---
+# ================= HANDLER =================
 @dp.message()
 async def handle_message(message: types.Message):
-    query = message.text.strip()
+    text = message.text.strip()
 
-    data = await fetch_token_data(query)
+    # ✅ FIXED VALIDATION (this was your crash)
+    if not (is_valid_ton_address(text) or is_valid_ticker(text)):
+        return
+
+    data = await fetch_token_data(text)
     if not data:
         return await message.answer("❌ Token not found")
 
     record_scan(
-        query,
+        text,
         message.from_user.id,
         message.chat.id,
         message.chat.type == "private"
     )
 
-    score = get_trending_score(query)
+    score = get_trending_score(text)
 
-    text = f"""
-<b>{query}</b>
+    msg = f"""
+<b>{text}</b>
 💰 Price: {data.get('price')}
 💧 Liquidity: {data.get('liquidity')}
 📡 Source: {data.get('source')}
@@ -149,19 +166,26 @@ async def handle_message(message: types.Message):
 🔥 Trending Score: {score}
 """
 
-    await message.answer(text, reply_markup=build_keyboard(query))
+    await message.answer(msg, reply_markup=build_keyboard(text))
 
-# --- CALLBACKS ---
+# ================= CALLBACKS =================
 @dp.callback_query()
 async def callbacks(call: types.CallbackQuery):
     action, token = call.data.split(":")
+
     if action == "refresh":
         data = await fetch_token_data(token)
-        await call.message.edit_text(f"🔄 Refreshed\nPrice: {data.get('price')}")
-    elif action == "chart":
-        await call.message.answer("📊 Chart coming soon (engine connected next step)")
+        if not data:
+            return await call.answer("Failed to refresh", show_alert=True)
 
-# --- RUN ---
+        await call.message.edit_text(
+            f"<b>{token}</b>\n🔄 Refreshed\n💰 Price: {data.get('price')}"
+        )
+
+    elif action == "chart":
+        await call.message.answer("📊 Chart engine reconnecting next step")
+
+# ================= RUN =================
 async def main():
     await dp.start_polling(bot)
 
