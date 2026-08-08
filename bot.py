@@ -1,9 +1,8 @@
 import asyncio
 import logging
 import aiohttp
-from io import BytesIO
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -12,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 # CONFIG
 # ==============================
 
-BOT_TOKEN = "8835642161:AAEX3XjrRtlQpn_BeycLhDQLao0lIhT-f3s"
+BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -51,32 +50,40 @@ def build_keyboard(address: str | None):
 async def fetch_geckoterminal(session, query):
     try:
         url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
-        async with session.get(url) as resp:
 
+        async with session.get(url) as resp:
             if resp.status != 200:
+                logging.warning(f"Gecko bad status: {resp.status}")
                 return None
 
-            data = await resp.json()
-            pairs = data.get("data", [])
+            # SAFE JSON parse
+            try:
+                data = await resp.json()
+            except:
+                logging.warning("Gecko returned non-JSON")
+                return None
 
+            pairs = data.get("data", [])
             if not pairs:
                 return None
 
-            pair = pairs[0]["attributes"]
+            pair = pairs[0].get("attributes", {})
 
             return {
                 "price": pair.get("base_token_price_usd"),
                 "liquidity": pair.get("reserve_in_usd"),
                 "volume": pair.get("volume_usd", {}).get("h24"),
-                "address": pair.get("address"),
+                "address": pair.get("address"),  # MAY BE NONE → SAFE
                 "source": "GeckoTerminal"
             }
 
-    except:
+    except Exception as e:
+        logging.error(f"Gecko error: {e}")
         return None
 
 
-# FUTURE SOURCES (stubbed for now)
+# STUB SOURCES (ready for step 4 expansion)
+
 async def fetch_dedust(session, query):
     return None
 
@@ -95,7 +102,6 @@ async def fetch_groypfi(session, query):
 # ==============================
 
 async def fetch_token_data(query):
-
     async with aiohttp.ClientSession() as session:
 
         sources = [
@@ -103,23 +109,33 @@ async def fetch_token_data(query):
             fetch_stonfi,
             fetch_x1000,
             fetch_groypfi,
-            fetch_geckoterminal,  # fallback
+            fetch_geckoterminal  # fallback
         ]
 
         for source in sources:
-            data = await source(session, query)
-            if data:
-                return data
+            try:
+                data = await source(session, query)
+
+                if data:
+                    logging.info(f"Data from {data.get('source')}")
+                    return data
+
+            except Exception as e:
+                logging.error(f"Source failed: {e}")
+                continue
 
     return None
 
 
 # ==============================
-# MESSAGE HANDLER (NO /SCAN)
+# MESSAGE HANDLER
 # ==============================
 
 @dp.message()
 async def handle_message(message: Message):
+
+    if not message.text:
+        return
 
     query = message.text.strip()
 
@@ -139,7 +155,7 @@ async def handle_message(message: Message):
         f"💧 Liquidity: ${fmt(data.get('liquidity'))}\n"
         f"📊 Volume: ${fmt(data.get('volume'))}\n"
         f"👥 Holders: N/A\n\n"
-        f"🛰 Source: {data.get('source')}"
+        f"🛰 Source: {data.get('source', 'Unknown')}"
     )
 
     await message.answer(
@@ -167,7 +183,7 @@ async def refresh(callback: CallbackQuery):
         f"<b>Updated 🔄</b>\n\n"
         f"💰 Price: ${fmt(data.get('price'))}\n"
         f"💧 Liquidity: ${fmt(data.get('liquidity'))}\n"
-        f"📊 Volume: ${fmt(data.get('volume'))}\n"
+        f"📊 Volume: ${fmt(data.get('volume'))}"
     )
 
     await callback.message.edit_text(
@@ -179,7 +195,7 @@ async def refresh(callback: CallbackQuery):
 
 
 # ==============================
-# CHART BUTTON (FIXED)
+# CHART BUTTON
 # ==============================
 
 @dp.callback_query(lambda c: c.data.startswith("chart:"))
@@ -187,18 +203,19 @@ async def chart(callback: CallbackQuery):
 
     address = callback.data.split(":")[1]
 
-    # For now: send chart link (we'll upgrade to image engine next step)
+    if not address:
+        await callback.answer("No chart available")
+        return
+
     url = f"https://www.geckoterminal.com/ton/pools/{address}"
 
-    await callback.message.answer(
-        f"📊 Chart:\n{url}"
-    )
+    await callback.message.answer(f"📊 Chart:\n{url}")
 
     await callback.answer()
 
 
 # ==============================
-# START BOT
+# START
 # ==============================
 
 async def main():
