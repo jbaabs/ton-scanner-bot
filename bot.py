@@ -2401,9 +2401,12 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
                 bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
-    buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
-
-
+    
+    buf = BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
+    
 def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
     """Render a cleaner trading-terminal GRX dashboard with large, icon-free stats."""
     import matplotlib
@@ -2594,19 +2597,22 @@ if price is not None:
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
-    # Subtle footer branding across the central span beneath the stat grid.
-    # Sized to roughly match the horizontal distance from the BUYS card to the SELLS card.
-    fig.text(
+    # Subtle footer branding
+            fig.text(
         .5, .085, "POWERED BY GRX",
         color=(1.0, 1.0, 1.0, 0.38),
-        fontsize=18.0, fontweight="bold",
-        ha="center", va="center",
+        fontsize=18.0,
+        fontweight="bold",
+        ha="center",
+        va="center",
     )
 
-        buf = BytesIO()
-        fig.savefig(buf, format="png", facecolor=bg, bbox_inches=None)  
-        plt.close(fig)
-        return buf.getvalue()
+    # Save chart to buffer
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor=bg, bbox_inches=None)
+    plt.close(fig)
+
+    return buf.getvalue()
 
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
