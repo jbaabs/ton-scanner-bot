@@ -4563,8 +4563,8 @@ async def cmd_score(message: Message):
         await message.answer(
             f"<b>${html.escape(symbol)} Trending score</b>\n\n"
             f"Score: <b>{snap['score']:.1f}/20</b>\n"
-            f"Private: <b>{snap['private']}</b> × 1.0\n"
-            f"Group: <b>{snap['group']}</b> × 0.5\n\n"
+            f"Private: <b>{snap['private'] * 1.0:.1f}</b>\n"
+            f"Group: <b>{snap['group'] * 0.5:.1f}</b>\n\n"
             f"{'🔥 TRENDING THRESHOLD REACHED' if snap['triggered'] else 'Not at threshold yet.'}"
         )
     except Exception as exc:
