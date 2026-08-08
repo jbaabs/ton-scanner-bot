@@ -51,7 +51,7 @@ def save_scan(token):
     conn.close()
 
 # --------------------------
-# API FETCH
+# TON FILTERED API FETCH
 # --------------------------
 async def fetch_token_data(token: str):
     url = f"https://api.dexscreener.com/latest/dex/search?q={token}"
@@ -61,10 +61,14 @@ async def fetch_token_data(token: str):
             data = await res.json()
 
     pairs = data.get("pairs", [])
-    if not pairs:
+
+    # ONLY TON PAIRS
+    ton_pairs = [p for p in pairs if p.get("chainId") == "ton"]
+
+    if not ton_pairs:
         return None
 
-    pair = pairs[0]
+    pair = ton_pairs[0]
 
     return {
         "price": pair.get("priceUsd", "0"),
@@ -95,17 +99,20 @@ async def start_handler(message: types.Message):
     await message.answer("🚀 GRX Scanner is live")
 
 # --------------------------
-# SCAN
+# AUTO SCAN (MAIN LOGIC)
 # --------------------------
-@dp.message(Command("scan"))
-async def scan_handler(message: types.Message):
-    args = message.text.split()
+@dp.message()
+async def auto_scan_handler(message: types.Message):
+    text = message.text.strip()
 
-    if len(args) < 2:
-        await message.answer("Usage: /scan <token>")
+    if not text:
         return
 
-    token = args[1].upper()
+    # Ignore commands
+    if text.startswith("/"):
+        return
+
+    token = text.upper()
 
     save_scan(token)
 
@@ -119,7 +126,7 @@ async def scan_handler(message: types.Message):
     data = await fetch_token_data(token)
 
     if not data:
-        await msg.edit_text(f"❌ No data found for {token}")
+        await msg.edit_text(f"❌ No TON data found for {token}")
         return
 
     price = data["price"]
@@ -127,15 +134,11 @@ async def scan_handler(message: types.Message):
     volume = f"${int(data['volume']):,}"
     chart_url = data["pair"]
 
-    text = (
+    await msg.edit_text(
         f"🚀 <b>{token}</b>\n\n"
         f"💰 Price: ${price}\n"
         f"💧 Liquidity: {liquidity}\n"
-        f"📊 Volume (24h): {volume}"
-    )
-
-    await msg.edit_text(
-        text,
+        f"📊 Volume (24h): {volume}",
         reply_markup=build_keyboard(token, chart_url)
     )
 
@@ -151,7 +154,7 @@ async def refresh_handler(callback: types.CallbackQuery):
     data = await fetch_token_data(token)
 
     if not data:
-        await callback.message.answer(f"❌ No data for {token}")
+        await callback.message.answer(f"❌ No TON data for {token}")
         return
 
     price = data["price"]
@@ -159,15 +162,11 @@ async def refresh_handler(callback: types.CallbackQuery):
     volume = f"${int(data['volume']):,}"
     chart_url = data["pair"]
 
-    text = (
+    await callback.message.edit_text(
         f"🔄 <b>{token} Updated</b>\n\n"
         f"💰 Price: ${price}\n"
         f"💧 Liquidity: {liquidity}\n"
-        f"📊 Volume (24h): {volume}"
-    )
-
-    await callback.message.edit_text(
-        text,
+        f"📊 Volume (24h): {volume}",
         reply_markup=build_keyboard(token, chart_url)
     )
 
