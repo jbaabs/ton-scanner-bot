@@ -132,4 +132,3 @@ async def refresh_callback(callback: types.CallbackQuery):
 async def chart_callback(callback: types.CallbackQuery):
     token = callback.data.split(":")[1]
 
-    await
