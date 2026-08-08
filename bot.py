@@ -4452,7 +4452,8 @@ bot = Bot(
 dp = Dispatcher()
 
 
-@dp.message(Command("start", "help"))
+@dp.message(Command("start"))
+@dp.message(Command("help"))
 async def cmd_start(message: Message):
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
