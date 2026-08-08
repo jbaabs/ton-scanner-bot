@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-BOT_TOKEN = "YOUR_TOKEN_HERE"
+BOT_TOKEN = "8835642161:AAEUHIEkcsfV2dnZ9Ajv3xdCanfRQCU1un4"
 
 logging.basicConfig(level=logging.INFO)
 
