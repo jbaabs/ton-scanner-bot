@@ -5485,9 +5485,7 @@ async def trending_command(message: Message):
         return
 
     text = "🔥 <b>Trending Tokens</b>\n\n"
-
-"
-
+    
     for i, (token, data) in enumerate(tokens, 1):
         bar = build_progress_bar(data['score'])
         text += f"{i}. {token}
