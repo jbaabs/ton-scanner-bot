@@ -5,7 +5,7 @@ import time
 from io import BytesIO
 import matplotlib.pyplot as plt
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -24,70 +24,34 @@ bot = Bot(
 dp = Dispatcher()
 
 # =========================
-# MEMORY STORE (scan history)
+# MEMORY STORE
 # =========================
-SCAN_HISTORY = {}  # {symbol: {"first_scan": timestamp, "calls": int}}
+SCAN_HISTORY = {}  # symbol -> {first_scan, calls}
 
 # =========================
 # HELPERS
 # =========================
-def fmt(value):
+def fmt(v):
     try:
-        return f"{float(value):,.6f}"
+        return f"{float(v):,.6f}"
     except:
         return "0"
 
-def build_keyboard(address=None):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+def build_keyboard(address):
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📊 Chart", callback_data=f"chart:{address or 'none'}"),
             InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{address or 'none'}"),
         ]
     ])
-    return kb
 
 # =========================
-# DATA FETCHING
+# RESOLVER (CORE FIX)
 # =========================
-async def fetch_dedust(session, query):
+async def resolve_token(session, query):
+    url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
+
     try:
-        url = f"https://api.dedust.io/v2/assets/{query}"
-        async with session.get(url) as r:
-            if r.status != 200:
-                return None
-            data = await r.json()
-
-            return {
-                "price": data.get("price", 0),
-                "liquidity": data.get("liquidity", 0),
-                "volume": data.get("volume24h", 0),
-                "address": query,
-                "source": "DeDust"
-            }
-    except:
-        return None
-
-async def fetch_ston(session, query):
-    try:
-        url = f"https://api.ston.fi/v1/assets/{query}"
-        async with session.get(url) as r:
-            if r.status != 200:
-                return None
-            data = await r.json()
-
-            return {
-                "price": data.get("price", 0),
-                "liquidity": data.get("liquidity", 0),
-                "volume": data.get("volume24h", 0),
-                "address": query,
-                "source": "STON.fi"
-            }
-    except:
-        return None
-
-async def fetch_gecko(session, query):
-    try:
-        url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
         async with session.get(url) as r:
             if r.status != 200:
                 logging.warning(f"Gecko bad status: {r.status}")
@@ -96,41 +60,74 @@ async def fetch_gecko(session, query):
             data = await r.json()
             pairs = data.get("data", [])
 
-            if not pairs:
+            # Filter TON only
+            ton_pairs = [
+                p for p in pairs
+                if p["attributes"].get("network") == "ton"
+            ]
+
+            if not ton_pairs:
                 return None
 
-            pair = pairs[0]["attributes"]
+            # Pick best liquidity
+            best = sorted(
+                ton_pairs,
+                key=lambda x: float(x["attributes"].get("reserve_in_usd", 0) or 0),
+                reverse=True
+            )[0]["attributes"]
 
             return {
-                "price": pair.get("base_token_price_usd", 0),
-                "liquidity": pair.get("reserve_in_usd", 0),
-                "volume": pair.get("volume_usd", {}).get("h24", 0),
-                "address": pair.get("address", None),
-                "source": "GeckoTerminal"
+                "address": best.get("address"),
+                "price": best.get("base_token_price_usd"),
+                "liquidity": best.get("reserve_in_usd"),
+                "volume": best.get("volume_usd", {}).get("h24"),
+                "dex": best.get("dex_id"),
+                "symbol": best.get("base_token_symbol"),
+                "name": best.get("base_token_name")
             }
-    except:
+
+    except Exception as e:
+        logging.warning(f"Resolver error: {e}")
         return None
 
+# =========================
+# DATA FETCH
+# =========================
 async def fetch_token_data(query):
     async with aiohttp.ClientSession() as session:
+        resolved = await resolve_token(session, query)
 
-        # Priority order
-        for source in [fetch_dedust, fetch_ston, fetch_gecko]:
-            data = await source(session, query)
-            if data:
-                return data
+        if not resolved:
+            return None
 
-    return None
+        dex = resolved.get("dex")
+
+        if dex == "dedust":
+            source = "DeDust"
+        elif dex == "stonfi":
+            source = "STON.fi"
+        else:
+            source = "GeckoTerminal"
+
+        return {
+            "address": resolved.get("address"),
+            "price": resolved.get("price"),
+            "liquidity": resolved.get("liquidity"),
+            "volume": resolved.get("volume"),
+            "symbol": resolved.get("symbol") or query,
+            "name": resolved.get("name") or query,
+            "source": source
+        }
 
 # =========================
-# CHART GENERATION
+# CHART (BASE)
 # =========================
 async def generate_chart(symbol):
     history = SCAN_HISTORY.get(symbol, {})
-    scans = history.get("calls", 1)
+    calls = history.get("calls", 1)
 
-    x = list(range(scans))
-    y = [i * 1.05 for i in x]  # placeholder growth
+    x = list(range(calls))
+    y = [1 + (i * 0.05) for i in x]
 
     plt.figure()
     plt.plot(x, y)
@@ -146,19 +143,21 @@ async def generate_chart(symbol):
     return buf
 
 # =========================
-# HANDLERS
+# MESSAGE HANDLER
 # =========================
 @dp.message()
 async def handle_message(message: Message):
-    symbol = message.text.strip()
+    query = message.text.strip()
 
-    await message.answer(f"🔎 Scanning {symbol} on TON...")
+    await message.answer(f"🔎 Scanning <b>{query}</b> on TON...")
 
-    data = await fetch_token_data(symbol)
+    data = await fetch_token_data(query)
 
     if not data:
         await message.answer("❌ Token not found on TON")
         return
+
+    symbol = data.get("symbol")
 
     # Track scans
     if symbol not in SCAN_HISTORY:
@@ -170,29 +169,29 @@ async def handle_message(message: Message):
         SCAN_HISTORY[symbol]["calls"] += 1
 
     text = (
-        f"<b>{symbol.upper()} scanned ✅</b>\n\n"
+        f"<b>{data.get('name')} ({symbol})</b>\n\n"
         f"💰 Price: ${fmt(data.get('price'))}\n"
         f"💧 Liquidity: ${fmt(data.get('liquidity'))}\n"
-        f"📊 Volume: ${fmt(data.get('volume'))}\n"
-        f"👥 Holders: N/A\n\n"
+        f"📊 Volume: ${fmt(data.get('volume'))}\n\n"
         f"🛰 Source: {data.get('source')}"
     )
 
-    address = data.get("address")
-
     await message.answer(
         text,
-        reply_markup=build_keyboard(address)
+        reply_markup=build_keyboard(data.get("address"))
     )
 
+# =========================
+# CALLBACK HANDLER
+# =========================
 @dp.callback_query()
-async def handle_callbacks(callback: CallbackQuery):
+async def handle_callback(callback: CallbackQuery):
     data = callback.data
 
     if data.startswith("chart"):
-        symbol = "unknown"
+        _, address = data.split(":")
+        chart = await generate_chart(address)
 
-        chart = await generate_chart(symbol)
         await callback.message.answer_photo(chart, caption="📊 Chart")
 
     elif data.startswith("refresh"):
