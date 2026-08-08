@@ -16,6 +16,7 @@ import struct
 import logging
 import sys
 import sqlite3
+FIRST_SCANS = {}  # (token, context_id) -> {scan_price, scan_market_cap, timestamp}
 
 import aiohttp
 from dotenv import load_dotenv
@@ -681,10 +682,35 @@ def get_scan_history(report: dict, limit: int = MAX_SCAN_HISTORY) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_first_scan(report: dict) -> dict | None:
+def get_first_scan(report: dict, message=None):
+
+    if message is not None:
+token_address = report.get("token_address")
+if not token_address:
+    return None
+
+token_address = token_address.lower()
+context_id = get_context_id(message) if message else "global"
+
+key = (token_address, context_id)
+
+if key not in FIRST_SCANS:
+    FIRST_SCANS[key] = {
+        "scan_price": report.get("price"),
+        "scan_market_cap": report.get("market_cap"),
+        "timestamp": time.time()
+    }
+    
+# ALWAYS return from memory first if exists
+first = FIRST_SCANS.get(key)
+if first:
+    return first
+
+    # fallback to original DB logic
     token_key = _history_key(report)
     if not token_key:
         return None
+
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
