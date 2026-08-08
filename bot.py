@@ -1,13 +1,18 @@
-import os
-import re
+import asyncio
+import logging
 import aiohttp
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "YOUR_TOKEN_HERE"
+
+logging.basicConfig(level=logging.INFO)
 
 bot = Bot(
     token=BOT_TOKEN,
@@ -17,148 +22,164 @@ bot = Bot(
 dp = Dispatcher()
 
 # =========================
-# UTIL
+# FETCH TOKEN DATA
 # =========================
 
-def is_contract(text: str):
-    return len(text) > 30
+async def fetch_token_data(symbol: str):
+    url = f"https://api.geckoterminal.com/api/v2/search?query={symbol}"
 
-def is_ticker(text: str):
-    return text.isalpha() and len(text) <= 10
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
 
-def extract_token(text: str):
-    text = text.strip().upper()
-
-    if is_contract(text):
-        return text
-    if is_ticker(text):
-        return text
-
-    return None
-
-def fmt(value):
     try:
-        return f"{float(value):,.6f}".rstrip("0").rstrip(".")
-    except:
-        return value
-
-# =========================
-# DATA FETCH (GECKO)
-# =========================
-
-async def fetch_gecko(token):
-    try:
-        url = f"https://api.geckoterminal.com/api/v2/search/pools?query={token}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as r:
-                data = await r.json()
-
-        pool = data["data"][0]["attributes"]
+        pair = data["data"][0]["attributes"]
 
         return {
-            "price": pool["base_token_price_usd"],
-            "liquidity": pool["reserve_in_usd"],
-            "volume": pool["volume_usd"]["h24"],
-            "holders": "N/A",
-            "chart": pool.get("chart_url", None),
-            "source": "GeckoTerminal"
+            "name": pair["name"],
+            "price": float(pair["price_usd"]),
+            "liquidity": float(pair["reserve_in_usd"]),
+            "volume": float(pair["volume_usd"]["h24"]),
+            "address": data["data"][0]["id"].split("_")[-1]
         }
     except:
         return None
 
 # =========================
+# FETCH OHLC (CHART DATA)
+# =========================
+
+async def fetch_ohlc(address, timeframe="5m"):
+    url = f"https://api.geckoterminal.com/api/v2/networks/ton/pools/{address}/ohlcv/{timeframe}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+    ohlc = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+    if not ohlc:
+        return None
+
+    df = pd.DataFrame(ohlc, columns=["ts", "open", "high", "low", "close", "volume"])
+    df["ts"] = pd.to_datetime(df["ts"], unit="s")
+
+    return df
+
+# =========================
+# GENERATE CHART IMAGE
+# =========================
+
+def generate_chart(df, scan_price=None):
+    plt.style.use("dark_background")
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(df["ts"], df["close"], linewidth=2)
+
+    if scan_price:
+        plt.axhline(y=scan_price, linestyle="--")
+
+    plt.title("GRX Chart")
+    plt.xlabel("Time")
+    plt.ylabel("Price")
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+
+    buf.seek(0)
+    return buf
+
+# =========================
+# FORMAT NUMBERS
+# =========================
+
+def fmt(n):
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.2f}K"
+    return f"{n:.6f}"
+
+# =========================
 # KEYBOARD
 # =========================
 
-def build_keyboard(token):
+def build_keyboard(address):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Buy", url="https://ston.fi")],
+        [InlineKeyboardButton(text="🟢 Buy", url=f"https://www.geckoterminal.com/ton/pools/{address}")],
         [
-            InlineKeyboardButton(text="📊 Chart", callback_data=f"chart:{token}"),
-            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{token}")
+            InlineKeyboardButton(text="📊 Chart", callback_data=f"chart:{address}"),
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{address}")
         ]
     ])
 
 # =========================
-# AUTO SCAN (NO /scan)
+# AUTO SCAN (NO /SCAN)
 # =========================
 
 @dp.message()
-async def auto_scan(message: types.Message):
-    token = extract_token(message.text or "")
+async def handle_message(message: Message):
+    symbol = message.text.strip()
 
-    if not token:
-        return
+    await message.answer(f"🔍 Scanning {symbol} on TON...")
 
-    msg = await message.answer(f"🔎 Scanning {token} on TON...")
-
-    data = await fetch_gecko(token)
+    data = await fetch_token_data(symbol)
 
     if not data:
-        await msg.edit_text(f"❌ No TON data for {token}")
+        await message.answer("❌ Token not found on TON")
         return
 
     text = (
-        f"<b>{token} scanned ✅</b>\n\n"
+        f"<b>{symbol.upper()} scanned ✅</b>\n\n"
         f"💰 Price: ${fmt(data['price'])}\n"
         f"💧 Liquidity: ${fmt(data['liquidity'])}\n"
         f"📊 Volume: ${fmt(data['volume'])}\n"
-        f"👥 Holders: {data['holders']}\n\n"
-        f"🛰 Source: {data['source']}"
+        f"👥 Holders: N/A\n\n"
+        f"🛰 Source: GeckoTerminal"
     )
 
-    await msg.edit_text(text, reply_markup=build_keyboard(token))
+    await message.answer(text, reply_markup=build_keyboard(data["address"]))
+
+# =========================
+# CHART BUTTON
+# =========================
+
+@dp.callback_query(lambda c: c.data.startswith("chart"))
+async def send_chart(callback: CallbackQuery):
+    address = callback.data.split(":")[1]
+
+    df = await fetch_ohlc(address)
+
+    if df is None:
+        await callback.message.answer("❌ No chart data available")
+        return
+
+    chart = generate_chart(df)
+
+    await callback.message.answer_photo(chart, caption="📊 GRX Chart")
 
 # =========================
 # REFRESH BUTTON
 # =========================
 
-@dp.callback_query(lambda c: c.data.startswith("refresh:"))
-async def refresh(call: types.CallbackQuery):
-    token = call.data.split(":")[1]
+@dp.callback_query(lambda c: c.data.startswith("refresh"))
+async def refresh(callback: CallbackQuery):
+    address = callback.data.split(":")[1]
 
-    data = await fetch_gecko(token)
+    data = await fetch_token_data(address)
 
     if not data:
-        await call.answer("No data", show_alert=True)
+        await callback.message.answer("❌ Refresh failed")
         return
 
     text = (
-        f"<b>{token} updated 🔄</b>\n\n"
+        f"<b>Updated 🔄</b>\n\n"
         f"💰 Price: ${fmt(data['price'])}\n"
         f"💧 Liquidity: ${fmt(data['liquidity'])}\n"
         f"📊 Volume: ${fmt(data['volume'])}\n"
-        f"👥 Holders: {data['holders']}\n\n"
-        f"🛰 Source: {data['source']}"
     )
 
-    await call.message.edit_text(text, reply_markup=build_keyboard(token))
-    await call.answer()
-
-# =========================
-# CHART BUTTON (WORKING)
-# =========================
-
-@dp.callback_query(lambda c: c.data.startswith("chart:"))
-async def chart(call: types.CallbackQuery):
-    token = call.data.split(":")[1]
-
-    await call.answer("Loading chart...")
-
-    chart_url = "https://www.geckoterminal.com/ton"
-
-    await call.message.answer(
-        f"📊 <b>{token} Chart</b>\n\n"
-        f"View live chart:\n{chart_url}"
-    )
-
-# =========================
-# START
-# =========================
-
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    await message.answer("GRX Scanner is live 🚀")
+    await callback.message.answer(text)
 
 # =========================
 # RUN
@@ -168,5 +189,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
