@@ -5336,3 +5336,69 @@ def get_live_chart_image(token, timeframe, render_func):
 # On refresh button:
 # data = get_live_chart_data(token, fetch_chart)
 # img = get_live_chart_image(token, timeframe, render_chart)
+
+
+
+# --- CAPTION LIVE TIMESTAMP ---
+from datetime import datetime
+
+def append_updated_time(caption: str) -> str:
+    updated_time = datetime.utcnow().strftime("%H:%M:%S UTC")
+    return caption + f"\n\n<i>Updated {updated_time}</i>"
+
+# USAGE:
+# caption = append_updated_time(caption)
+
+
+
+# --- ROLLING 24H TRENDING SYSTEM ---
+import time
+
+def calculate_trending_score(cursor, token):
+    now = int(time.time())
+    cutoff = now - 86400  # 24 hours
+
+    cursor.execute("""
+        SELECT user_id, chat_type, timestamp
+        FROM scan_events
+        WHERE token = ?
+        AND timestamp >= ?
+    """, (token, cutoff))
+
+    rows = cursor.fetchall()
+
+    score = 0.0
+    private_count = 0
+    group_count = 0
+
+    seen_users = set()
+
+    for user_id, chat_type, ts in rows:
+        key = (user_id, chat_type)
+
+        if key in seen_users:
+            continue
+        seen_users.add(key)
+
+        if chat_type == "private":
+            score += 1.0
+            private_count += 1
+        else:
+            score += 0.5
+            group_count += 1
+
+    return {
+        "score": score,
+        "private": private_count,
+        "group": group_count
+    }
+
+
+# --- NOTE ABOUT COOLDOWN ---
+# You can safely REMOVE scan cooldown timers.
+# Your protection is already handled by:
+# - 1 scan per user per 24h (enforced via seen_users / DB)
+# - group weight = 0.5
+#
+# Keep ONLY:
+# - "already scanned" message logic (do not remove)
