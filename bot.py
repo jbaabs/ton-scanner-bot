@@ -5484,7 +5484,7 @@ async def trending_command(message: Message):
         conn.close()
         return
 
-    text = "🔥 <b>Trending Tokens</b>
+    text = "🔥 <b>Trending Tokens</b>\n\n"
 
 "
 
