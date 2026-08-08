@@ -4486,7 +4486,7 @@ async def trending_command(message: Message):
     tokens = get_trending_tokens(cursor)
 
     if not tokens:
-        await message.reply("No trending tokens yet.")
+        await message.answer("No trending tokens yet.")
         conn.close()
         return
 
@@ -4503,7 +4503,7 @@ async def trending_command(message: Message):
 
     conn.close()
 
-    await message.reply(text, parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("testtrending"))
