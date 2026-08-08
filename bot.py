@@ -2,18 +2,22 @@ import asyncio
 import aiohttp
 import time
 import sqlite3
+import os
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 
-BOT_TOKEN = "YOUR_TOKEN"
+# ENV VARIABLES
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "database.db"
 
+# DEBUG (remove later if you want)
+print("TOKEN:", BOT_TOKEN)
+
+# BOT INIT
 bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
-
-# ------------------------
-# DB SETUP
 # ------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
