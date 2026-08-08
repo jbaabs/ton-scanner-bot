@@ -4656,20 +4656,32 @@ async def handle_address(message: Message):
         return
     status_msg = None
 
-    # Do not rate-limit ordinary group conversation or alert-target input.
-    # The cooldown is applied only when the message actually looks like a scan
-     
+    # Do not rate-limit ordinary group conversation
+# The cooldown is applied only when the message...
+
+if is_valid_ton_address(text) or is_valid_ticker(text):
+    # scan cooldown removed
+
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+
             if is_valid_ton_address(text):
                 lookup_value = text
-                status_msg = await message.answer("Scanning token...")
+                status_msg = await message.answer("🔍 Scanning address...")
+
             elif is_valid_ticker(text):
-                status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
-                resolved_address, error_text = await resolve_ticker_to_address(session, text)
+                status_msg = await message.answer(f"🔍 Resolving ticker {text}...")
+                resolved_address, error_text = await resolve_ticker(text)
+
                 if error_text:
                     await status_msg.edit_text(error_text)
                     return
+
+                lookup_value = resolved_address
+                await status_msg.edit_text("🔍 Scanning resolved address...")
+
+            else:
+                return
                 lookup_value = resolved_address
                 await status_msg.edit_text("Scanning token...")
             else:
@@ -5505,6 +5517,10 @@ def build_progress_bar(score, max_score=20, length=10):
 # --- TRENDING COMMAND ---
 
 
+    @dp.message(Command("trending"))
+async def trending_command(message: Message):
+    import sqlite3
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -5516,11 +5532,15 @@ def build_progress_bar(score, max_score=20, length=10):
         return
 
     text = "🔥 <b>Trending Tokens</b>\n\n"
-    
+
     for i, (token, data) in enumerate(tokens, 1):
-        bar = build_progress_bar(data['score'])
-        text += f"{i}. {token}\n{bar} {data['score']:.1f}/20\n\n"
+        score = data.get("score", 0)
+        bar = build_progress_bar(score)
+
+        text += (
+            f"{i}. {token}\n"
+            f"{bar} {score:.1f}/20\n\n"
+        )
 
     conn.close()
-
     await message.reply(text, parse_mode="HTML")
