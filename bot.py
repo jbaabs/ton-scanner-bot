@@ -4672,28 +4672,38 @@ async def handle_address(message: Message):
         return
     status_msg = None
 
-    # Do not rate-limit ordinary group conversation or alert-target input.
-    # The cooldown is applied only when the message actually looks like a scan
-     is_valid_ton_address(text) or is_valid_ticker(text) 
+# Only run scanner if input is valid
+if is_valid_ton_address(text) or is_valid_ticker(text):
 
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)
+        ) as session:
+
             if is_valid_ton_address(text):
                 lookup_value = text
                 status_msg = await message.answer("Scanning token...")
+
             elif is_valid_ticker(text):
                 status_msg = await message.answer(f"Searching ticker {html.escape(text)}...")
                 resolved_address, error_text = await resolve_ticker_to_address(session, text)
+
                 if error_text:
                     await status_msg.edit_text(error_text)
                     return
+
                 lookup_value = resolved_address
                 await status_msg.edit_text("Scanning token...")
-            else:
-                # Ignore ordinary conversation in both private chats and groups.
-                # The scanner only reacts to a full TON CA or a single ticker-like
-                # word (e.g. GRX6900 / $GRX6900). Commands are handled separately.
-                return
+
+    except Exception:
+        logger.exception("Scan error")
+        await message.answer("❌ Failed to scan. Try again.")
+        return
+
+else:
+    # Ignore normal chat messages
+    return
 
             duplicate_key = str(lookup_value or "").strip()
             recent = get_recent_chat_scan(message.chat.id, duplicate_key)
