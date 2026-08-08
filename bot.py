@@ -608,6 +608,43 @@ def save_scan_history(report: dict, scanner_meta: dict | None):
     if not token_key:
         return
 
+    def _scan_scope_key(scanner_meta: dict | None) -> str:
+    """
+    Private chat: one scan line per user.
+    Group/channel: one shared scan line per chat.
+    """
+    meta = scanner_meta or {}
+
+    scope_key = meta.get("scan_scope_key")
+    if scope_key:
+        return str(scope_key)
+
+    chat_type = str(
+        meta.get("chat_type")
+        or meta.get("chat_type_name")
+        or ""
+    ).lower()
+
+    chat_id = meta.get("chat_id")
+    user_id = meta.get("scanner_id")
+
+    if chat_type == "private" and user_id is not None:
+        return f"user:{user_id}"
+
+    if chat_id is not None:
+        return f"chat:{chat_id}"
+
+    return f"user:{user_id}" if user_id is not None else "global"
+
+
+def save_scan_history(report: dict, scanner_meta: dict | None):
+    if not scanner_meta:
+        return
+
+    token_key = _history_key(report)
+    if not token_key:
+        return
+
     scan_ts = int(scanner_meta.get("scan_ts") or time.time())
     scanner_id = scanner_meta.get("scanner_id")
     scanner_name = scanner_meta.get("scanner_name")
