@@ -5473,16 +5473,28 @@ async def trending_command(message: Message):
         await message.reply(f"⏳ Try again in {remaining:.1f}s")
         return
 
+    import sqlite3
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
     tokens = get_trending_tokens(cursor)
 
     if not tokens:
         await message.reply("No trending tokens yet.")
+        conn.close()
         return
 
-    text = "🔥 <b>Trending Tokens</b>\n\n"
+    text = "🔥 <b>Trending Tokens</b>
+
+"
 
     for i, (token, data) in enumerate(tokens, 1):
         bar = build_progress_bar(data['score'])
-        text += f"{i}. {token}\n{bar} {data['score']:.1f}/20\n\n"
+        text += f"{i}. {token}
+{bar} {data['score']:.1f}/20
+
+"
 
     await message.reply(text, parse_mode="HTML")
+
+    conn.close()
