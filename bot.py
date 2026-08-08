@@ -2407,213 +2407,69 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     plt.close(fig)
     return buf.getvalue()
     
-def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None) -> bytes:
-    """Render a cleaner trading-terminal GRX dashboard with large, icon-free stats."""
+def build_report_card(ohlcv: list, report: dict):
+    """Render GRX report card image"""
+
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import matplotlib.patheffects as pe
     from matplotlib.patches import FancyBboxPatch
-    from datetime import datetime, timezone
     from io import BytesIO
 
-    info=report.get("jetton_info") or {}; dex=report.get("dex_data") or {}; holders=report.get("holders") or {}
-    symbol=str(info.get("symbol") or "???"); age=_fmt_age(dex.get("pair_created_at"))
-    txns=dex.get("txns_24h") or {}; buys=int(txns.get("buys") or 0); sells=int(txns.get("sells") or 0); total=buys+sells
-    buy_pct=buys/total*100 if total else 0; sell_pct=sells/total*100 if total else 0
-    h1=dex.get("price_change_1h"); h6=dex.get("price_change_6h"); h24=dex.get("price_change_24h"); top10=holders.get("top_concentration")
-    def f(v):
-        try:return float(v)
-        except:return None
+    # ---------------- DATA ----------------
+    info = report.get("jetton_info") or {}
+    dex = report.get("dex") or {}
 
-    bg="#050607"; panel="#090b0d"; cell="#0b0f13"; line="#343b43"; text="#ffffff"; muted="#b7c0ca"; green="#55e0ad"; red="#ff7478"; purple="#a968ff"
-    def pc(v):
-        n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
-    ohlcv = _normalize_chart_ohlcv(ohlcv)
-    if not ohlcv:
-        raise ValueError("No valid OHLCV candles to render")
-    times=[datetime.fromtimestamp(c[0],tz=timezone.utc) for c in ohlcv]
-    opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]; lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
-    fig=plt.figure(figsize=(8,9.05),dpi=160,facecolor=bg)
-    def box(x,y,w,h,fc=panel,ec=line,lw=.65,r=.009):
-        fig.add_artist(FancyBboxPatch((x,y),w,h,transform=fig.transFigure,boxstyle=f"round,pad=0.002,rounding_size={r}",facecolor=fc,edgecolor=ec,linewidth=lw,zorder=-5))
+    symbol = str(info.get("symbol") or "???")
 
-    fig.text(.965,.974,"TON INTELLIGENCE",color=muted,fontsize=7.5,fontweight="bold",ha="right",va="center")
+    txns = dex.get("txns_24h") or {}
+    buys = int(txns.get("buys") or 0)
+    sells = int(txns.get("sells") or 0)
+    total = buys + sells
+    buy_pct = (buys / total * 100) if total else 0
 
-    # DTrade-inspired chart: flat dark surface, subtle horizontal grid, thicker candles and current-price marker.
-    # Token artwork + identity, DTrade-inspired but kept in GRX styling.
-    title_x = .04
-    if token_icon_bytes:
-        try:
-            from PIL import Image, ImageDraw
-            icon = Image.open(BytesIO(token_icon_bytes)).convert("RGBA")
-            side = min(icon.size)
-            left = (icon.width - side) // 2
-            top_crop = (icon.height - side) // 2
-            icon = icon.crop((left, top_crop, left + side, top_crop + side)).resize((128, 128))
-            mask = Image.new("L", (128, 128), 0)
-            ImageDraw.Draw(mask).ellipse((1, 1, 127, 127), fill=255)
-            icon.putalpha(mask)
-            iax = fig.add_axes([.04, .895, .055, .055], zorder=20)
-            iax.imshow(icon)
-            iax.axis("off")
-            title_x = .108
-        except Exception:
-            pass
+    # ---------------- STYLE ----------------
+    bg = "#050607"
 
-    fig.text(title_x,.927,f"{symbol} / USD",color=text,fontsize=15,fontweight="bold",ha="left",va="center")
-    fig.text(title_x,.899,f"{timeframe_label}",color=muted,fontsize=9,ha="left",va="center")
-    last=closes[-1]; first_close=closes[0]; move=((last-first_close)/first_close*100) if first_close else 0
-    fig.text(.96,.925,f"{move:+.2f}%",color=pc(move),fontsize=17,fontweight="bold",ha="right",va="center")
-    ax=fig.add_axes([.045,.625,.90,.235],facecolor=bg)
-    ax.tick_params(axis='x', pad=3)
-    n=len(ohlcv)
-    width=max(.22,min(.54,18.0/max(n,1)))
-    for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
-        col=green if c>=o else red
-        ax.vlines(i,l,h,color=col,linewidth=.68,alpha=.95)
-        bottom=min(o,c); height=max(abs(c-o),max(h,l)*1e-8)
-        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
+    fig = plt.figure(figsize=(6, 10), facecolor=bg)
 
-    # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan price.
-    price = _get_first_scan_price(report, message)
+    # ---------------- MAIN TEXT ----------------
+    fig.text(
+        0.5, 0.92,
+        f"{symbol}",
+        ha="center",
+        va="center",
+        fontsize=28,
+        fontweight="bold",
+        color="white"
+    )
 
-if price is not None:
-    try:
-        if message.chat.type == "private":
-            label = f"@{message.from_user.username}" if message.from_user.username else "You"
-        else:
-            label = message.chat.title or "Group"
+    fig.text(
+        0.5, 0.86,
+        f"Buys: {buys} | Sells: {sells} | Buy %: {buy_pct:.1f}%",
+        ha="center",
+        va="center",
+        fontsize=14,
+        color="white"
+    )
 
-        scan_blue = "#168BFF"
+    # ---------------- FOOTER ----------------
+    fig.text(
+        0.5, 0.08,
+        "POWERED BY GRX",
+        color=(1.0, 1.0, 1.0, 0.38),
+        fontsize=18.0,
+        fontweight="bold",
+        ha="center",
+        va="center"
+    )
 
-        ax.axhline(
-            price,
-            color=scan_blue,
-            linestyle="--",
-            linewidth=1
-        )
-
-        ax.text(
-            -0.65,
-            price,
-            f"GRX SCAN • {label}",
-            color=scan_blue,
-            fontsize=9
-        )
-
-    except Exception:
-        logger.exception("Failed to draw unique scan line")
-
-    ax.set_xlim(-.8,len(ohlcv)+1.8)
-    lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
-    ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
-    fmt=_chart_time_format(timeframe_label)
-    ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
-    ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors="#b5bbc2",labelsize=8.5,length=0,pad=8); ax.yaxis.tick_right()
-    ax.set_axisbelow(False)
-    from matplotlib.ticker import FuncFormatter, MaxNLocator
-    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
-    ax.yaxis.get_offset_text().set_visible(False)
-    ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
-    for sp in ax.spines.values(): sp.set_visible(False)
-    ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
-
-    # Compact pulse/caller band.
-    box(.025,.445,.465,.115); box(.51,.445,.465,.115)
-    fig.text(.045,.535,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
-    for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
-        y=.507-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.535,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
-    first=get_first_scan_resolved(report)
-    if first:
-        caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL); then_txt=str(first.get("scan_market_cap") or "N/A")
-        def usdnum(t):
-            t=str(t or "").replace("$","").replace(",","").strip().upper(); m=1
-            if t.endswith("K"):m,t=1000,t[:-1]
-            elif t.endswith("M"):m,t=1000000,t[:-1]
-            try:return float(t)*m
-            except:return None
-        now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
-        fig.text(.53,.507,caller,color=text,fontsize=9.5,fontweight="bold")
-        fig.text(.53,.480,"THEN",color=muted,fontsize=7.5); fig.text(.72,.480,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.75,.480,"NOW",color=muted,fontsize=7.5); fig.text(.955,.480,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
-    else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
-
-    # Compact 3 x 2 stat grid on each side. The centre split remains aligned
-    # exactly with MARKET PULSE / FIRST CALLED BY, but the previous dead space
-    # is filled horizontally.
-    left_stats = [
-        ("PRICE", _fmt_price_compact(dex.get("price_usd")), text),
-        ("MARKET CAP", _fmt_usd(dex.get("market_cap")), text),
-        ("AGE", age, text),
-        ("LIQUIDITY", _fmt_usd(dex.get("liquidity_usd")), text),
-        ("BUYS", f"{buys:,} · {buy_pct:.0f}%", green),
-        ("HOLDERS", _fmt_num(info.get("holders_count")), text),
-    ]
-    right_stats = [
-        ("1H CHANGE", _fmt_pct(h1), pc(h1)),
-        ("24H CHANGE", _fmt_pct(h24), pc(h24)),
-        ("VOLUME 24H", _fmt_usd(dex.get("volume_24h")), text),
-        ("ATH", _fmt_usd(dex.get("ath_market_cap")), text),
-        ("SELLS", f"{sells:,} · {sell_pct:.0f}%", red),
-        ("TOP 10", f"{top10:.2f}%" if top10 is not None else "N/A", text),
-    ]
-
-    # Two halves, each containing 3 columns x 2 rows.
-    half_left_x, half_right_x = .025, .51
-    half_w = .465
-    col_gap = .007
-    row_gap = .010
-    grid_top = .405
-    grid_bottom = .165
-    card_h = (grid_top - grid_bottom - row_gap) / 2
-    card_w = (half_w - 2 * col_gap) / 3
-
-    def draw_grid(stats, x0):
-        for idx, (label, val, col) in enumerate(stats):
-            row = idx // 3
-            column = idx % 3
-            x = x0 + column * (card_w + col_gap)
-            y = grid_top - (row + 1) * card_h - row * row_gap
-            box(x, y, card_w, card_h, fc=cell, ec=line, lw=.72, r=.009)
-
-            value = str(val)
-            # Adaptive type keeps every value inside a fixed uniform card.
-            fs = 11.2
-            if len(value) > 11:
-                fs = 9.9
-            if len(value) > 15:
-                fs = 8.8
-
-            fig.text(x + .010, y + card_h * .68, label, color=muted,
-                     fontsize=7.1, fontweight="bold", ha="left", va="center")
-            fig.text(x + .010, y + card_h * .30, value, color=col,
-                     fontsize=fs, fontweight="bold", ha="left", va="center")
-
-    draw_grid(left_stats, half_left_x)
-    draw_grid(right_stats, half_right_x)
-
-    # Subtle footer branding
-fig.text(
-    .5, .085, "POWERED BY GRX",
-    color=(1.0, 1.0, 1.0, 0.38),
-    fontsize=18.0,
-    fontweight="bold",
-    ha="center",
-    va="center",
-)
-
-    # Save chart to buffer
+    # ---------------- SAVE ----------------
     buf = BytesIO()
-    fig.savefig(buf, format="png", facecolor=bg, bbox_inches=None)
+    fig.savefig(buf, format="png", facecolor=bg)
     plt.close(fig)
 
     return buf.getvalue()
-
 
 async def _download_image_bytes(session: aiohttp.ClientSession, url: str | None) -> bytes | None:
     if not url:
