@@ -5205,3 +5205,71 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped.")
+
+
+
+# --- SCAN ANCHORS (USER / GROUP) ---
+user_scan_anchor = {}   # (user_id, token) -> price
+group_scan_anchor = {}  # (chat_id, token) -> price
+
+def set_scan_anchor(user_id, chat_id, token, price, is_private):
+    key_user = (int(user_id), str(token))
+    key_group = (int(chat_id), str(token))
+
+    if is_private:
+        if key_user not in user_scan_anchor:
+            user_scan_anchor[key_user] = float(price)
+    else:
+        if key_group not in group_scan_anchor:
+            group_scan_anchor[key_group] = float(price)
+
+def get_scan_anchor(user_id, chat_id, token, is_private):
+    if is_private:
+        return user_scan_anchor.get((int(user_id), str(token)))
+    return group_scan_anchor.get((int(chat_id), str(token)))
+
+# NOTE:
+# You must call set_scan_anchor(...) at the moment a scan happens,
+# passing current price and context.
+# And in your chart renderer, replace:
+#   scan_price = original_price
+# with:
+#   scan_price = get_scan_anchor(user_id, chat_id, token, is_private) or original_price
+
+
+
+# --- ENTRY vs RECENT ANCHORS ---
+user_recent_anchor = {}   # (user_id, token) -> price
+group_recent_anchor = {}  # (chat_id, token) -> price
+
+def set_scan_anchor(user_id, chat_id, token, price, is_private):
+    key_user = (int(user_id), str(token))
+    key_group = (int(chat_id), str(token))
+
+    if is_private:
+        # ENTRY (first ever)
+        if key_user not in user_scan_anchor:
+            user_scan_anchor[key_user] = float(price)
+        # RECENT (always update)
+        user_recent_anchor[key_user] = float(price)
+    else:
+        if key_group not in group_scan_anchor:
+            group_scan_anchor[key_group] = float(price)
+        group_recent_anchor[key_group] = float(price)
+
+def get_recent_anchor(user_id, chat_id, token, is_private):
+    if is_private:
+        return user_recent_anchor.get((int(user_id), str(token)))
+    return group_recent_anchor.get((int(chat_id), str(token)))
+
+# --- USAGE (IMPORTANT) ---
+# In your chart renderer:
+#
+# entry_price = get_scan_anchor(user_id, chat_id, token, is_private)
+# recent_price = get_recent_anchor(user_id, chat_id, token, is_private)
+#
+# Draw TWO lines:
+# - Entry line (existing GRX SCAN)
+# - Recent line (new, different style)
+#
+# DO NOT remove existing logic — only extend it.
