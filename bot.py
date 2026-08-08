@@ -14,7 +14,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "database.db"
 
 # DEBUG (optional)
-print("TOKEN:", BOT_TOKEN)
 
 # BOT INIT (FIXED FOR AIROGRAM 3.7+)
 bot = Bot(
@@ -38,3 +37,10 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+    
+async def main():
+    init_db()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
