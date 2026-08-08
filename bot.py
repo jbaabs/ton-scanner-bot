@@ -2473,18 +2473,34 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
 
     # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan price.
-    first_scan_for_line = get_first_scan_resolved(report) or {}
-    scan_price_for_line = first_scan_for_line.get("scan_price") or dex.get("price_usd")
+    price = _get_first_scan_price(report, message)
+
+if price is not None:
     try:
-        raw_scan_price = str(scan_price_for_line).replace("$", "").replace(",", "").strip()
-        scan_price_f = float(raw_scan_price)
-        if scan_price_f > 0:
-            scan_blue = "#168BFF"
-            ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
-            ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
-                    color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
+        if message.chat.type == "private":
+            label = f"@{message.from_user.username}" if message.from_user.username else "You"
+        else:
+            label = message.chat.title or "Group"
+
+        scan_blue = "#168BFF"
+
+        ax.axhline(
+            price,
+            color=scan_blue,
+            linestyle="--",
+            linewidth=1
+        )
+
+        ax.text(
+            -0.65,
+            price,
+            f"GRX SCAN • {label}",
+            color=scan_blue,
+            fontsize=9
+        )
+
     except Exception:
-        logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
+        logger.exception("Failed to draw unique scan line")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
@@ -3818,7 +3834,28 @@ def _fmt_username_from_user(user) -> str:
     ).strip()
     return full_name or DEFAULT_SCANNER_LABEL
 
+def _get_first_scan_price(report: dict, message: Message):
+    token_key = _history_key(report)
+    if not token_key:
+        return None
 
+    source_key = _scan_source_key(message)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT price
+            FROM scan_events
+            WHERE token_key = ?
+            AND source_key = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (token_key, source_key),
+        ).fetchone()
+
+    return float(row[0]) if row else None
+    
 def _build_scanner_meta(message: Message, report: dict) -> dict:
     dex = report.get("dex_data") or {}
     return {
