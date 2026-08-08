@@ -1,9 +1,15 @@
 import asyncio
-import aiohttp
 import os
+import re
+import io
+import random
+import aiohttp
+import sqlite3
+import matplotlib.pyplot as plt
+import pandas as pd
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -21,135 +27,117 @@ bot = Bot(
 dp = Dispatcher()
 
 # =========================
-# FORMAT FIX (NO BLUE LINKS)
+# SIMPLE DB (for scan price)
 # =========================
+DB_PATH = "scanner.db"
 
-def format_number(value):
-    try:
-        value = float(value)
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scans (
+            token TEXT PRIMARY KEY,
+            price REAL
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-        if value >= 1_000_000:
-            return f"{value/1_000_000:.2f}M"
-        elif value >= 1_000:
-            return f"{value/1_000:.2f}K"
-        elif value >= 1:
-            return f"{value:.4f}"
-        else:
-            return f"{value:.8f}"
-    except:
-        return "N/A"
+def save_scan(token, price):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO scans (token, price) VALUES (?, ?)", (token, price))
+    conn.commit()
+    conn.close()
 
-# =========================
-# DATA SOURCES (TON FIRST)
-# =========================
-
-async def fetch_stonfi(session, query):
-    try:
-        url = f"https://api.ston.fi/v1/assets/search?query={query}"
-        async with session.get(url) as resp:
-            data = await resp.json()
-
-            if data.get("assets"):
-                asset = data["assets"][0]
-
-                return {
-                    "price": asset.get("price_usd"),
-                    "liquidity": asset.get("liquidity_usd"),
-                    "volume": asset.get("volume_24h"),
-                    "holders": "N/A",
-                    "source": "STON.fi"
-                }
-    except:
-        return None
-
-
-async def fetch_dedust(session, query):
-    try:
-        url = f"https://api.dedust.io/v2/assets/{query}"
-        async with session.get(url) as resp:
-            data = await resp.json()
-
-            return {
-                "price": data.get("price"),
-                "liquidity": data.get("liquidity"),
-                "volume": data.get("volume24h"),
-                "holders": "N/A",
-                "source": "DeDust"
-            }
-    except:
-        return None
-
-
-async def fetch_geckoterminal(session, query):
-    try:
-        url = f"https://api.geckoterminal.com/api/v2/search/pools?query={query}"
-        async with session.get(url) as resp:
-            data = await resp.json()
-
-            pools = data.get("data", [])
-            if pools:
-                pool = pools[0]["attributes"]
-
-                return {
-                    "price": pool.get("base_token_price_usd"),
-                    "liquidity": pool.get("reserve_in_usd"),
-                    "volume": pool.get("volume_usd", {}).get("h24"),
-                    "holders": "N/A",
-                    "source": "GeckoTerminal"
-                }
-    except:
-        return None
-
-
-async def fetch_dexscreener(session, query):
-    try:
-        url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
-        async with session.get(url) as resp:
-            data = await resp.json()
-
-            pairs = data.get("pairs", [])
-            if pairs:
-                pair = pairs[0]
-
-                return {
-                    "price": pair.get("priceUsd"),
-                    "liquidity": pair.get("liquidity", {}).get("usd"),
-                    "volume": pair.get("volume", {}).get("h24"),
-                    "holders": "N/A",
-                    "source": "Dexscreener"
-                }
-    except:
-        return None
-
-
-async def get_token_data(query):
-    async with aiohttp.ClientSession() as session:
-        for source in [
-            fetch_stonfi,
-            fetch_dedust,
-            fetch_geckoterminal,
-            fetch_dexscreener
-        ]:
-            data = await source(session, query)
-
-            if data and data.get("price"):
-                return data
-
-    return None
+def get_scan_price(token):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT price FROM scans WHERE token=?", (token,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 
 # =========================
-# UI BUTTONS
+# MOCK DATA (REPLACE LATER)
 # =========================
+async def fetch_token_data(token: str):
+    # Replace with GeckoTerminal / STON.fi later
+    return {
+        "price": round(random.uniform(0.01, 0.05), 6),
+        "liquidity": round(random.uniform(5000, 200000), 2),
+        "volume": round(random.uniform(1000, 100000), 2),
+        "holders": random.randint(50, 500)
+    }
 
-def build_keyboard(query):
+
+# =========================
+# CHART ENGINE
+# =========================
+def get_price_data(points=60):
+    prices = []
+    price = random.uniform(0.01, 0.05)
+
+    for _ in range(points):
+        price += random.uniform(-0.002, 0.002)
+        prices.append(max(price, 0.001))
+
+    return prices
+
+
+def generate_chart(token: str, timeframe: str):
+    points_map = {
+        "1m": 30,
+        "5m": 50,
+        "15m": 60,
+        "1h": 80,
+        "4h": 100
+    }
+
+    prices = get_price_data(points_map.get(timeframe, 50))
+    scan_price = get_scan_price(token)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(prices, linewidth=2)
+
+    if scan_price:
+        plt.axhline(y=scan_price, linewidth=2)  # GRX line
+
+    plt.title(f"{token} • {timeframe}")
+    plt.grid(alpha=0.2)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight")
+    plt.close()
+    buf.seek(0)
+
+    return buf
+
+
+# =========================
+# BUTTONS
+# =========================
+def main_buttons(token: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Buy", url="https://ston.fi")],
+        [
+            InlineKeyboardButton(text="📊 Chart", callback_data=f"chart:{token}:1m"),
+            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{token}")
+        ]
+    ])
+
+
+def chart_buttons(token: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🟢 Buy", url="https://app.ston.fi")
+            InlineKeyboardButton(text="1m", callback_data=f"chart:{token}:1m"),
+            InlineKeyboardButton(text="5m", callback_data=f"chart:{token}:5m"),
+            InlineKeyboardButton(text="15m", callback_data=f"chart:{token}:15m"),
         ],
         [
-            InlineKeyboardButton(text="📊 Chart", callback_data=f"chart_{query}"),
-            InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh_{query}")
+            InlineKeyboardButton(text="1h", callback_data=f"chart:{token}:1h"),
+            InlineKeyboardButton(text="4h", callback_data=f"chart:{token}:4h"),
         ]
     ])
 
@@ -157,8 +145,7 @@ def build_keyboard(query):
 # =========================
 # START
 # =========================
-
-@dp.message(CommandStart())
+@dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer("GRX Scanner is live 🚀")
 
@@ -166,81 +153,72 @@ async def start_handler(message: types.Message):
 # =========================
 # AUTO SCAN (NO /scan)
 # =========================
-
 @dp.message()
 async def auto_scan(message: types.Message):
-    query = message.text.strip()
+    text = message.text.strip()
 
-    if query.startswith("/"):
+    # Basic ticker / CA detection
+    if not re.match(r"^[A-Za-z0-9]{2,20}$", text):
         return
 
-    msg = await message.answer(f"🔍 Scanning {query} on TON...")
+    token = text.upper()
 
-    data = await get_token_data(query)
+    msg = await message.answer(f"🔎 Scanning {token} on TON...")
 
-    if not data:
-        await msg.edit_text(f"❌ No TON data for {query}")
-        return
+    data = await fetch_token_data(token)
 
-    text = f"""
-<b>{query.upper()} scanned ✅</b>
+    save_scan(token, data["price"])
 
-💰 Price: ${format_number(data['price'])}
-💧 Liquidity: ${format_number(data['liquidity'])}
-📊 Volume: ${format_number(data['volume'])}
-👥 Holders: {data['holders']}
-
-📡 Source: {data['source']}
-"""
-
-    await msg.edit_text(text, reply_markup=build_keyboard(query))
+    await msg.edit_text(
+        f"<b>{token} scanned ✅</b>\n\n"
+        f"💰 Price: {data['price']}\n"
+        f"💧 Liquidity: {data['liquidity']}\n"
+        f"📊 Volume: {data['volume']}\n"
+        f"👥 Holders: {data['holders']}",
+        reply_markup=main_buttons(token)
+    )
 
 
 # =========================
-# BUTTON HANDLERS
+# REFRESH
 # =========================
+@dp.callback_query(lambda c: c.data.startswith("refresh:"))
+async def refresh_handler(callback: types.CallbackQuery):
+    token = callback.data.split(":")[1]
 
-@dp.callback_query(lambda c: c.data.startswith("refresh_"))
-async def refresh_callback(callback: types.CallbackQuery):
-    query = callback.data.split("_")[1]
+    data = await fetch_token_data(token)
 
-    data = await get_token_data(query)
-
-    if not data:
-        await callback.answer("No data", show_alert=True)
-        return
-
-    text = f"""
-<b>{query.upper()} updated 🔄</b>
-
-💰 Price: ${format_number(data['price'])}
-💧 Liquidity: ${format_number(data['liquidity'])}
-📊 Volume: ${format_number(data['volume'])}
-👥 Holders: {data['holders']}
-
-📡 Source: {data['source']}
-"""
-
-    await callback.message.edit_text(text, reply_markup=build_keyboard(query))
+    await callback.message.edit_text(
+        f"<b>{token} updated 🔄</b>\n\n"
+        f"💰 Price: {data['price']}\n"
+        f"💧 Liquidity: {data['liquidity']}\n"
+        f"📊 Volume: {data['volume']}\n"
+        f"👥 Holders: {data['holders']}",
+        reply_markup=main_buttons(token)
+    )
 
 
 # =========================
-# STEP 4 (CHART ENGINE BASE)
+# CHART HANDLER
 # =========================
+@dp.callback_query(lambda c: c.data.startswith("chart:"))
+async def chart_handler(callback: types.CallbackQuery):
+    _, token, timeframe = callback.data.split(":")
 
-@dp.callback_query(lambda c: c.data.startswith("chart_"))
-async def chart_callback(callback: types.CallbackQuery):
-    query = callback.data.split("_")[1]
+    chart = generate_chart(token, timeframe)
 
-    # Placeholder (next step = real chart image)
-    await callback.message.reply(f"📊 Generating chart for {query}...")
+    await callback.message.answer_photo(
+        photo=chart,
+        caption=f"📊 {token} • {timeframe}",
+        reply_markup=chart_buttons(token)
+    )
 
 
 # =========================
 # RUN
 # =========================
-
 async def main():
+    init_db()
     await dp.start_polling(bot)
 
 
