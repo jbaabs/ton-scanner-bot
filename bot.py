@@ -9,6 +9,10 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await message.answer("Bot is working 🚀")
+    
 # ENV VARIABLES
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = "database.db"
