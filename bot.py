@@ -2,10 +2,11 @@ import os
 import asyncio
 import sqlite3
 import time
+import aiohttp
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -42,16 +43,46 @@ def init_db():
     conn.commit()
     conn.close()
 
+def save_scan(token):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO scans VALUES (?, ?)", (token, time.time()))
+    conn.commit()
+    conn.close()
+
 # --------------------------
-# KEYBOARD BUILDER
+# API FETCH
 # --------------------------
-def build_keyboard(token: str):
+async def fetch_token_data(token: str):
+    url = f"https://api.dexscreener.com/latest/dex/search?q={token}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as res:
+            data = await res.json()
+
+    pairs = data.get("pairs", [])
+    if not pairs:
+        return None
+
+    pair = pairs[0]
+
+    return {
+        "price": pair.get("priceUsd", "0"),
+        "liquidity": pair.get("liquidity", {}).get("usd", 0),
+        "volume": pair.get("volume", {}).get("h24", 0),
+        "pair": pair.get("url", "")
+    }
+
+# --------------------------
+# KEYBOARD
+# --------------------------
+def build_keyboard(token, chart_url):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🟢 Buy", url=f"https://app.ston.fi/swap?output={token}")
+            InlineKeyboardButton(text="🟢 Buy", url=chart_url)
         ],
         [
-            InlineKeyboardButton(text="📊 Chart", callback_data=f"chart_{token}"),
+            InlineKeyboardButton(text="📊 Chart", url=chart_url),
             InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh_{token}")
         ]
     ])
@@ -61,7 +92,7 @@ def build_keyboard(token: str):
 # --------------------------
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("GRX Scanner is live 🚀")
+    await message.answer("🚀 GRX Scanner is live")
 
 # --------------------------
 # SCAN
@@ -76,44 +107,69 @@ async def scan_handler(message: types.Message):
 
     token = args[1].upper()
 
-    # Save scan
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO scans VALUES (?, ?)", (token, time.time()))
-    conn.commit()
-    conn.close()
+    save_scan(token)
 
-    text = f"""
-<b>{token}</b> scanned ✅
+    msg = await message.answer(
+        f"🔍 Scanning <b>{token}</b>...\n\n"
+        f"• Price: Loading...\n"
+        f"• Liquidity: Loading...\n"
+        f"• Volume (24h): Loading..."
+    )
 
-• Liquidity: Loading...
-• Holders: Loading...
-• Price: Loading...
-"""
+    data = await fetch_token_data(token)
 
-    await message.answer(
+    if not data:
+        await msg.edit_text(f"❌ No data found for {token}")
+        return
+
+    price = data["price"]
+    liquidity = f"${int(data['liquidity']):,}"
+    volume = f"${int(data['volume']):,}"
+    chart_url = data["pair"]
+
+    text = (
+        f"🚀 <b>{token}</b>\n\n"
+        f"💰 Price: ${price}\n"
+        f"💧 Liquidity: {liquidity}\n"
+        f"📊 Volume (24h): {volume}"
+    )
+
+    await msg.edit_text(
         text,
-        reply_markup=build_keyboard(token)
+        reply_markup=build_keyboard(token, chart_url)
     )
 
 # --------------------------
-# CALLBACKS
+# REFRESH
 # --------------------------
-@dp.callback_query()
-async def handle_callbacks(callback: types.CallbackQuery):
-    data = callback.data
+@dp.callback_query(lambda c: c.data.startswith("refresh_"))
+async def refresh_handler(callback: types.CallbackQuery):
+    token = callback.data.split("_")[1]
 
-    if data.startswith("chart_"):
-        token = data.split("_")[1]
+    await callback.answer("Refreshing...")
 
-        await callback.message.answer(f"📊 Chart for {token} coming soon")
+    data = await fetch_token_data(token)
 
-    elif data.startswith("refresh_"):
-        token = data.split("_")[1]
+    if not data:
+        await callback.message.answer(f"❌ No data for {token}")
+        return
 
-        await callback.message.answer(f"🔄 Refreshing {token}...")
+    price = data["price"]
+    liquidity = f"${int(data['liquidity']):,}"
+    volume = f"${int(data['volume']):,}"
+    chart_url = data["pair"]
 
-    await callback.answer()
+    text = (
+        f"🔄 <b>{token} Updated</b>\n\n"
+        f"💰 Price: ${price}\n"
+        f"💧 Liquidity: {liquidity}\n"
+        f"📊 Volume (24h): {volume}"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=build_keyboard(token, chart_url)
+    )
 
 # --------------------------
 # MAIN
