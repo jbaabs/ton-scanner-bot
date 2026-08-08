@@ -5488,11 +5488,8 @@ async def trending_command(message: Message):
     
     for i, (token, data) in enumerate(tokens, 1):
         bar = build_progress_bar(data['score'])
-        text += f"{i}. {token}
-{bar} {data['score']:.1f}/20
-
-"
-
-    await message.reply(text, parse_mode="HTML")
+        text += f"{i}. {token}\n{bar} {data['score']:.1f}/20\n\n"
 
     conn.close()
+
+    await message.reply(text, parse_mode="HTML")
