@@ -1,3 +1,4 @@
+print("🚀 NEW VERSION LIVE")
 """
 TON Meme Token Scanner Bot — Single File Version
 Persistent scan history edition.
@@ -4453,6 +4454,41 @@ dp = Dispatcher()
 
 
 @dp.message(Command("start"))
+
+@dp.message(Command("trending"))
+async def trending_command(message: Message):
+    print("🔥 TRENDING TRIGGERED")
+
+    try:
+        remaining = _rate_limited("leaderboard", message.chat.id)
+        if remaining > 0:
+            await message.answer(f"⏳ Try again in {remaining:.1f}s")
+            return
+    except Exception as e:
+        print("Rate limit error:", e)
+
+    import sqlite3
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    tokens = get_trending_tokens(cursor)
+    print("TOKENS:", tokens)
+
+    if not tokens:
+        await message.answer("❌ No trending tokens yet.")
+        conn.close()
+        return
+
+    text = "🔥 <b>Trending Tokens</b>\n\n"
+
+    for i, (token, data) in enumerate(tokens, 1):
+        score = data.get("score", 0)
+        bar = build_progress_bar(score)
+        text += f"{i}. {token}\n{bar} {score:.1f}/20\n\n"
+
+    conn.close()
+    await message.answer(text, parse_mode="HTML")
+
 @dp.message(Command("help"))
 async def cmd_start(message: Message):
     parts = (message.text or "").split(maxsplit=1)
@@ -4477,6 +4513,31 @@ async def cmd_start(message: Message):
     )
 
 
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    tokens = get_trending_tokens(cursor)
+
+    if not tokens:
+        await message.answer("No trending tokens yet.")
+        conn.close()
+        return
+
+    text = "🔥 <b>Trending Tokens</b>\n\n"
+
+    for i, (token, data) in enumerate(tokens, 1):
+        score = data.get("score", 0)
+        bar = build_progress_bar(score)
+
+        text += (
+            f"{i}. {token}\n"
+            f"{bar} {score:.1f}/20\n\n"
+        )
+
+    conn.close()
+
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("testtrending"))
@@ -4614,10 +4675,7 @@ async def handle_address(message: Message):
     # Do not rate-limit ordinary group conversation or alert-target input.
     # The cooldown is applied only when the message actually looks like a scan.
     if is_valid_ton_address(text) or is_valid_ticker(text):
-        remaining = _rate_limited("scan", message.from_user.id if message.from_user else None)
-        if remaining > 0:
-            await message.answer(f"Scan cooldown — try again in {max(1, int(remaining + 0.99))}s.")
-            return
+        # scan cooldown removed
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
@@ -5467,12 +5525,7 @@ def build_progress_bar(score, max_score=20, length=10):
 
 
 # --- TRENDING COMMAND ---
-@dp.message(Command("trending"))
-async def trending_command(message: Message):
-    remaining = _rate_limited("leaderboard", message.chat.id)
-    if remaining > 0:
-        await message.reply(f"⏳ Try again in {remaining:.1f}s")
-        return
+
 
     import sqlite3
     conn = sqlite3.connect(DB_PATH)
