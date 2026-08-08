@@ -1,23 +1,22 @@
 import asyncio
-import aiohttp
-import sqlite3
 import os
-
-from aiogram import Bot, Dispatcher, types, F
+import sqlite3
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
-# --------------------------
+# -----------------------
 # ENV
-# --------------------------
+# -----------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = "database.db"
 
-# --------------------------
-# BOT INIT (FIXED)
-# --------------------------
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN is not set in environment variables")
+
+# -----------------------
+# INIT
+# -----------------------
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -25,110 +24,70 @@ bot = Bot(
 
 dp = Dispatcher()
 
-# --------------------------
-# DB
-# --------------------------
+DB_PATH = "database.db"
+
+# -----------------------
+# DATABASE
+# -----------------------
 def init_db():
+    print("📦 Initializing database...")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS scans (
             token TEXT,
             timestamp REAL
         )
     """)
-
     conn.commit()
     conn.close()
+    print("✅ Database ready")
 
-# --------------------------
-# TON FETCH (placeholder API)
-# --------------------------
-async def fetch_token_data(token: str):
-    # 🔥 Replace with your real TON API later
-    # This is clean mock so bot works perfectly
-
-    return {
-        "price": "0.0001050",
-        "liquidity": "14,663",
-        "volume": "10,169"
-    }
-
-# --------------------------
-# KEYBOARD
-# --------------------------
-def build_keyboard(token: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="🟢 Buy",
-                url=f"https://ston.fi/swap?token={token}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="📊 Chart",
-                callback_data=f"chart:{token}"
-            ),
-            InlineKeyboardButton(
-                text="🔄 Refresh",
-                callback_data=f"refresh:{token}"
-            )
-        ]
-    ])
-
-# --------------------------
-# SCAN LOGIC
-# --------------------------
-async def process_scan(message: types.Message, token: str):
-    data = await fetch_token_data(token)
-
-    text = (
-        f"💎 <b>{token.upper()} Updated</b>\n\n"
-        f"💰 Price: ${data['price']}\n"
-        f"💧 Liquidity: ${data['liquidity']}\n"
-        f"📊 Volume (24h): ${data['volume']}"
-    )
-
-    await message.answer(
-        text,
-        reply_markup=build_keyboard(token)
-    )
-
-# --------------------------
-# START
-# --------------------------
+# -----------------------
+# COMMANDS
+# -----------------------
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
     await message.answer("GRX Scanner is live 🚀")
 
-# --------------------------
-# TEXT SCAN (NO /scan NEEDED)
-# --------------------------
-@dp.message(F.text)
-async def handle_text(message: types.Message):
-    token = message.text.strip().upper()
+# -----------------------
+# SCAN HANDLER (ticker or CA)
+# -----------------------
+@dp.message()
+async def scan_handler(message: types.Message):
+    query = message.text.strip().upper()
 
-    if len(token) < 2:
-        return
+    print(f"🔍 Scan requested: {query}")
 
-    await process_scan(message, token)
+    await message.answer(f"🔍 Scanning {query} on TON...")
 
-# --------------------------
-# CALLBACKS
-# --------------------------
-@dp.callback_query(F.data.startswith("refresh:"))
-async def refresh_callback(callback: types.CallbackQuery):
-    token = callback.data.split(":")[1]
+    text = f"""
+<b>{query} scanned ✅</b>
 
-    await callback.message.answer("🔄 Refreshing...")
-    await process_scan(callback.message, token)
+💰 Price: Loading...
+💧 Liquidity: Loading...
+📊 Volume: Loading...
+👥 Holders: Loading...
+"""
 
-    await callback.answer()
+    buttons = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🟢 Buy", url="https://ston.fi")],
+        [
+            types.InlineKeyboardButton(text="📊 Chart", callback_data="chart"),
+            types.InlineKeyboardButton(text="🔄 Refresh", callback_data="refresh")
+        ]
+    ])
 
+    await message.answer(text, reply_markup=buttons)
 
-@dp.callback_query(F.data.startswith("chart:"))
-async def chart_callback(callback: types.CallbackQuery):
-    token = callback.data.split(":")[1]
+# -----------------------
+# MAIN
+# -----------------------
+async def main():
+    print("🚀 BOT STARTING...")
+    init_db()
+    print("🤖 Starting polling...")
+    await dp.start_polling(bot)
 
+if __name__ == "__main__":
+    asyncio.run(main())
