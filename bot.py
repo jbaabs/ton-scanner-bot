@@ -16,7 +16,6 @@ import struct
 import logging
 import sys
 import sqlite3
-FIRST_SCANS = {}  # (token, context_id) -> {scan_price, scan_market_cap, timestamp}
 
 import aiohttp
 from dotenv import load_dotenv
@@ -682,35 +681,10 @@ def get_scan_history(report: dict, limit: int = MAX_SCAN_HISTORY) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_first_scan(report: dict, message=None):
-
-    if message is not None:
-token_address = report.get("token_address")
-if not token_address:
-    return None
-
-token_address = token_address.lower()
-context_id = get_context_id(message) if message else "global"
-
-key = (token_address, context_id)
-
-if key not in FIRST_SCANS:
-    FIRST_SCANS[key] = {
-        "scan_price": report.get("price"),
-        "scan_market_cap": report.get("market_cap"),
-        "timestamp": time.time()
-    }
-    
-# ALWAYS return from memory first if exists
-first = FIRST_SCANS.get(key)
-if first:
-    return first
-
-    # fallback to original DB logic
+def get_first_scan(report: dict) -> dict | None:
     token_key = _history_key(report)
     if not token_key:
         return None
-
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -5428,56 +5402,3 @@ def calculate_trending_score(cursor, token):
 #
 # Keep ONLY:
 # - "already scanned" message logic (do not remove)
-
-
-
-# --- TRENDING LEADERBOARD ---
-def get_trending_tokens(cursor, limit=10):
-    import time
-    now = int(time.time())
-    cutoff = now - 86400
-
-    cursor.execute("""
-        SELECT token, user_id, chat_type
-        FROM scan_events
-        WHERE timestamp >= ?
-    """, (cutoff,))
-
-    rows = cursor.fetchall()
-
-    token_data = {}
-
-    for token, user_id, chat_type in rows:
-        if token not in token_data:
-            token_data[token] = {"score": 0.0, "seen": set()}
-
-        key = (user_id, chat_type)
-
-        if key in token_data[token]["seen"]:
-            continue
-
-        token_data[token]["seen"].add(key)
-
-        if chat_type == "private":
-            token_data[token]["score"] += 1.0
-        else:
-            token_data[token]["score"] += 0.5
-
-    return sorted(token_data.items(), key=lambda x: x[1]["score"], reverse=True)[:limit]
-
-
-# --- CLOSE TO TRENDING ALERT ---
-alerted_tokens = set()
-
-def check_close_to_trending(token, score, bot, chat_id):
-    if 15 <= score < 20 and token not in alerted_tokens:
-        alerted_tokens.add(token)
-        try:
-            bot.send_message(chat_id, f"🚨 {token} is close to trending ({score:.1f}/20)")
-        except:
-            pass
-
-
-# --- SCAN FEEDBACK MESSAGE ---
-def format_scan_feedback(token, score):
-    return f"🔥 {token} — {score:.1f} / 20 to trend"
