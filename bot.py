@@ -5455,3 +5455,34 @@ def check_close_to_trending(token, score, bot, chat_id):
 # --- SCAN FEEDBACK MESSAGE ---
 def format_scan_feedback(token, score):
     return f"🔥 {token} — {score:.1f} / 20 to trend"
+
+
+
+# --- PROGRESS BAR ---
+def build_progress_bar(score, max_score=20, length=10):
+    filled = int((score / max_score) * length)
+    empty = length - filled
+    return "▰" * filled + "▱" * empty
+
+
+# --- TRENDING COMMAND ---
+@dp.message(Command("trending"))
+async def trending_command(message: Message):
+    remaining = _rate_limited("leaderboard", message.chat.id)
+    if remaining > 0:
+        await message.reply(f"⏳ Try again in {remaining:.1f}s")
+        return
+
+    tokens = get_trending_tokens(cursor)
+
+    if not tokens:
+        await message.reply("No trending tokens yet.")
+        return
+
+    text = "🔥 <b>Trending Tokens</b>\n\n"
+
+    for i, (token, data) in enumerate(tokens, 1):
+        bar = build_progress_bar(data['score'])
+        text += f"{i}. {token}\n{bar} {data['score']:.1f}/20\n\n"
+
+    await message.reply(text, parse_mode="HTML")
