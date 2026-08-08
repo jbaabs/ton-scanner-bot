@@ -1,8 +1,8 @@
 import asyncio
 import os
 import sqlite3
+import time
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
@@ -12,7 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is not set in environment variables")
+    raise ValueError("❌ BOT_TOKEN not set")
 
 # -----------------------
 # INIT
@@ -23,14 +23,13 @@ bot = Bot(
 )
 
 dp = Dispatcher()
-
 DB_PATH = "database.db"
 
 # -----------------------
 # DATABASE
 # -----------------------
 def init_db():
-    print("📦 Initializing database...")
+    print("📦 Initializing DB...")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -41,44 +40,95 @@ def init_db():
     """)
     conn.commit()
     conn.close()
-    print("✅ Database ready")
+    print("✅ DB Ready")
 
 # -----------------------
-# COMMANDS
+# MOCK TON DATA (NEXT STEP = REAL API)
 # -----------------------
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    await message.answer("GRX Scanner is live 🚀")
+def get_token_data(token: str):
+    # Placeholder for TON APIs (STON / DeDust)
+    return {
+        "price": "$0.0001050",
+        "liquidity": "$14,663",
+        "volume": "$10,169",
+        "holders": "1,234",
+        "buy_url": "https://ston.fi",
+        "chart_url": "https://dexscreener.com/ton"
+    }
 
 # -----------------------
-# SCAN HANDLER (ticker or CA)
+# BUILD MESSAGE
 # -----------------------
-@dp.message()
-async def scan_handler(message: types.Message):
-    query = message.text.strip().upper()
+def build_message(token, data):
+    return f"""
+<b>{token} scanned ✅</b>
 
-    print(f"🔍 Scan requested: {query}")
-
-    await message.answer(f"🔍 Scanning {query} on TON...")
-
-    text = f"""
-<b>{query} scanned ✅</b>
-
-💰 Price: Loading...
-💧 Liquidity: Loading...
-📊 Volume: Loading...
-👥 Holders: Loading...
+💰 Price: {data['price']}
+💧 Liquidity: {data['liquidity']}
+📊 Volume: {data['volume']}
+👥 Holders: {data['holders']}
 """
 
-    buttons = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🟢 Buy", url="https://ston.fi")],
+def build_buttons(token, data):
+    return types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🟢 Buy", url=data["buy_url"])],
         [
-            types.InlineKeyboardButton(text="📊 Chart", callback_data="chart"),
-            types.InlineKeyboardButton(text="🔄 Refresh", callback_data="refresh")
+            types.InlineKeyboardButton(text="📊 Chart", url=data["chart_url"]),
+            types.InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh_{token}")
         ]
     ])
 
-    await message.answer(text, reply_markup=buttons)
+# -----------------------
+# SCAN HANDLER (NO COMMANDS)
+# -----------------------
+@dp.message()
+async def scan_handler(message: types.Message):
+    text = message.text.strip()
+
+    # Ignore commands like /start
+    if text.startswith("/"):
+        return
+
+    token = text.upper()
+
+    print(f"🔍 Scan: {token}")
+
+    loading_msg = await message.answer(f"🔍 Scanning {token} on TON...")
+
+    data = get_token_data(token)
+
+    result = build_message(token, data)
+    buttons = build_buttons(token, data)
+
+    await loading_msg.edit_text(result, reply_markup=buttons)
+
+# -----------------------
+# REFRESH BUTTON
+# -----------------------
+@dp.callback_query()
+async def refresh_handler(callback: types.CallbackQuery):
+    if not callback.data.startswith("refresh_"):
+        return
+
+    token = callback.data.split("_")[1]
+
+    print(f"🔄 Refresh: {token}")
+
+    data = get_token_data(token)
+
+    result = build_message(token, data)
+    buttons = build_buttons(token, data)
+
+    await callback.message.edit_text(result, reply_markup=buttons)
+    await callback.answer("Updated ✅")
+
+# -----------------------
+# START
+# -----------------------
+@dp.message()
+async def start_filter(message: types.Message):
+    if message.text == "/start":
+        await message.answer("GRX Scanner is live 🚀")
 
 # -----------------------
 # MAIN
@@ -86,7 +136,7 @@ async def scan_handler(message: types.Message):
 async def main():
     print("🚀 BOT STARTING...")
     init_db()
-    print("🤖 Starting polling...")
+    print("🤖 Polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
