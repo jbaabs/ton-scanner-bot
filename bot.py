@@ -2598,14 +2598,14 @@ if price is not None:
     draw_grid(right_stats, half_right_x)
 
     # Subtle footer branding
-            fig.text(
-        .5, .085, "POWERED BY GRX",
-        color=(1.0, 1.0, 1.0, 0.38),
-        fontsize=18.0,
-        fontweight="bold",
-        ha="center",
-        va="center",
-    )
+fig.text(
+    .5, .085, "POWERED BY GRX",
+    color=(1.0, 1.0, 1.0, 0.38),
+    fontsize=18.0,
+    fontweight="bold",
+    ha="center",
+    va="center",
+)
 
     # Save chart to buffer
     buf = BytesIO()
