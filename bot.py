@@ -4658,8 +4658,7 @@ async def handle_address(message: Message):
 
     # Do not rate-limit ordinary group conversation or alert-target input.
     # The cooldown is applied only when the message actually looks like a scan
-     is_valid_ton_address(text) or is_valid_ticker(text) 
-
+     
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12), connector=aiohttp.TCPConnector(limit=30, ttl_dns_cache=300)) as session:
             if is_valid_ton_address(text):
