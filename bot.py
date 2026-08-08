@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-BOT_TOKEN = "8835642161:AAEUHIEkcsfV2dnZ9Ajv3xdCanfRQCU1un4"
+BOT_TOKEN = "YOUR_TOKEN_HERE"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,14 +22,23 @@ bot = Bot(
 dp = Dispatcher()
 
 # =========================
-# FETCH TOKEN DATA
+# SAFE FETCH TOKEN DATA (FIXED)
 # =========================
 
-async def fetch_token_data(symbol: str):
-    url = f"https://api.geckoterminal.com/api/v2/search?query={symbol}"
+async def fetch_token_data(query: str):
+    url = f"https://api.geckoterminal.com/api/v2/search?query={query}"
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
+
+            # ✅ FIX: handle bad responses
+            if resp.status != 200:
+                return None
+
+            content_type = resp.headers.get("Content-Type", "")
+            if "application/json" not in content_type:
+                return None
+
             data = await resp.json()
 
     try:
@@ -45,6 +54,7 @@ async def fetch_token_data(symbol: str):
     except:
         return None
 
+
 # =========================
 # FETCH OHLC (CHART DATA)
 # =========================
@@ -54,6 +64,8 @@ async def fetch_ohlc(address, timeframe="5m"):
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
             data = await resp.json()
 
     ohlc = data.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
@@ -64,6 +76,7 @@ async def fetch_ohlc(address, timeframe="5m"):
     df["ts"] = pd.to_datetime(df["ts"], unit="s")
 
     return df
+
 
 # =========================
 # GENERATE CHART IMAGE
@@ -89,6 +102,7 @@ def generate_chart(df, scan_price=None):
     buf.seek(0)
     return buf
 
+
 # =========================
 # FORMAT NUMBERS
 # =========================
@@ -99,6 +113,7 @@ def fmt(n):
     if n >= 1_000:
         return f"{n/1_000:.2f}K"
     return f"{n:.6f}"
+
 
 # =========================
 # KEYBOARD
@@ -113,8 +128,9 @@ def build_keyboard(address):
         ]
     ])
 
+
 # =========================
-# AUTO SCAN (NO /SCAN)
+# AUTO SCAN
 # =========================
 
 @dp.message()
@@ -140,6 +156,7 @@ async def handle_message(message: Message):
 
     await message.answer(text, reply_markup=build_keyboard(data["address"]))
 
+
 # =========================
 # CHART BUTTON
 # =========================
@@ -158,28 +175,40 @@ async def send_chart(callback: CallbackQuery):
 
     await callback.message.answer_photo(chart, caption="📊 GRX Chart")
 
+
 # =========================
-# REFRESH BUTTON
+# REFRESH BUTTON (FIXED)
 # =========================
 
 @dp.callback_query(lambda c: c.data.startswith("refresh"))
 async def refresh(callback: CallbackQuery):
     address = callback.data.split(":")[1]
 
-    data = await fetch_token_data(address)
+    url = f"https://api.geckoterminal.com/api/v2/networks/ton/pools/{address}"
 
-    if not data:
-        await callback.message.answer("❌ Refresh failed")
-        return
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                await callback.message.answer("❌ Refresh failed")
+                return
 
-    text = (
-        f"<b>Updated 🔄</b>\n\n"
-        f"💰 Price: ${fmt(data['price'])}\n"
-        f"💧 Liquidity: ${fmt(data['liquidity'])}\n"
-        f"📊 Volume: ${fmt(data['volume'])}\n"
-    )
+            data = await resp.json()
 
-    await callback.message.answer(text)
+    try:
+        attr = data["data"]["attributes"]
+
+        text = (
+            f"<b>Updated 🔄</b>\n\n"
+            f"💰 Price: ${fmt(float(attr['price_usd']))}\n"
+            f"💧 Liquidity: ${fmt(float(attr['reserve_in_usd']))}\n"
+            f"📊 Volume: ${fmt(float(attr['volume_usd']['h24']))}\n"
+        )
+
+        await callback.message.answer(text)
+
+    except:
+        await callback.message.answer("❌ Refresh parsing failed")
+
 
 # =========================
 # RUN
