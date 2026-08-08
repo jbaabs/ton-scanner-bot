@@ -7,25 +7,22 @@ import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 
-@dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    await message.answer("Bot is working 🚀")
-    
-# ENV VARIABLES
+# ENV
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = "database.db"
 
-# DEBUG (optional)
-
-# BOT INIT (FIXED FOR AIROGRAM 3.7+)
+# BOT INIT
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
 dp = Dispatcher()
+
+# ✅ HANDLERS GO HERE
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    await message.answer("Bot is working 🚀")Dispatcher()
 
 # ----------------------------
 # DB SETUP
