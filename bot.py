@@ -11,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 # CONFIG
 # ==============================
 
-BOT_TOKEN = "PASTE_YOUR_TOKEN_HERE"
+BOT_TOKEN = "8835642161:AAEX3XjrRtlQpn_BeycLhDQLao0lIhT-f3s"
 
 logging.basicConfig(level=logging.INFO)
 
