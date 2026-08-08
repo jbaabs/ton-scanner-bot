@@ -2407,7 +2407,12 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     plt.close(fig)
     return buf.getvalue()
     
-def build_report_card(ohlcv: list, report: dict):
+def build_report_card(
+    ohlcv: list,
+    report: dict,
+    *args,
+    **kwargs
+):
     """Render GRX report card image"""
 
     import matplotlib
