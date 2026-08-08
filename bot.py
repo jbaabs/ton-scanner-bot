@@ -5273,3 +5273,66 @@ def get_recent_anchor(user_id, chat_id, token, is_private):
 # - Recent line (new, different style)
 #
 # DO NOT remove existing logic — only extend it.
+
+
+
+# --- PERFORMANCE CACHE LAYER ---
+import time
+
+chart_data_cache = {}   # token -> (timestamp, data)
+chart_image_cache = {}  # (token, timeframe) -> (timestamp, image_bytes)
+
+CACHE_TTL_DATA = 30   # seconds
+CACHE_TTL_IMAGE = 30  # seconds
+
+def get_cached_chart_data(token, fetch_func):
+    now = time.time()
+    if token in chart_data_cache:
+        ts, data = chart_data_cache[token]
+        if now - ts < CACHE_TTL_DATA:
+            return data
+
+    data = fetch_func(token)
+    chart_data_cache[token] = (now, data)
+    return data
+
+
+def get_cached_chart_image(token, timeframe, render_func):
+    now = time.time()
+    key = (token, timeframe)
+
+    if key in chart_image_cache:
+        ts, img = chart_image_cache[key]
+        if now - ts < CACHE_TTL_IMAGE:
+            return img
+
+    img = render_func(token, timeframe)
+    chart_image_cache[key] = (now, img)
+    return img
+
+
+# --- OPTIONAL PREFETCH (CALL AFTER SCAN) ---
+def prefetch_chart(token, fetch_func):
+    try:
+        get_cached_chart_data(token, fetch_func)
+    except:
+        pass
+
+
+
+
+# --- FORCE LIVE REFRESH HELPERS ---
+def get_live_chart_data(token, fetch_func):
+    data = fetch_func(token)
+    chart_data_cache[token] = (time.time(), data)
+    return data
+
+def get_live_chart_image(token, timeframe, render_func):
+    img = render_func(token, timeframe)
+    chart_image_cache[(token, timeframe)] = (time.time(), img)
+    return img
+
+# USAGE:
+# On refresh button:
+# data = get_live_chart_data(token, fetch_chart)
+# img = get_live_chart_image(token, timeframe, render_chart)
