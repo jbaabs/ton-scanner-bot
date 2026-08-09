@@ -1203,11 +1203,21 @@ def _get_trending_score(report: dict) -> dict:
             private_count += 1
             score += 1.0
 
+    # Five checkpoints instead of a single pass/fail threshold: 20/40/60/80/100.
+    # tier 0 = below Trending, tier 5 = TOP BLAST IT BOZO. Checked high-to-low
+    # so a score of, say, 83 lands on tier 4, not tier 1.
+    tier = 0
+    for checkpoint in (100.0, 80.0, 60.0, 40.0, 20.0):
+        if score >= checkpoint:
+            tier = int(checkpoint // 20)
+            break
+
     return {
         "score": score,
         "private": private_count,
         "group": group_count,
-        "triggered": score >= 20.0,
+        "tier": tier,
+        "triggered": tier >= 1,
     }
 
 
@@ -4772,15 +4782,23 @@ async def cmd_score(message: Message):
 
         snap = _get_trending_score(report)
         symbol = str((report.get("jetton_info") or {}).get("symbol") or query).upper()
-        score_pct = min(100.0, (snap["score"] / 20.0) * 100.0)
-        bar = _progress_bar(score_pct, size=16)
+
+        # Bar spans 0-100 now (5 checkpoints of 20 each) instead of the old 0-20
+        # single-threshold scale. Score itself is uncapped upstream, so clamp
+        # only for the bar fill — the raw number below still shows the true value.
+        pct = max(0.0, min(100.0, snap["score"]))
+        bar = _progress_bar(pct, size=20)
+        tier = snap["tier"]
+        tier_names = {0: "Not trending yet", 1: "Trending", 2: "Tier 2", 3: "Tier 3", 4: "Tier 4", 5: "TOP BLAST IT BOZO"}
 
         await message.answer(
             f"<b>${html.escape(symbol)} Trending score</b>\n\n"
-            f"<code>{html.escape(bar)}</code>  <b>{score_pct:.0f}%</b>\n\n"
-            f"Score: <b>{snap['score']:.1f}/20</b>\n"
+            f"<b>Trending</b> ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ <b>TOP BLAST IT BOZO</b>\n"
+            f"<code>{html.escape(bar)}</code>  <b>{pct:.0f}%</b>\n\n"
+            f"Score: <b>{snap['score']:.1f}/100</b>\n"
             f"Private: <b>{snap['private'] * 1.0:.1f}</b>\n"
-            f"Group: <b>{snap['group'] * 0.5:.1f}</b>"
+            f"Group: <b>{snap['group'] * 0.5:.1f}</b>\n"
+            f"Tier: <b>{tier}/5</b> — {html.escape(tier_names[tier])}"
             + ("\n\n🔥 TRENDING THRESHOLD REACHED" if snap['triggered'] else "")
         )
     except Exception as exc:
