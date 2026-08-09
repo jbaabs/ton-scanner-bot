@@ -331,6 +331,27 @@ def init_db():
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS viewer_first_scan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_key TEXT NOT NULL,
+            token_key TEXT NOT NULL,
+            token_address TEXT,
+            token_symbol TEXT,
+            scanner_id INTEGER,
+            scanner_name TEXT,
+            scan_price TEXT,
+            scan_market_cap TEXT,
+            scan_holders INTEGER,
+            scan_ts INTEGER NOT NULL,
+            UNIQUE(scope_key, token_key)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_viewer_first_scan_scope_token ON viewer_first_scan(scope_key, token_key)"
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS token_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             token_key TEXT NOT NULL,
@@ -775,6 +796,100 @@ def get_first_scan_resolved(report: dict) -> dict | None:
         )
 
     return first_scan
+
+
+def _viewer_scope_key(chat_id, chat_type: str | None) -> str:
+    """Identity used for the personal, permanent first-scan anchor.
+
+    Telegram private chats have chat.id == the user's own id, so "user:" and
+    "chat:" prefixes below are just for readability — the private-chat case
+    could equally use chat_id directly. A group's scope is the whole chat:
+    whoever in that group scans a token first sets the anchor for everyone
+    in that group, and it's shared by all members from then on.
+    """
+    if str(chat_type or "") == "private":
+        return f"user:{chat_id}"
+    return f"chat:{chat_id}"
+
+
+def get_viewer_first_scan(scope_key: str, report: dict, scanner_meta: dict | None = None) -> dict | None:
+    """Permanent per-DM/per-group first-scan anchor.
+
+    Inserted exactly once via INSERT OR IGNORE on (scope_key, token_key), so
+    it can never be overwritten by a later scan in the same DM/group — the
+    first scanner's price/market cap/holders stay the reference forever,
+    surviving bot restarts (unlike the old in-memory anchors). Self-heals
+    price/market cap that were N/A at save time (very new, not-yet-indexed
+    tokens), same as get_first_scan_resolved does for the global first scan.
+    """
+    token_key = _history_key(report)
+    address = str(report.get("address") or "").strip()
+    if not token_key or not address or not scope_key:
+        return None
+
+    dex = report.get("dex_data") or {}
+    info = report.get("jetton_info") or {}
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO viewer_first_scan
+            (scope_key, token_key, token_address, token_symbol, scanner_id, scanner_name,
+             scan_price, scan_market_cap, scan_holders, scan_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope_key, token_key, address,
+                str(info.get("symbol") or "TOKEN"),
+                (scanner_meta or {}).get("scanner_id"),
+                (scanner_meta or {}).get("scanner_name"),
+                _fmt_price(dex.get("price_usd")),
+                _fmt_usd(dex.get("market_cap")),
+                int(info.get("holders_count") or 0) or None,
+                int(time.time()),
+            ),
+        )
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT id, scanner_id, scanner_name, scan_price, scan_market_cap, scan_holders, scan_ts
+               FROM viewer_first_scan WHERE scope_key=? AND token_key=?""",
+            (scope_key, token_key),
+        ).fetchone()
+
+    if not row:
+        return None
+    anchor = dict(row)
+
+    price_missing = _is_missing_value(anchor.get("scan_price"))
+    mc_missing = _is_missing_value(anchor.get("scan_market_cap"))
+    if price_missing or mc_missing:
+        fresh_price = _fmt_price(dex.get("price_usd"))
+        fresh_mc = _fmt_usd(dex.get("market_cap"))
+        updated = False
+        if price_missing and not _is_missing_value(fresh_price):
+            anchor["scan_price"] = fresh_price
+            updated = True
+        if mc_missing and not _is_missing_value(fresh_mc):
+            anchor["scan_market_cap"] = fresh_mc
+            updated = True
+        if updated:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE viewer_first_scan SET scan_price=?, scan_market_cap=? WHERE id=?",
+                    (anchor.get("scan_price"), anchor.get("scan_market_cap"), anchor["id"]),
+                )
+
+    if _is_missing_value(anchor.get("scan_holders")) or not anchor.get("scan_holders"):
+        holders_now = int(info.get("holders_count") or 0)
+        if holders_now:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    "UPDATE viewer_first_scan SET scan_holders=? WHERE id=? AND scan_holders IS NULL",
+                    (holders_now, anchor["id"]),
+                )
+            anchor.setdefault("scan_holders", holders_now)
+
+    return anchor
 
 
 
@@ -1613,7 +1728,7 @@ def format_grx_stats(report: dict) -> str:
     volume_24h = _as_float(dex.get("volume_24h")) or 0.0
     momentum_1h = _as_float(dex.get("price_change_1h"))
 
-    first = get_first_scan_resolved(report)
+    first = report.get("_viewer_first_scan")
     first_mc_text = str((first or {}).get("scan_market_cap") or "N/A")
     first_holders = resolve_first_scan_holders(report, first)
     current_holders = int(info.get("holders_count") or 0)
@@ -2473,7 +2588,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
 
     # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan price.
-    first_scan_for_line = get_first_scan_resolved(report) or {}
+    first_scan_for_line = report.get("_viewer_first_scan") or {}
     scan_price_for_line = first_scan_for_line.get("scan_price") or dex.get("price_usd")
     try:
         raw_scan_price = str(scan_price_for_line).replace("$", "").replace(",", "").strip()
@@ -2524,10 +2639,10 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     fig.text(.045,.535,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
     for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
         y=.507-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.535,"FIRST CALLED BY",color=muted,fontsize=8,fontweight="bold")
-    first=get_first_scan_resolved(report)
+    fig.text(.53,.535,"YOUR FIRST SCAN",color=muted,fontsize=8,fontweight="bold")
+    first=report.get("_viewer_first_scan")
     if first:
-        caller=str(first.get("scanner_name") or DEFAULT_SCANNER_LABEL); then_txt=str(first.get("scan_market_cap") or "N/A")
+        then_txt=str(first.get("scan_market_cap") or "N/A")
         def usdnum(t):
             t=str(t or "").replace("$","").replace(",","").strip().upper(); m=1
             if t.endswith("K"):m,t=1000,t[:-1]
@@ -2535,10 +2650,9 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             try:return float(t)*m
             except:return None
         now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
-        fig.text(.53,.507,caller,color=text,fontsize=9.5,fontweight="bold")
         fig.text(.53,.480,"THEN",color=muted,fontsize=7.5); fig.text(.72,.480,then_txt,color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.75,.480,"NOW",color=muted,fontsize=7.5); fig.text(.955,.480,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
-        fig.text(.53,.455,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.455,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.53,.455,"NOW",color=muted,fontsize=7.5); fig.text(.72,.455,_fmt_usd(now),color=text,fontsize=9.5,fontweight="bold",ha="right")
+        fig.text(.75,.507,"PERFORMANCE",color=muted,fontsize=7.5); fig.text(.955,.507,_fmt_pct(perf) if perf is not None else "N/A",color=pc(perf),fontsize=9.5,fontweight="bold",ha="right")
     else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
 
     # Compact 3 x 2 stat grid on each side. The centre split remains aligned
@@ -4713,14 +4827,21 @@ async def handle_address(message: Message):
             record_scan_event(message, report, scanner_meta)
             save_token_snapshot(report)
 
-            # Personal ENTRY/RECENT price anchors: capture the viewer's own last
-            # scan price *before* overwriting it with the current price, so the
-            # chart can show "your last scan" as a distinct line from GRX's
-            # global first-scan price (which is already tracked separately via
-            # get_first_scan_resolved/scan_history).
+            # Permanent per-DM/per-group first-scan anchor. This IS the GRX SCAN
+            # line and the dashboard's "since first scan" stats — set once per
+            # (this chat, this token) and never overwritten again, even across
+            # bot restarts. Replaces the old global/bot-wide first-scan system.
+            chat_type = str(getattr(message.chat, "type", "") or "")
+            scope_key = _viewer_scope_key(message.chat.id, chat_type)
+            report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, report, scanner_meta)
+
+            # Personal RECENT price anchor: capture the viewer's own last scan
+            # price *before* overwriting it with the current price, so the chart
+            # can additionally show "your last scan" as a distinct, more volatile
+            # line alongside the permanent first-scan anchor above.
             current_price = _as_float((report.get("dex_data") or {}).get("price_usd"))
             if message.from_user and current_price:
-                is_private_chat = str(getattr(message.chat, "type", "") or "") == "private"
+                is_private_chat = chat_type == "private"
                 prior_recent = get_recent_anchor(
                     message.from_user.id, message.chat.id, report.get("address"), is_private_chat
                 )
@@ -4862,6 +4983,15 @@ async def handle_toggle(callback: CallbackQuery):
                     entry["has_image"] = bool(_safe_image_url(fresh_report))
                     entry["ts"] = time.time()
 
+                    # Re-attach this chat's permanent first-scan anchor onto the
+                    # new report dict — fast_refresh_report returns a fresh dict,
+                    # so the previous stash doesn't carry over automatically.
+                    # Idempotent: this chat's row already exists after the first
+                    # scan, so this is just a read (plus a cheap self-heal check).
+                    chat_type = str(getattr(callback.message.chat, "type", "") or "")
+                    scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
+                    fresh_report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, fresh_report, scanner_meta)
+
                     text_out = (
                         format_grx_stats(fresh_report)
                         if entry.get("show_stats")
@@ -4986,6 +5116,15 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
             await callback.answer("Couldn't recover this scan right now. Please try again.", show_alert=True)
             return
 
+    # This chat's permanent first-scan anchor. Idempotent to recompute here —
+    # covers both the normal path and the cache-recovery path above, which
+    # rebuilds the report from address only and has no anchor stashed on it.
+    chat_type = str(getattr(callback.message.chat, "type", "") or "")
+    scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
+    entry["report"]["_viewer_first_scan"] = get_viewer_first_scan(
+        scope_key, entry["report"], entry.get("scanner_meta")
+    )
+
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
 
@@ -5017,7 +5156,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price")
+        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price")
         or (entry.get("scanner_meta") or {}).get("scan_price")
         or (entry["report"].get("dex_data") or {}).get("price_usd"),
     )
@@ -5171,6 +5310,13 @@ async def handle_timeframe(callback: CallbackQuery):
     entry["ts"] = time.time()
     entry["chart_tf"] = timeframe
 
+    # This chat's permanent first-scan anchor (see _send_chart for details).
+    chat_type = str(getattr(callback.message.chat, "type", "") or "")
+    scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
+    entry["report"]["_viewer_first_scan"] = get_viewer_first_scan(
+        scope_key, entry["report"], entry.get("scanner_meta")
+    )
+
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
 
@@ -5202,7 +5348,7 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (get_first_scan_resolved(entry["report"]) or {}).get("scan_price")
+        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price")
         or (entry.get("scanner_meta") or {}).get("scan_price")
         or (entry["report"].get("dex_data") or {}).get("price_usd"),
     )
