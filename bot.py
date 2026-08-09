@@ -306,6 +306,16 @@ TICKER_RE = re.compile(r"^\$?[A-Za-z0-9]{2,15}$")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # WAL mode is a one-time, persistent change to the database file itself
+    # (not just this connection) — it lets readers run concurrently with a
+    # writer instead of the whole DB locking on every write, which is the
+    # single biggest cause of the bot stalling for everyone whenever one
+    # scan is mid-write. Also bumps SQLite's default WAL synchronous level
+    # and gives concurrent writers a grace period instead of an immediate
+    # "database is locked" error.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scan_history (
@@ -557,7 +567,11 @@ async def alert_watcher():
                         report = await scan_token(session, address)
                         _token_state_put(address, report)
                         _register_report_live_pool(report)
-                        save_token_snapshot(report)
+                        # This loop shares the event loop with every live user
+                        # interaction — a blocking DB write per watched token
+                        # here would stall everyone's bot activity for the
+                        # duration of the whole background sweep.
+                        await asyncio.to_thread(save_token_snapshot, report)
                     except Exception:
                         logger.exception("Background GRX snapshot failed for %s", address)
                         continue
@@ -1847,6 +1861,33 @@ def _cache_report(report: dict, scanner_meta: dict | None = None) -> str:
         "ts": time.time(),
     }
     return key
+
+
+def _persist_new_scan_sync(message, report, scanner_meta, chat_type, scope_key, current_price):
+    """Runs every blocking DB write/read for a brand-new scan inside a single
+    background thread (via asyncio.to_thread at the call site) instead of on
+    the event loop directly. None of the functions below changed at all —
+    this just orchestrates them off-thread so one user's scan can no longer
+    freeze every other user's bot interaction while SQLite is writing to disk.
+    """
+    save_leaderboard_call(message, report, scanner_meta)
+    record_scan_event(message, report, scanner_meta)
+    save_token_snapshot(report)
+    report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, report, scanner_meta)
+
+    prior_recent = None
+    if message.from_user and current_price:
+        is_private_chat = chat_type == "private"
+        prior_recent = get_recent_anchor(
+            message.from_user.id, message.chat.id, report.get("address"), is_private_chat
+        )
+        set_scan_anchor(
+            message.from_user.id, message.chat.id, report.get("address"),
+            current_price, is_private_chat,
+        )
+
+    key = _cache_report(report, scanner_meta=scanner_meta)
+    return key, prior_recent
 
 
 def _prune_report_cache():
@@ -4403,7 +4444,7 @@ async def _render_report_message(target_message: Message, key: str):
         return
 
     report = entry["report"]
-    entry["scan_history"] = get_scan_history(report)
+    entry["scan_history"] = await asyncio.to_thread(get_scan_history, report)
 
     text = (
         format_grx_stats(report)
@@ -4839,9 +4880,6 @@ async def handle_address(message: Message):
                 return
 
             scanner_meta = _build_scanner_meta(message, report)
-            save_leaderboard_call(message, report, scanner_meta)
-            record_scan_event(message, report, scanner_meta)
-            save_token_snapshot(report)
 
             # Permanent per-DM/per-group first-scan anchor. This IS the GRX SCAN
             # line and the dashboard's "since first scan" stats — set once per
@@ -4849,27 +4887,27 @@ async def handle_address(message: Message):
             # bot restarts. Replaces the old global/bot-wide first-scan system.
             chat_type = str(getattr(message.chat, "type", "") or "")
             scope_key = _viewer_scope_key(message.chat.id, chat_type)
-            report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, report, scanner_meta)
 
             # Personal RECENT price anchor: capture the viewer's own last scan
             # price *before* overwriting it with the current price, so the chart
             # can additionally show "your last scan" as a distinct, more volatile
             # line alongside the permanent first-scan anchor above.
             current_price = _as_float((report.get("dex_data") or {}).get("price_usd"))
-            if message.from_user and current_price:
-                is_private_chat = chat_type == "private"
-                prior_recent = get_recent_anchor(
-                    message.from_user.id, message.chat.id, report.get("address"), is_private_chat
-                )
-                set_scan_anchor(
-                    message.from_user.id, message.chat.id, report.get("address"),
-                    current_price, is_private_chat,
-                )
-                if prior_recent and abs(prior_recent - current_price) > (current_price * 0.0005):
-                    report["_viewer_recent_price"] = prior_recent
 
-            key = _cache_report(report, scanner_meta=scanner_meta)
-            history = get_scan_history(report)
+            # All the blocking SQLite work above runs in one background thread
+            # (see _persist_new_scan_sync) instead of directly on the event
+            # loop, so it can no longer stall every other user's request while
+            # this scan's writes are hitting disk.
+            key, prior_recent = await asyncio.to_thread(
+                _persist_new_scan_sync, message, report, scanner_meta, chat_type, scope_key, current_price
+            )
+            if prior_recent and current_price and abs(prior_recent - current_price) > (current_price * 0.0005):
+                report["_viewer_recent_price"] = prior_recent
+
+            # _cache_report already ran get_scan_history internally and stashed
+            # the result in REPORT_CACHE — reuse it instead of re-querying the
+            # same rows from SQLite a second time.
+            history = REPORT_CACHE.get(key, {}).get("scan_history") or []
 
             result = format_token_report(
                 report,
@@ -5006,7 +5044,9 @@ async def handle_toggle(callback: CallbackQuery):
                     # scan, so this is just a read (plus a cheap self-heal check).
                     chat_type = str(getattr(callback.message.chat, "type", "") or "")
                     scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
-                    fresh_report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, fresh_report, scanner_meta)
+                    fresh_report["_viewer_first_scan"] = await asyncio.to_thread(
+                        get_viewer_first_scan, scope_key, fresh_report, scanner_meta
+                    )
 
                     text_out = (
                         format_grx_stats(fresh_report)
@@ -5072,7 +5112,7 @@ async def handle_toggle(callback: CallbackQuery):
 
     if section == "back":
         entry["show_stats"] = False
-        entry["scan_history"] = get_scan_history(entry["report"])
+        entry["scan_history"] = await asyncio.to_thread(get_scan_history, entry["report"])
         text = format_token_report(
             entry["report"],
             show_info=False,
@@ -5115,7 +5155,7 @@ async def handle_toggle(callback: CallbackQuery):
             entry["show_holders"] = False
             # Capture a local baseline whenever Signals is viewed. This improves
             # future 10m holder/liquidity/price deltas for tokens that are not watched.
-            save_token_snapshot(entry["report"])
+            asyncio.create_task(asyncio.to_thread(save_token_snapshot, entry["report"]))
     elif section == "holders":
         entry["show_stats"] = False
         entry["show_holders"] = not entry["show_holders"]
@@ -5137,8 +5177,8 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     # rebuilds the report from address only and has no anchor stashed on it.
     chat_type = str(getattr(callback.message.chat, "type", "") or "")
     scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
-    entry["report"]["_viewer_first_scan"] = get_viewer_first_scan(
-        scope_key, entry["report"], entry.get("scanner_meta")
+    entry["report"]["_viewer_first_scan"] = await asyncio.to_thread(
+        get_viewer_first_scan, scope_key, entry["report"], entry.get("scanner_meta")
     )
 
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
@@ -5332,8 +5372,8 @@ async def handle_timeframe(callback: CallbackQuery):
     # This chat's permanent first-scan anchor (see _send_chart for details).
     chat_type = str(getattr(callback.message.chat, "type", "") or "")
     scope_key = _viewer_scope_key(callback.message.chat.id, chat_type)
-    entry["report"]["_viewer_first_scan"] = get_viewer_first_scan(
-        scope_key, entry["report"], entry.get("scanner_meta")
+    entry["report"]["_viewer_first_scan"] = await asyncio.to_thread(
+        get_viewer_first_scan, scope_key, entry["report"], entry.get("scanner_meta")
     )
 
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
