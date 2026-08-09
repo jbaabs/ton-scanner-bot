@@ -2486,6 +2486,23 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     except Exception:
         logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
 
+    # Personal RECENT marker: horizontal line at the price when this specific
+    # viewer last scanned this token (per-user/per-group in-memory anchor).
+    # Only set when it's meaningfully different from the GRX SCAN line above,
+    # to avoid drawing two overlapping lines for a viewer's very first scan.
+    recent_price_for_line = report.get("_viewer_recent_price")
+    if recent_price_for_line:
+        try:
+            recent_price_f = float(recent_price_for_line)
+            if recent_price_f > 0:
+                recent_purple = "#B366FF"
+                ax.axhline(recent_price_f, color=recent_purple, linewidth=1.6, alpha=0.9,
+                           linestyle="--", zorder=29)
+                ax.text(-.65, recent_price_f, "YOUR LAST SCAN", ha="left", va="top",
+                        color=recent_purple, fontsize=8.0, fontweight="bold", zorder=31, clip_on=False)
+        except Exception:
+            logger.exception("Could not draw horizontal viewer RECENT chart marker")
+
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
@@ -4692,6 +4709,25 @@ async def handle_address(message: Message):
             save_leaderboard_call(message, report, scanner_meta)
             record_scan_event(message, report, scanner_meta)
             save_token_snapshot(report)
+
+            # Personal ENTRY/RECENT price anchors: capture the viewer's own last
+            # scan price *before* overwriting it with the current price, so the
+            # chart can show "your last scan" as a distinct line from GRX's
+            # global first-scan price (which is already tracked separately via
+            # get_first_scan_resolved/scan_history).
+            current_price = _as_float((report.get("dex_data") or {}).get("price_usd"))
+            if message.from_user and current_price:
+                is_private_chat = str(getattr(message.chat, "type", "") or "") == "private"
+                prior_recent = get_recent_anchor(
+                    message.from_user.id, message.chat.id, report.get("address"), is_private_chat
+                )
+                set_scan_anchor(
+                    message.from_user.id, message.chat.id, report.get("address"),
+                    current_price, is_private_chat,
+                )
+                if prior_recent and abs(prior_recent - current_price) > (current_price * 0.0005):
+                    report["_viewer_recent_price"] = prior_recent
+
             key = _cache_report(report, scanner_meta=scanner_meta)
             history = get_scan_history(report)
 
@@ -4840,6 +4876,8 @@ async def handle_toggle(callback: CallbackQuery):
                         has_chart=bool((fresh_report.get("dex_data") or {}).get("pair_address")),
                         show_stats=entry.get("show_stats", False),
                     )
+                    # Confirms to the viewer that the Refresh tap actually pulled new data.
+                    text_out = append_updated_time(text_out)
 
                     # Force only the live 1m dashboard candles fresh; other timeframes remain cached.
                     dex_now = fresh_report.get("dex_data") or {}
@@ -5208,39 +5246,11 @@ if __name__ == "__main__":
 
 
 
-# --- SCAN ANCHORS (USER / GROUP) ---
-user_scan_anchor = {}   # (user_id, token) -> price
-group_scan_anchor = {}  # (chat_id, token) -> price
-
-def set_scan_anchor(user_id, chat_id, token, price, is_private):
-    key_user = (int(user_id), str(token))
-    key_group = (int(chat_id), str(token))
-
-    if is_private:
-        if key_user not in user_scan_anchor:
-            user_scan_anchor[key_user] = float(price)
-    else:
-        if key_group not in group_scan_anchor:
-            group_scan_anchor[key_group] = float(price)
-
-def get_scan_anchor(user_id, chat_id, token, is_private):
-    if is_private:
-        return user_scan_anchor.get((int(user_id), str(token)))
-    return group_scan_anchor.get((int(chat_id), str(token)))
-
-# NOTE:
-# You must call set_scan_anchor(...) at the moment a scan happens,
-# passing current price and context.
-# And in your chart renderer, replace:
-#   scan_price = original_price
-# with:
-#   scan_price = get_scan_anchor(user_id, chat_id, token, is_private) or original_price
-
-
-
-# --- ENTRY vs RECENT ANCHORS ---
-user_recent_anchor = {}   # (user_id, token) -> price
-group_recent_anchor = {}  # (chat_id, token) -> price
+# --- SCAN ANCHORS (USER / GROUP, ENTRY vs RECENT) ---
+user_scan_anchor = {}     # (user_id, token) -> price   [entry / first-ever]
+group_scan_anchor = {}    # (chat_id, token) -> price   [entry / first-ever]
+user_recent_anchor = {}   # (user_id, token) -> price   [most recent scan]
+group_recent_anchor = {}  # (chat_id, token) -> price   [most recent scan]
 
 def set_scan_anchor(user_id, chat_id, token, price, is_private):
     key_user = (int(user_id), str(token))
@@ -5256,6 +5266,11 @@ def set_scan_anchor(user_id, chat_id, token, price, is_private):
         if key_group not in group_scan_anchor:
             group_scan_anchor[key_group] = float(price)
         group_recent_anchor[key_group] = float(price)
+
+def get_scan_anchor(user_id, chat_id, token, is_private):
+    if is_private:
+        return user_scan_anchor.get((int(user_id), str(token)))
+    return group_scan_anchor.get((int(chat_id), str(token)))
 
 def get_recent_anchor(user_id, chat_id, token, is_private):
     if is_private:
@@ -5276,67 +5291,14 @@ def get_recent_anchor(user_id, chat_id, token, is_private):
 
 
 
-# --- PERFORMANCE CACHE LAYER ---
-import time
-
-chart_data_cache = {}   # token -> (timestamp, data)
-chart_image_cache = {}  # (token, timeframe) -> (timestamp, image_bytes)
-
-CACHE_TTL_DATA = 30   # seconds
-CACHE_TTL_IMAGE = 30  # seconds
-
-def get_cached_chart_data(token, fetch_func):
-    now = time.time()
-    if token in chart_data_cache:
-        ts, data = chart_data_cache[token]
-        if now - ts < CACHE_TTL_DATA:
-            return data
-
-    data = fetch_func(token)
-    chart_data_cache[token] = (now, data)
-    return data
-
-
-def get_cached_chart_image(token, timeframe, render_func):
-    now = time.time()
-    key = (token, timeframe)
-
-    if key in chart_image_cache:
-        ts, img = chart_image_cache[key]
-        if now - ts < CACHE_TTL_IMAGE:
-            return img
-
-    img = render_func(token, timeframe)
-    chart_image_cache[key] = (now, img)
-    return img
-
-
-# --- OPTIONAL PREFETCH (CALL AFTER SCAN) ---
-def prefetch_chart(token, fetch_func):
-    try:
-        get_cached_chart_data(token, fetch_func)
-    except:
-        pass
-
-
-
-
-# --- FORCE LIVE REFRESH HELPERS ---
-def get_live_chart_data(token, fetch_func):
-    data = fetch_func(token)
-    chart_data_cache[token] = (time.time(), data)
-    return data
-
-def get_live_chart_image(token, timeframe, render_func):
-    img = render_func(token, timeframe)
-    chart_image_cache[(token, timeframe)] = (time.time(), img)
-    return img
-
-# USAGE:
-# On refresh button:
-# data = get_live_chart_data(token, fetch_chart)
-# img = get_live_chart_image(token, timeframe, render_chart)
-
+# NOTE: a sync (token, timeframe) -> (timestamp, bytes) chart cache used to live
+# here (get_cached_chart_data/get_cached_chart_image/prefetch_chart/
+# get_live_chart_data/get_live_chart_image). It was never wired in, and it's
+# not being wired in now: it's a plain dict keyed on sync fetch_func(token)
+# calls, while the bot's real OHLCV/image pipeline (get_ohlcv, OHLCV_CACHE,
+# IMAGE_CACHE, TOKEN_STATE_CACHE — see top of file) is async and already
+# TTL-cached end to end. Bolting the sync version on top would just be a
+# second, inconsistent cache layer racing the real one. Removed.
 
 
 # --- CAPTION LIVE TIMESTAMP ---
@@ -5351,54 +5313,15 @@ def append_updated_time(caption: str) -> str:
 
 
 
-# --- ROLLING 24H TRENDING SYSTEM ---
-import time
-
-def calculate_trending_score(cursor, token):
-    now = int(time.time())
-    cutoff = now - 86400  # 24 hours
-
-    cursor.execute("""
-        SELECT user_id, chat_type, timestamp
-        FROM scan_events
-        WHERE token = ?
-        AND timestamp >= ?
-    """, (token, cutoff))
-
-    rows = cursor.fetchall()
-
-    score = 0.0
-    private_count = 0
-    group_count = 0
-
-    seen_users = set()
-
-    for user_id, chat_type, ts in rows:
-        key = (user_id, chat_type)
-
-        if key in seen_users:
-            continue
-        seen_users.add(key)
-
-        if chat_type == "private":
-            score += 1.0
-            private_count += 1
-        else:
-            score += 0.5
-            group_count += 1
-
-    return {
-        "score": score,
-        "private": private_count,
-        "group": group_count
-    }
-
-
-# --- NOTE ABOUT COOLDOWN ---
-# You can safely REMOVE scan cooldown timers.
-# Your protection is already handled by:
-# - 1 scan per user per 24h (enforced via seen_users / DB)
-# - group weight = 0.5
-#
-# Keep ONLY:
-# - "already scanned" message logic (do not remove)
+# NOTE: a standalone calculate_trending_score(cursor, token) used to live here.
+# It's not wired in: it's a weaker duplicate of the trending scorer already
+# in production at _get_trending_score() (private=1.0/group=0.5, same idea),
+# which additionally has a 30-minute trigger window, an anti-gaming cap of
+# 5 scans per source, and queries the real "token_key"/"scanner_id" columns
+# (this version used "token"/"user_id"/"timestamp", which don't exist in the
+# scan_events schema — see init_db() — so it would have raised on first call).
+# Wiring it in would run a second, incompatible scorer alongside the real one.
+# Removed. Also: the accompanying "you can remove the scan cooldown" note does
+# not apply — the 2.5s per-user scan cooldown (_rate_limited) is basic abuse
+# protection against rapid-fire API hammering, unrelated to trending scoring,
+# and should stay.
