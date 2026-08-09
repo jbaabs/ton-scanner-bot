@@ -4749,6 +4749,86 @@ async def cmd_testtrending(message: Message):
 
 
 @dp.message(Command("score"))
+def build_score_card(symbol: str, snap: dict) -> bytes:
+    """Owner-only /score card: centered title, a gradient pill loading bar
+    with just 'TOP BLAST' at the end, and Private/Group centered underneath.
+
+    Rendered as an image (not a plain Telegram message) because Telegram's
+    bot HTML has no text-centering — a real <center> effect only exists if
+    we draw it ourselves.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.colors import LinearSegmentedColormap
+    from io import BytesIO
+    import numpy as np
+
+    bg = "#050607"; text = "#ffffff"; muted = "#9aa4ad"
+    track = "#16181b"; track_edge = "#2a2d31"
+
+    score = snap["score"]
+    private = snap["private"] * 1.0
+    group = snap["group"] * 0.5
+    pct = max(0.0, min(100.0, score))
+
+    fig = plt.figure(figsize=(8, 3.3), dpi=160, facecolor=bg)
+
+    fig.text(.5, .82, f"${symbol} TRENDING SCORE", color=text, fontsize=22,
+              fontweight="bold", ha="center", va="center")
+
+    bar_x0, bar_x1 = .08, .92
+    bar_y, bar_h = .44, .14
+    bar_w = bar_x1 - bar_x0
+
+    fig.add_artist(FancyBboxPatch(
+        (bar_x0, bar_y), bar_w, bar_h,
+        transform=fig.transFigure,
+        boxstyle=f"round,pad=0,rounding_size={bar_h / 2}",
+        facecolor=track, edgecolor=track_edge, linewidth=1.1, zorder=1,
+    ))
+
+    # Tiny floor (not a fake minimum) just avoids a zero-width render at 0%;
+    # a 2% score still looks close to empty instead of misleadingly full.
+    fill_w = max(bar_w * (pct / 100.0), 0.006) if pct > 0 else 0.0
+    if fill_w > 0:
+        fill_patch = FancyBboxPatch(
+            (bar_x0, bar_y), fill_w, bar_h,
+            transform=fig.transFigure,
+            boxstyle=f"round,pad=0,rounding_size={min(bar_h / 2, fill_w / 2)}",
+            facecolor="none", edgecolor="none", zorder=2,
+        )
+        fig.add_artist(fill_patch)
+
+        cmap = LinearSegmentedColormap.from_list("grx", ["#168BFF", "#3ee6b8"])
+        grad = np.linspace(0, 1, 256).reshape(1, -1)
+        im_ax = fig.add_axes([bar_x0, bar_y, fill_w, bar_h], zorder=3)
+        im_ax.imshow(grad, aspect="auto", cmap=cmap, extent=[0, 1, 0, 1])
+        im_ax.set_clip_path(fill_patch)
+        im_ax.axis("off")
+
+        # Subtle glow under the fill for a slick, lit-up feel.
+        glow_ax = fig.add_axes([bar_x0, bar_y - .012, fill_w, bar_h], zorder=0)
+        glow_ax.imshow(grad, aspect="auto", cmap=cmap, extent=[0, 1, 0, 1], alpha=.25)
+        glow_ax.axis("off")
+
+    # Only "TOP BLAST" — no label on the start of the bar.
+    fig.text(bar_x1, bar_y + bar_h + .06, "TOP BLAST", color=muted, fontsize=10.5,
+              fontweight="bold", ha="right", va="center")
+
+    fig.text(.5, bar_y - .11, f"{pct:.0f}%", color=text, fontsize=13,
+              fontweight="bold", ha="center", va="center")
+
+    fig.text(.5, .13, f"Private: {private:.1f}      Group: {group:.1f}",
+              color=muted, fontsize=12.5, ha="center", va="center")
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", facecolor=bg)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 async def cmd_score(message: Message):
     """Owner-only live Trending score for a token."""
     if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
@@ -4783,23 +4863,18 @@ async def cmd_score(message: Message):
         snap = _get_trending_score(report)
         symbol = str((report.get("jetton_info") or {}).get("symbol") or query).upper()
 
-        # Bar spans 0-100 now (5 checkpoints of 20 each) instead of the old 0-20
-        # single-threshold scale. Score itself is uncapped upstream, so clamp
-        # only for the bar fill — the raw number below still shows the true value.
-        pct = max(0.0, min(100.0, snap["score"]))
-        bar = _progress_bar(pct, size=20)
-        tier = snap["tier"]
-        tier_names = {0: "Not trending yet", 1: "Trending", 2: "Tier 2", 3: "Tier 3", 4: "Tier 4", 5: "TOP BLAST IT BOZO"}
+        png_bytes = await _render_offloop(build_score_card, symbol, snap)
 
-        await message.answer(
-            f"<b>${html.escape(symbol)} Trending score</b>\n\n"
-            f"<b>Trending</b> ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯ <b>TOP BLAST IT BOZO</b>\n"
-            f"<code>{html.escape(bar)}</code>  <b>{pct:.0f}%</b>\n\n"
-            f"Score: <b>{snap['score']:.1f}/100</b>\n"
-            f"Private: <b>{snap['private'] * 1.0:.1f}</b>\n"
-            f"Group: <b>{snap['group'] * 0.5:.1f}</b>\n"
-            f"Tier: <b>{tier}/5</b> — {html.escape(tier_names[tier])}"
-            + ("\n\n🔥 TRENDING THRESHOLD REACHED" if snap['triggered'] else "")
+        keyboard = None
+        scan_url = _deep_scan_url(address) if address else None
+        if scan_url:
+            keyboard = InlineKeyboardBuilder()
+            keyboard.row(_custom_icon_button(text=f"${symbol}", url=scan_url))
+            keyboard = keyboard.as_markup()
+
+        await message.answer_photo(
+            photo=BufferedInputFile(png_bytes, filename="score.png"),
+            reply_markup=keyboard,
         )
     except Exception as exc:
         logger.exception("/score failed")
