@@ -4832,10 +4832,9 @@ def build_score_card(symbol: str, snap: dict) -> bytes:
         glow_ax.imshow(grad, aspect="auto", cmap=cmap, extent=[0, 1, 0, 1], alpha=.25)
         glow_ax.axis("off")
 
-    # "TOP BLAST IT" — pulled in from the bar's right edge toward center,
-    # rather than right-anchored at the very end.
-    fig.text(.74, bar_y + bar_h + .06, "TOP BLAST IT", color=muted, fontsize=10.5,
-              fontweight="bold", ha="center", va="center")
+    # "TOP BLAST IT" — right at the end of the bar, right-anchored.
+    fig.text(bar_x1, bar_y + bar_h + .06, "TOP BLAST IT", color=muted, fontsize=10.5,
+              fontweight="bold", ha="right", va="center")
 
     fig.text(.5, bar_y - .11, f"{pct:.0f}%", color=text, fontsize=13,
               fontweight="bold", ha="center", va="center")
