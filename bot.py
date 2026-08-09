@@ -4576,13 +4576,16 @@ async def cmd_score(message: Message):
 
         snap = _get_trending_score(report)
         symbol = str((report.get("jetton_info") or {}).get("symbol") or query).upper()
+        score_pct = min(100.0, (snap["score"] / 20.0) * 100.0)
+        bar = _progress_bar(score_pct, size=16)
 
         await message.answer(
             f"<b>${html.escape(symbol)} Trending score</b>\n\n"
+            f"<code>{html.escape(bar)}</code>  <b>{score_pct:.0f}%</b>\n\n"
             f"Score: <b>{snap['score']:.1f}/20</b>\n"
             f"Private: <b>{snap['private'] * 1.0:.1f}</b>\n"
-            f"Group: <b>{snap['group'] * 0.5:.1f}</b>\n\n"
-            f"{'🔥 TRENDING THRESHOLD REACHED' if snap['triggered'] else 'Not at threshold yet.'}"
+            f"Group: <b>{snap['group'] * 0.5:.1f}</b>"
+            + ("\n\n🔥 TRENDING THRESHOLD REACHED" if snap['triggered'] else "")
         )
     except Exception as exc:
         logger.exception("/score failed")
