@@ -1159,18 +1159,23 @@ def _get_trending_score(report: dict) -> dict:
     Production Trending score, backed by the bot's persistent scan_events table.
 
     Rules:
-    - Rolling 30-minute trigger window.
-    - One qualifying contribution per Telegram user per token per 24 hours.
-    - Private/DM contribution = 1.0 point.
-    - Group/supergroup/channel contribution = 0.5 point.
-    - A repeat scan inside the same 24-hour period does not add points.
+    - Rolling 24-hour window — a contribution silently drops off once its
+      scan ages past 24h (no explicit decay job needed; the query's own
+      day_start slides forward on every call).
+    - Each Telegram user can contribute up to two points per token per 24h:
+      one from their earliest DM scan (1.0), and one from their earliest
+      scan in ANY group (0.5) — independent of each other.
+    - Being in many groups doesn't multiply the group contribution: scanning
+      the same token in 10 different groups still only ever fills that one
+      group slot once, keyed by user, not by (user, chat).
+    - Repeat scans of the same token by the same user, in the same DM or in
+      any group, never open a second slot or add more points within 24h.
     """
     token_key = _history_key(report)
     if not token_key:
         return {"score": 0.0, "private": 0, "group": 0, "triggered": False}
 
     now = int(time.time())
-    window_start = now - (30 * 60)
     day_start = now - (24 * 60 * 60)
 
     with sqlite3.connect(DB_PATH) as conn:
@@ -1186,27 +1191,26 @@ def _get_trending_score(report: dict) -> dict:
             (token_key, day_start),
         ).fetchall()
 
-    # First scan by each user in the 24-hour period is their only contribution.
-    first_by_user = {}
+    # Each user can contribute up to two points per token per 24h: their
+    # earliest DM scan (1.0) AND their earliest scan from ANY group (0.5) —
+    # tracked as two separate "first seen" slots per user. A person scanning
+    # the same token in 10 different groups still only fills the group slot
+    # once, since it's keyed by user id alone, not (user, chat). Repeat scans
+    # in the same DM or same group never open a second slot either way.
+    first_private = {}
+    first_group = {}
     for scanner_id, chat_type, scan_ts in rows:
         uid = int(scanner_id)
-        if uid not in first_by_user:
-            first_by_user[uid] = (int(scan_ts), str(chat_type or ""))
-
-    private_count = 0
-    group_count = 0
-    score = 0.0
-
-    for scan_ts, chat_type in first_by_user.values():
-        if scan_ts < window_start:
-            continue
-
-        if chat_type in ("group", "supergroup", "channel"):
-            group_count += 1
-            score += 0.5
+        if str(chat_type or "") in ("group", "supergroup", "channel"):
+            if uid not in first_group:
+                first_group[uid] = int(scan_ts)
         else:
-            private_count += 1
-            score += 1.0
+            if uid not in first_private:
+                first_private[uid] = int(scan_ts)
+
+    private_count = len(first_private)
+    group_count = len(first_group)
+    score = private_count * 1.0 + group_count * 0.5
 
     # Five checkpoints instead of a single pass/fail threshold: 20/40/60/80/100.
     # tier 0 = below Trending, tier 5 = TOP BLAST IT BOZO. Checked high-to-low
@@ -4828,9 +4832,10 @@ def build_score_card(symbol: str, snap: dict) -> bytes:
         glow_ax.imshow(grad, aspect="auto", cmap=cmap, extent=[0, 1, 0, 1], alpha=.25)
         glow_ax.axis("off")
 
-    # Only "TOP BLAST" — no label on the start of the bar.
-    fig.text(bar_x1, bar_y + bar_h + .06, "TOP BLAST", color=muted, fontsize=10.5,
-              fontweight="bold", ha="right", va="center")
+    # "TOP BLAST IT" — pulled in from the bar's right edge toward center,
+    # rather than right-anchored at the very end.
+    fig.text(.74, bar_y + bar_h + .06, "TOP BLAST IT", color=muted, fontsize=10.5,
+              fontweight="bold", ha="center", va="center")
 
     fig.text(.5, bar_y - .11, f"{pct:.0f}%", color=text, fontsize=13,
               fontweight="bold", ha="center", va="center")
@@ -4962,9 +4967,26 @@ async def handle_address(message: Message):
                 # word (e.g. GRX6900 / $GRX6900). Commands are handled separately.
                 return
 
+            report = await scan_token(session, lookup_value)
+
+            if not report.get("found"):
+                await status_msg.edit_text(
+                    format_token_report(report),
+                    disable_web_page_preview=True,
+                )
+                return
+
+            scanner_meta = _build_scanner_meta(message, report)
+
+            # Duplicate-token suppression only prevents re-posting the big
+            # card again in the same chat — it must NOT also hide this
+            # scanner's activity from the trending score. Record the scan
+            # event first, then still show the "already scanned" link
+            # instead of a fresh card.
             duplicate_key = str(lookup_value or "").strip()
             recent = get_recent_chat_scan(message.chat.id, duplicate_key)
             if recent:
+                record_scan_event(message, report, scanner_meta)
                 if status_msg:
                     try:
                         await status_msg.delete()
@@ -5003,17 +5025,6 @@ async def handle_address(message: Message):
                             f"<b>{ticker_label}</b> has already been scanned recently."
                         )
                 return
-
-            report = await scan_token(session, lookup_value)
-
-            if not report.get("found"):
-                await status_msg.edit_text(
-                    format_token_report(report),
-                    disable_web_page_preview=True,
-                )
-                return
-
-            scanner_meta = _build_scanner_meta(message, report)
 
             # Permanent per-DM/per-group first-scan anchor. This IS the GRX SCAN
             # line and the dashboard's "since first scan" stats — set once per
