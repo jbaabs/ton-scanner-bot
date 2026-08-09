@@ -5216,37 +5216,11 @@ async def handle_timeframe(callback: CallbackQuery):
         logger.exception("Error switching chart timeframe")
 
 
-async def main():
-    global BOT_USERNAME
-    init_db()
-    try:
-        me = await bot.get_me()
-        BOT_USERNAME = str(me.username or "")
-    except Exception:
-        logger.exception("Could not resolve bot username for GRX deep links")
-    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON_ALERTS")
-    watcher = asyncio.create_task(alert_watcher())
-    live_stream = asyncio.create_task(ton_live_stream_engine())
-    try:
-        await dp.start_polling(bot)
-    finally:
-        watcher.cancel()
-        live_stream.cancel()
-        try: await watcher
-        except asyncio.CancelledError: pass
-        try: await live_stream
-        except asyncio.CancelledError: pass
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped.")
-
-
-
 # --- SCAN ANCHORS (USER / GROUP, ENTRY vs RECENT) ---
+# NOTE: these must be defined before main()/dp.start_polling(), since polling
+# blocks forever — any code placed after the old `if __name__ == "__main__":`
+# guard never actually ran. handle_address() calls these while the bot is
+# live, so they're defined here, ahead of the blocking entry point.
 user_scan_anchor = {}     # (user_id, token) -> price   [entry / first-ever]
 group_scan_anchor = {}    # (chat_id, token) -> price   [entry / first-ever]
 user_recent_anchor = {}   # (user_id, token) -> price   [most recent scan]
@@ -5277,39 +5251,41 @@ def get_recent_anchor(user_id, chat_id, token, is_private):
         return user_recent_anchor.get((int(user_id), str(token)))
     return group_recent_anchor.get((int(chat_id), str(token)))
 
-# --- USAGE (IMPORTANT) ---
-# In your chart renderer:
-#
-# entry_price = get_scan_anchor(user_id, chat_id, token, is_private)
-# recent_price = get_recent_anchor(user_id, chat_id, token, is_private)
-#
-# Draw TWO lines:
-# - Entry line (existing GRX SCAN)
-# - Recent line (new, different style)
-#
-# DO NOT remove existing logic — only extend it.
-
-
-
-# NOTE: a sync (token, timeframe) -> (timestamp, bytes) chart cache used to live
-# here (get_cached_chart_data/get_cached_chart_image/prefetch_chart/
-# get_live_chart_data/get_live_chart_image). It was never wired in, and it's
-# not being wired in now: it's a plain dict keyed on sync fetch_func(token)
-# calls, while the bot's real OHLCV/image pipeline (get_ohlcv, OHLCV_CACHE,
-# IMAGE_CACHE, TOKEN_STATE_CACHE — see top of file) is async and already
-# TTL-cached end to end. Bolting the sync version on top would just be a
-# second, inconsistent cache layer racing the real one. Removed.
-
 
 # --- CAPTION LIVE TIMESTAMP ---
-from datetime import datetime
-
 def append_updated_time(caption: str) -> str:
-    updated_time = datetime.utcnow().strftime("%H:%M:%S UTC")
+    from datetime import datetime, timezone
+    updated_time = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     return caption + f"\n\n<i>Updated {updated_time}</i>"
 
-# USAGE:
-# caption = append_updated_time(caption)
+
+async def main():
+    global BOT_USERNAME
+    init_db()
+    try:
+        me = await bot.get_me()
+        BOT_USERNAME = str(me.username or "")
+    except Exception:
+        logger.exception("Could not resolve bot username for GRX deep links")
+    logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON_ALERTS")
+    watcher = asyncio.create_task(alert_watcher())
+    live_stream = asyncio.create_task(ton_live_stream_engine())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        watcher.cancel()
+        live_stream.cancel()
+        try: await watcher
+        except asyncio.CancelledError: pass
+        try: await live_stream
+        except asyncio.CancelledError: pass
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped.")
 
 
 
