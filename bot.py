@@ -2683,11 +2683,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
 
     # Compact pulse/caller band. Right card grew a touch taller (.135 vs the
     # old .115) to fit the new "CALLED BY" row without crowding PERFORMANCE.
-    box(.025,.425,.465,.135); box(.51,.425,.465,.135)
-    fig.text(.045,.535,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
+    box(.025,.460,.465,.135); box(.51,.460,.465,.135)
+    fig.text(.045,.570,"MARKET PULSE",color=muted,fontsize=8,fontweight="bold")
     for j,(lab,val) in enumerate((("1H",h1),("6H",h6),("24H",h24))):
-        y=.507-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
-    fig.text(.53,.535,"YOUR FIRST SCAN",color=muted,fontsize=8,fontweight="bold")
+        y=.542-j*.027; fig.text(.05,y,lab,color=muted,fontsize=8.5); fig.text(.465,y,_fmt_pct(val),color=pc(val),fontsize=10,fontweight="bold",ha="right")
+    fig.text(.53,.570,"YOUR FIRST SCAN",color=muted,fontsize=8,fontweight="bold")
     first=report.get("_viewer_first_scan")
     if first:
         then_txt=str(first.get("scan_market_cap") or "N/A")
@@ -2706,11 +2706,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             ("PERFORMANCE",_fmt_pct(perf) if perf is not None else "N/A",pc(perf)),
         ]
         for j,(lab,val,col) in enumerate(rows):
-            y=.510-j*.0245
+            y=.545-j*.0245
             fig.text(.53,y,lab,color=muted,fontsize=7.5)
             fs=9.5 if len(str(val))<=13 else 7.8
             fig.text(.955,y,str(val),color=col,fontsize=fs,fontweight="bold",ha="right")
-    else: fig.text(.53,.49,"First scan",color=muted,fontsize=10)
+    else: fig.text(.53,.525,"First scan",color=muted,fontsize=10)
 
     # Compact 3 x 2 stat grid on each side. The centre split remains aligned
     # exactly with MARKET PULSE / FIRST CALLED BY, but the previous dead space
@@ -2737,8 +2737,8 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     half_w = .465
     col_gap = .007
     row_gap = .010
-    grid_top = .405
-    grid_bottom = .165
+    grid_top = .440
+    grid_bottom = .200
     card_h = (grid_top - grid_bottom - row_gap) / 2
     card_w = (half_w - 2 * col_gap) / 3
 
@@ -2769,7 +2769,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     # Subtle footer branding across the central span beneath the stat grid.
     # Sized to roughly match the horizontal distance from the BUYS card to the SELLS card.
     fig.text(
-        .5, .085, "POWERED BY GRX",
+        .5, .120, "POWERED BY GRX",
         color=(1.0, 1.0, 1.0, 0.38),
         fontsize=18.0, fontweight="bold",
         ha="center", va="center",
