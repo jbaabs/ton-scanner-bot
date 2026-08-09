@@ -826,6 +826,26 @@ def _viewer_scope_key(chat_id, chat_type: str | None) -> str:
     return f"chat:{chat_id}"
 
 
+def _scan_anchor_label(anchor: dict | None, chat_type: str | None, chat_title: str | None) -> str:
+    """Label drawn on the personal/group scan anchor line.
+
+    Private-chat anchors show just the scanner's @handle. Group/supergroup
+    anchors additionally append the group's name, since the anchor is shared
+    by everyone in that chat rather than being one person's alone. Falls
+    back to the old generic "GRX SCAN" label if no scanner identity was
+    ever recorded for this anchor (e.g. legacy rows from before this field
+    existed).
+    """
+    name = str((anchor or {}).get("scanner_name") or "").strip()
+    if not name:
+        return "GRX SCAN"
+    if str(chat_type or "") in ("group", "supergroup", "channel"):
+        title = str(chat_title or "").strip()
+        if title:
+            return f"{name} - {title}"
+    return name
+
+
 def get_viewer_first_scan(scope_key: str, report: dict, scanner_meta: dict | None = None) -> dict | None:
     """Permanent per-DM/per-group first-scan anchor.
 
@@ -1874,6 +1894,9 @@ def _persist_new_scan_sync(message, report, scanner_meta, chat_type, scope_key, 
     record_scan_event(message, report, scanner_meta)
     save_token_snapshot(report)
     report["_viewer_first_scan"] = get_viewer_first_scan(scope_key, report, scanner_meta)
+    report["_viewer_scan_label"] = _scan_anchor_label(
+        report["_viewer_first_scan"], chat_type, getattr(message.chat, "title", None)
+    )
 
     prior_recent = None
     if message.from_user and current_price:
@@ -2478,7 +2501,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None, anchor_label: str | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -2533,8 +2556,9 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
             scan_price_f = float(raw_scan_price)
             if scan_price_f > 0:
                 scan_blue = "#168BFF"
+                label = str(anchor_label or "GRX SCAN")
                 ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
-                ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
+                ax.text(-.65, scan_price_f, label, ha="left", va="bottom",
                         color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN chart marker")
@@ -2642,8 +2666,9 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             scan_price_f = float(raw_scan_price)
             if scan_price_f > 0:
                 scan_blue = "#168BFF"
+                anchor_label = str(report.get("_viewer_scan_label") or "GRX SCAN")
                 ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
-                ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
+                ax.text(-.65, scan_price_f, anchor_label, ha="left", va="bottom",
                         color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
@@ -5047,6 +5072,10 @@ async def handle_toggle(callback: CallbackQuery):
                     fresh_report["_viewer_first_scan"] = await asyncio.to_thread(
                         get_viewer_first_scan, scope_key, fresh_report, scanner_meta
                     )
+                    fresh_report["_viewer_scan_label"] = _scan_anchor_label(
+                        fresh_report["_viewer_first_scan"], chat_type,
+                        getattr(callback.message.chat, "title", None),
+                    )
 
                     text_out = (
                         format_grx_stats(fresh_report)
@@ -5180,6 +5209,10 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     entry["report"]["_viewer_first_scan"] = await asyncio.to_thread(
         get_viewer_first_scan, scope_key, entry["report"], entry.get("scanner_meta")
     )
+    entry["report"]["_viewer_scan_label"] = _scan_anchor_label(
+        entry["report"]["_viewer_first_scan"], chat_type,
+        getattr(callback.message.chat, "title", None),
+    )
 
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
@@ -5218,6 +5251,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         # fixed at the original scan price, which is what made it look the
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
+        entry["report"].get("_viewer_scan_label"),
     )
 
     media = InputMediaPhoto(
@@ -5375,6 +5409,10 @@ async def handle_timeframe(callback: CallbackQuery):
     entry["report"]["_viewer_first_scan"] = await asyncio.to_thread(
         get_viewer_first_scan, scope_key, entry["report"], entry.get("scanner_meta")
     )
+    entry["report"]["_viewer_scan_label"] = _scan_anchor_label(
+        entry["report"]["_viewer_first_scan"], chat_type,
+        getattr(callback.message.chat, "title", None),
+    )
 
     pool_address = ((entry["report"].get("dex_data") or {}).get("chart_pair_address") or (entry["report"].get("dex_data") or {}).get("pair_address"))
     symbol = (entry["report"].get("jetton_info") or {}).get("symbol", "???")
@@ -5413,6 +5451,7 @@ async def handle_timeframe(callback: CallbackQuery):
         # fixed at the original scan price, which is what made it look the
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
+        entry["report"].get("_viewer_scan_label"),
     )
 
     media = InputMediaPhoto(
