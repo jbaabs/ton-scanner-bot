@@ -45,10 +45,10 @@ OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "5580192046") or 0)
 
 # Lightweight abuse protection. Legitimate users should rarely notice these.
 _RATE_LIMITS = {
-    "scan": 2.5,       # per user
-    "refresh": 5.0,    # per user
-    "chart": 2.0,      # per user
-    "leaderboard": 10.0,  # per chat
+    "scan": 0.0,        # per user — disabled: two people in a group can scan at once
+    "refresh": 5.0,     # per user
+    "chart": 2.0,       # per user
+    "leaderboard": 0.0,  # per chat — disabled, unnecessary friction
 }
 _RATE_LAST: dict[tuple[str, int], float] = {}
 
@@ -261,7 +261,12 @@ def _token_state_lock(address: str):
         lock=TOKEN_STATE_LOCKS[key]=asyncio.Lock()
     return lock
 
-RENDER_SEMAPHORE = asyncio.Semaphore(3)
+# Was 3 — bumped slightly so a busy moment (e.g. two people scanning charts
+# at once) queues less. Kept modest rather than pushed high: each render is
+# CPU-bound matplotlib work, so this only helps up to whatever Railway
+# actually gives the container in real CPU cores — cranking it further than
+# the container's core count just adds contention instead of speed.
+RENDER_SEMAPHORE = asyncio.Semaphore(5)
 
 def _refresh_lock(key: str) -> asyncio.Lock:
     lock = REFRESH_LOCKS.get(key)
@@ -2773,7 +2778,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     col_gap = .007
     row_gap = .010
     grid_top = .440
-    grid_bottom = .200
+    grid_bottom = .100
     card_h = (grid_top - grid_bottom - row_gap) / 2
     card_w = (half_w - 2 * col_gap) / 3
 
@@ -2801,12 +2806,12 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     draw_grid(left_stats, half_left_x)
     draw_grid(right_stats, half_right_x)
 
-    # Subtle footer branding across the central span beneath the stat grid.
-    # Sized to roughly match the horizontal distance from the BUYS card to the SELLS card.
+    # Subtle footer branding — pulled down and shrunk to give the stat grid
+    # above it more room instead of sitting in a large empty band.
     fig.text(
-        .5, .120, "POWERED BY GRX",
+        .5, .055, "POWERED BY GRX",
         color=(1.0, 1.0, 1.0, 0.38),
-        fontsize=18.0, fontweight="bold",
+        fontsize=13.0, fontweight="bold",
         ha="center", va="center",
     )
 
