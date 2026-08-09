@@ -2587,19 +2587,25 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         bottom=min(o,c); height=max(abs(c-o),max(h,l)*1e-8)
         ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
 
-    # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan price.
+    # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan
+    # price for THIS viewer (DM) or THIS group's first scanner. Deliberately
+    # does NOT fall back to the live current price when the anchor is
+    # missing/unresolved — that fallback made the line track "now" instead of
+    # the actual scan moment, so it looked identical for every viewer instead
+    # of being unique to whoever (or whichever group) scanned it first.
     first_scan_for_line = report.get("_viewer_first_scan") or {}
-    scan_price_for_line = first_scan_for_line.get("scan_price") or dex.get("price_usd")
-    try:
-        raw_scan_price = str(scan_price_for_line).replace("$", "").replace(",", "").strip()
-        scan_price_f = float(raw_scan_price)
-        if scan_price_f > 0:
-            scan_blue = "#168BFF"
-            ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
-            ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
-                    color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
-    except Exception:
-        logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
+    scan_price_for_line = first_scan_for_line.get("scan_price")
+    if scan_price_for_line and not _is_missing_value(scan_price_for_line):
+        try:
+            raw_scan_price = str(scan_price_for_line).replace("$", "").replace(",", "").strip()
+            scan_price_f = float(raw_scan_price)
+            if scan_price_f > 0:
+                scan_blue = "#168BFF"
+                ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
+                ax.text(-.65, scan_price_f, "GRX SCAN", ha="left", va="bottom",
+                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
+        except Exception:
+            logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
 
     # Personal RECENT marker: horizontal line at the price when this specific
     # viewer last scanned this token (per-user/per-group in-memory anchor).
@@ -5166,9 +5172,12 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price")
-        or (entry.get("scanner_meta") or {}).get("scan_price")
-        or (entry["report"].get("dex_data") or {}).get("price_usd"),
+        # Only the true first-scan anchor for this DM/group — no fallback to
+        # scanner_meta (this viewer's own last scan) or live price, since
+        # either fallback makes the line drift to "now" instead of staying
+        # fixed at the original scan price, which is what made it look the
+        # same for every viewer/group instead of being anchor-specific.
+        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
     )
 
     media = InputMediaPhoto(
@@ -5358,9 +5367,12 @@ async def handle_timeframe(callback: CallbackQuery):
         CHART_TIMEFRAMES[timeframe]["label"],
         token_icon,
         None,
-        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price")
-        or (entry.get("scanner_meta") or {}).get("scan_price")
-        or (entry["report"].get("dex_data") or {}).get("price_usd"),
+        # Only the true first-scan anchor for this DM/group — no fallback to
+        # scanner_meta (this viewer's own last scan) or live price, since
+        # either fallback makes the line drift to "now" instead of staying
+        # fixed at the original scan price, which is what made it look the
+        # same for every viewer/group instead of being anchor-specific.
+        (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
     )
 
     media = InputMediaPhoto(
