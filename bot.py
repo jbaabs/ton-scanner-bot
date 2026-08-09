@@ -474,6 +474,32 @@ def init_db():
         )
         """
     )
+    # Migration: remember the market cap when a token first entered Trending,
+    # so the channel's PNL card can show a real multiple instead of guessing.
+    trend_cols = {row[1] for row in conn.execute("PRAGMA table_info(trending_alerts)").fetchall()}
+    if "entry_market_cap" not in trend_cols:
+        conn.execute("ALTER TABLE trending_alerts ADD COLUMN entry_market_cap REAL")
+    # Migration: remember the original "$TICKER HAS ENTERED GRX TRENDING"
+    # post's message_id, so later tier bumps can reply to it instead of
+    # posting a brand new standalone message each time.
+    if "message_id" not in trend_cols:
+        conn.execute("ALTER TABLE trending_alerts ADD COLUMN message_id INTEGER")
+
+    # Tracks the highest PNL multiplier (2x/5x/10x/20x/50x/100x) already
+    # announced for a given viewer/group anchor on a given token, so the same
+    # milestone never posts twice — only the next higher one does.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pnl_milestones (
+            scope_key TEXT NOT NULL,
+            token_key TEXT NOT NULL,
+            chat_id INTEGER,
+            best_multiple REAL NOT NULL DEFAULT 0,
+            updated_ts INTEGER NOT NULL,
+            PRIMARY KEY (scope_key, token_key)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -937,6 +963,132 @@ def _as_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _usd_str_to_float(t) -> float | None:
+    """Parse a compact USD string like '$5.6K' or '1.2M' back to a plain
+    float. Same logic already used inline for the dashboard's PERFORMANCE
+    row, pulled out here so the PNL milestone checker can share it."""
+    t = str(t or "").replace("$", "").replace(",", "").strip().upper()
+    m = 1
+    if t.endswith("K"):
+        m, t = 1000, t[:-1]
+    elif t.endswith("M"):
+        m, t = 1_000_000, t[:-1]
+    try:
+        return float(t) * m
+    except (TypeError, ValueError):
+        return None
+
+
+PNL_MULTIPLIER_THRESHOLDS = (2.0, 5.0, 10.0, 20.0, 50.0, 100.0)
+
+
+def _times_called_by_scanner(scanner_id: int | None, token_key: str | None) -> int:
+    """How many times THIS person specifically has scanned this token —
+    not the token's total scan count. Powers the "Times Called" line on the
+    PNL card, which must be unique per caller rather than global."""
+    if not scanner_id or not token_key:
+        return 1
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM scan_events WHERE scanner_id=? AND token_key=?",
+            (int(scanner_id), token_key),
+        ).fetchone()
+    return max(1, int(row[0] or 0)) if row else 1
+
+
+def _check_pnl_milestone_sync(scope_key: str, token_key: str, chat_id: int, multiple: float) -> float | None:
+    """Returns the highest new multiplier threshold (2/5/10/20/50/100) just
+    crossed for this specific anchor (this viewer's DM, or this group),
+    or None if nothing new was crossed. Idempotent: calling this again with
+    the same or lower multiple returns None, so a milestone only ever
+    announces once per anchor.
+    """
+    if not scope_key or not token_key or multiple < PNL_MULTIPLIER_THRESHOLDS[0]:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO pnl_milestones (scope_key, token_key, chat_id, best_multiple, updated_ts)
+            VALUES (?, ?, ?, 0, ?)
+            """,
+            (scope_key, token_key, chat_id, int(time.time())),
+        )
+        row = conn.execute(
+            "SELECT best_multiple FROM pnl_milestones WHERE scope_key=? AND token_key=?",
+            (scope_key, token_key),
+        ).fetchone()
+        best_so_far = float(row[0] or 0) if row else 0.0
+
+        crossed = None
+        for threshold in PNL_MULTIPLIER_THRESHOLDS:
+            if multiple >= threshold and threshold > best_so_far:
+                crossed = threshold  # keep looping — take the HIGHEST crossed, not the first
+
+        if crossed:
+            conn.execute(
+                "UPDATE pnl_milestones SET best_multiple=?, updated_ts=? WHERE scope_key=? AND token_key=?",
+                (crossed, int(time.time()), scope_key, token_key),
+            )
+        conn.commit()
+
+    return crossed
+
+
+def _prepare_pnl_milestone_check(report: dict, scope_key: str, chat_id: int) -> None:
+    """Compares this anchor's current multiple against 2/5/10/20/50/100x and,
+    if a new one was just crossed, stashes the info on `report` so the async
+    caller can render and send the PNL card. Mutates report in place; sends
+    nothing itself — DB writes only, safe to call from a background thread.
+    """
+    anchor = report.get("_viewer_first_scan")
+    if not anchor:
+        return
+    token_key = _history_key(report)
+    if not token_key:
+        return
+    dex = report.get("dex_data") or {}
+    current_mc = _as_float(dex.get("market_cap"))
+    called_mc = _usd_str_to_float(anchor.get("scan_market_cap"))
+    if not current_mc or not called_mc or called_mc <= 0:
+        return
+    multiple = current_mc / called_mc
+    threshold = _check_pnl_milestone_sync(scope_key, token_key, chat_id, multiple)
+    if threshold:
+        report["_pnl_milestone_multiple"] = threshold
+        report["_pnl_milestone_called_mc"] = called_mc
+        report["_pnl_milestone_current_mc"] = current_mc
+
+
+async def _maybe_announce_pnl_milestone(
+    bot, chat_id: int, report: dict,
+    scanner_id: int | None, scanner_name: str | None, scanner_username: str | None,
+) -> None:
+    """If _prepare_pnl_milestone_check flagged a newly-crossed multiplier,
+    render the PNL card and post it to the chat where the anchor lives.
+    """
+    threshold = report.get("_pnl_milestone_multiple")
+    if not threshold:
+        return
+    called_mc = report.get("_pnl_milestone_called_mc")
+    current_mc = report.get("_pnl_milestone_current_mc")
+    if not called_mc or not current_mc:
+        return
+    try:
+        png = await _render_offloop(build_pnl_card, called_mc, current_mc)
+        token_key = _history_key(report)
+        times_called = await asyncio.to_thread(_times_called_by_scanner, scanner_id, token_key)
+        caller_href = _caller_profile_href(scanner_id, scanner_username)
+        caption = _build_pnl_caption(scanner_name or DEFAULT_SCANNER_LABEL, caller_href, times_called)
+        await bot.send_photo(
+            chat_id,
+            BufferedInputFile(png, filename="grx_pnl.png"),
+            caption=caption,
+        )
+    except Exception:
+        logger.exception("Could not send PNL milestone card")
 
 
 def save_token_snapshot(report: dict) -> None:
@@ -1429,11 +1581,19 @@ async def maybe_announce_trending(report: dict) -> None:
     now = int(time.time())
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT last_alert_ts,last_tier FROM trending_alerts WHERE token_key=?",
+            "SELECT last_alert_ts,last_tier,entry_market_cap,message_id FROM trending_alerts WHERE token_key=?",
             (token_key,),
         ).fetchone()
-        if row and tier <= int(row[1] or 0) and now - int(row[0] or 0) < 6 * 3600:
-            return
+
+    last_tier = int(row[1] or 0) if row else 0
+    entry_mc = _as_float(row[2]) if row else None
+    orig_message_id = int(row[3]) if row and row[3] else None
+
+    # Only ever act on a genuinely new record tier for this token — no
+    # time-based cooldown needed, since a strictly-higher tier can only be
+    # crossed once per token (tiers never "re-trigger" at the same level).
+    if tier <= last_tier:
+        return
 
     info = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
@@ -1441,82 +1601,132 @@ async def maybe_announce_trending(report: dict) -> None:
     address = str(report.get("address") or "")
     scan_url = _deep_scan_url(address)
     title = html.escape(symbol)
-    trending_price = dex.get("price_usd")
-
-    description = None
-    trending_png = None
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12),
-            connector=aiohttp.TCPConnector(limit=12, ttl_dns_cache=300),
-        ) as session:
-            desc_task = asyncio.create_task(_get_trending_description(session, report))
-            chart_task = asyncio.create_task(_build_trending_media(session, report, symbol, trending_price))
-            description, trending_png = await asyncio.gather(desc_task, chart_task)
-    except Exception:
-        logger.exception("Trending enrichment failed; posting basic alert")
+    current_mc = _as_float(dex.get("market_cap"))
 
     # A zero-width separator after $ prevents Telegram from auto-linking the
-    # headline as a cashtag. The visible text remains "$TICKER". The only
-    # clickable ticker is the inline scanner button below.
+    # headline as a cashtag. The visible text remains "$TICKER".
     display_ticker = f"$&#8203;{title}"
-    lines = [f'<b>{display_ticker} HAS ENTERED GRX TRENDING</b>']
-    if description:
-        safe_description = html.escape(description)
-        # Long descriptions stay fully available in-message via Telegram's native
-        # expandable blockquote / Show more interaction. No external See More button.
-        if len(description) > 300:
-            lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote expandable>{safe_description}</blockquote>"])
-        else:
-            lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote>{safe_description}</blockquote>"])
-
     reply_markup = None
     if scan_url:
         keyboard = InlineKeyboardBuilder()
         keyboard.row(_custom_icon_button(text=f"Scan ${symbol} on GRX", url=scan_url, emoji_name="trending_scan"))
         reply_markup = keyboard.as_markup()
 
-    try:
-        if trending_png:
-            await bot.send_photo(
-                GRX_TRENDING_CHANNEL,
-                photo=BufferedInputFile(trending_png, filename="grx_trending.png"),
-                caption="\n".join(lines),
-                reply_markup=reply_markup,
-            )
-        else:
-            await bot.send_message(
-                GRX_TRENDING_CHANNEL,
-                "\n".join(lines),
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-    except Exception as exc:
-        logger.exception("Failed to post GRX Trending alert to %s", GRX_TRENDING_CHANNEL)
-        if OWNER_TELEGRAM_ID:
-            try:
-                await bot.send_message(
-                    OWNER_TELEGRAM_ID,
-                    "⚠️ <b>GRX Trending post failed</b>\n\n"
-                    f"Channel: <code>{html.escape(str(GRX_TRENDING_CHANNEL))}</code>\n"
-                    f"Error: <code>{html.escape(str(exc))}</code>",
-                    parse_mode="HTML",
+    is_first_entry = last_tier == 0
+    sent_message_id = orig_message_id
+
+    if is_first_entry:
+        # Full original post — chart, description, everything — same as before.
+        trending_price = dex.get("price_usd")
+        description = None
+        trending_png = None
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=12),
+                connector=aiohttp.TCPConnector(limit=12, ttl_dns_cache=300),
+            ) as session:
+                desc_task = asyncio.create_task(_get_trending_description(session, report))
+                chart_task = asyncio.create_task(_build_trending_media(session, report, symbol, trending_price))
+                description, trending_png = await asyncio.gather(desc_task, chart_task)
+        except Exception:
+            logger.exception("Trending enrichment failed; posting basic alert")
+
+        lines = [f'<b>{display_ticker} HAS ENTERED GRX TRENDING</b>']
+        if description:
+            safe_description = html.escape(description)
+            if len(description) > 300:
+                lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote expandable>{safe_description}</blockquote>"])
+            else:
+                lines.extend(["", f"<b>ABOUT {display_ticker}</b>", f"<blockquote>{safe_description}</blockquote>"])
+
+        try:
+            if trending_png:
+                sent = await bot.send_photo(
+                    GRX_TRENDING_CHANNEL,
+                    photo=BufferedInputFile(trending_png, filename="grx_trending.png"),
+                    caption="\n".join(lines),
+                    reply_markup=reply_markup,
                 )
-            except Exception:
-                logger.exception("Could not notify owner about Trending channel failure")
-        return
+            else:
+                sent = await bot.send_message(
+                    GRX_TRENDING_CHANNEL,
+                    "\n".join(lines),
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+            sent_message_id = sent.message_id
+        except Exception as exc:
+            logger.exception("Failed to post GRX Trending alert to %s", GRX_TRENDING_CHANNEL)
+            if OWNER_TELEGRAM_ID:
+                try:
+                    await bot.send_message(
+                        OWNER_TELEGRAM_ID,
+                        "⚠️ <b>GRX Trending post failed</b>\n\n"
+                        f"Channel: <code>{html.escape(str(GRX_TRENDING_CHANNEL))}</code>\n"
+                        f"Error: <code>{html.escape(str(exc))}</code>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("Could not notify owner about Trending channel failure")
+            return
+        entry_mc = current_mc
+    else:
+        # Tier bump — reply to the original entry post instead of posting a
+        # whole new standalone message.
+        reply_text = f'<b>{display_ticker} HAS ENTERED GRX TRENDING TIER {tier}</b>'
+        try:
+            if orig_message_id:
+                await bot.send_message(
+                    GRX_TRENDING_CHANNEL,
+                    reply_text,
+                    reply_parameters=ReplyParameters(
+                        message_id=orig_message_id,
+                        chat_id=GRX_TRENDING_CHANNEL,
+                        allow_sending_without_reply=True,
+                    ),
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+            else:
+                # No original message on record (e.g. a row from before this
+                # feature existed) — fall back to a plain, non-reply post.
+                await bot.send_message(
+                    GRX_TRENDING_CHANNEL,
+                    reply_text,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+        except Exception:
+            logger.exception("Failed to post GRX Trending tier-%s reply to %s", tier, GRX_TRENDING_CHANNEL)
+            return
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO trending_alerts(token_key,last_alert_ts,last_tier)
-            VALUES(?,?,?)
+            INSERT INTO trending_alerts(token_key,last_alert_ts,last_tier,entry_market_cap,message_id)
+            VALUES(?,?,?,?,?)
             ON CONFLICT(token_key) DO UPDATE SET
                 last_alert_ts=excluded.last_alert_ts,
-                last_tier=MAX(trending_alerts.last_tier, excluded.last_tier)
+                last_tier=excluded.last_tier
             """,
-            (token_key, now, tier),
+            (token_key, now, tier, entry_mc, sent_message_id),
         )
+
+    # Same PNL card format as the personal/group milestone cards, posted to
+    # the channel whenever this token crosses a new 2/5/10/20/50/100x since
+    # it first entered Trending. Reuses the same dedup table via a fixed
+    # "trending" scope, so the same multiple never posts twice.
+    if entry_mc and current_mc and entry_mc > 0:
+        pnl_threshold = _check_pnl_milestone_sync("trending", token_key, 0, current_mc / entry_mc)
+        if pnl_threshold:
+            try:
+                pnl_png = await _render_offloop(build_pnl_card, entry_mc, current_mc)
+                await bot.send_photo(
+                    GRX_TRENDING_CHANNEL,
+                    photo=BufferedInputFile(pnl_png, filename="grx_trending_pnl.png"),
+                )
+            except Exception:
+                logger.exception("Could not post Trending PNL card")
 
 LB_WINDOWS = {"1d": (86400, "1D"), "1w": (7 * 86400, "1W"), "2w": (14 * 86400, "2W"), "1m": (30 * 86400, "1M")}
 
@@ -1916,6 +2126,7 @@ def _persist_new_scan_sync(message, report, scanner_meta, chat_type, scope_key, 
     report["_viewer_scan_label"] = _scan_anchor_label(
         report["_viewer_first_scan"], chat_type, getattr(message.chat, "title", None)
     )
+    _prepare_pnl_milestone_check(report, scope_key, message.chat.id)
 
     prior_recent = None
     if message.from_user and current_price:
@@ -4545,7 +4756,7 @@ GRX_TEST_TOKEN_CA = "EQBaCgUwOoc6gHCNln_oJzb0mVs79YG7wYoavh-o1ItaneLA"
 GRX_CALLER_EMOJI_ID = "5246974929194226712"
 GRX_TIMES_CALLED_EMOJI_ID = "5366424034189811245"
 
-def _build_grx_trending_test_card(called_mc: float, current_mc: float, called_age: str) -> bytes:
+def build_pnl_card(called_mc: float, current_mc: float) -> bytes:
     from io import BytesIO
     from pathlib import Path
     from PIL import Image, ImageDraw, ImageFont
@@ -4684,6 +4895,18 @@ def _caller_profile_href(user_id: int | None, username: str | None) -> str:
     return "https://t.me/GRXStats"
 
 
+def _build_pnl_caption(caller_name: str, caller_href: str, times_called: int) -> str:
+    """Same 'Caller / Times Called' caption format used everywhere a PNL
+    card gets a caption. Times Called is per-caller, not the token's total
+    scan count — see _times_called_by_scanner."""
+    return (
+        f'<tg-emoji emoji-id="{GRX_CALLER_EMOJI_ID}">👤</tg-emoji> '
+        f'<b>Caller</b> - <a href="{html.escape(caller_href, quote=True)}">{html.escape(caller_name)}</a>\n'
+        f'<tg-emoji emoji-id="{GRX_TIMES_CALLED_EMOJI_ID}">📊</tg-emoji> '
+        f'<b>Times Called</b> - {times_called}'
+    )
+
+
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set!")
     sys.exit(1)
@@ -4721,50 +4944,58 @@ async def cmd_start(message: Message):
 
 
 
-@dp.message(Command("testtrending"))
-async def cmd_testtrending(message: Message):
-    """Owner-only preview of the GRX call card."""
-    if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
-        await message.answer("This command is restricted to the GRX bot owner.")
+@dp.message(Command("pnl"))
+async def cmd_pnl(message: Message):
+    """Renders the same PNL card format the auto-milestone posts use, on
+    demand for any token — image only, no caption text, per request."""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/pnl TICKER</code> or <code>/pnl &lt;contract address&gt;</code>")
         return
-    status = await message.answer("Building GRX test card…")
+
+    query = parts[1].strip()
     try:
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=15),
-            connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300),
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
         ) as session:
-            report = await get_token_state(session, GRX_TEST_TOKEN_CA, force=True)
+            if is_valid_ton_address(query):
+                address = query
+            else:
+                address, error_text = await resolve_ticker_to_address(session, query)
+                if error_text or not address:
+                    await message.answer(error_text or "Token not found.")
+                    return
+
+            report = await get_token_state(session, address, force=True)
+
+        if not report.get("found"):
+            await message.answer("Token not found.")
+            return
 
         dex = report.get("dex_data") or {}
-        current_mc = float(dex.get("market_cap") or 0)
-        if current_mc <= 0:
-            raise RuntimeError("Live market cap was unavailable for the test token")
+        current_mc = _as_float(dex.get("market_cap"))
+        if not current_mc or current_mc <= 0:
+            await message.answer("No market cap data available for this token yet.")
+            return
 
-        # Test-only history: pretend this token was called 43 minutes ago and has
-        # since moved +82.4%. Live/current MC still comes from the bot's providers.
-        called_age = "43m"
-        called_mc = current_mc / 1.824
-        png = await _render_offloop(_build_grx_trending_test_card, called_mc, current_mc, called_age)
+        # This viewer's/group's permanent anchor for this token — same one
+        # the GRX SCAN line and dashboard use. If this is the first time
+        # anyone here has looked at this token, get_viewer_first_scan creates
+        # it on the spot at the current price, so the card starts at 1.00x.
+        chat_type = str(getattr(message.chat, "type", "") or "")
+        scope_key = _viewer_scope_key(message.chat.id, chat_type)
+        scanner_meta = _build_scanner_meta(message, report)
+        anchor = await asyncio.to_thread(get_viewer_first_scan, scope_key, report, scanner_meta)
+        called_mc = _usd_str_to_float((anchor or {}).get("scan_market_cap"))
+        if not called_mc or called_mc <= 0:
+            called_mc = current_mc
 
-        caller_name = _fmt_username(message)
-        caller_href = _caller_profile_href(
-            message.from_user.id if message.from_user else None,
-            message.from_user.username if message.from_user else None,
-        )
-        times_called = max(1, len(get_scan_history(report, limit=MAX_SCAN_HISTORY)))
-        caption = (
-            f'<tg-emoji emoji-id="{GRX_CALLER_EMOJI_ID}">👤</tg-emoji> '
-            f'<b>Caller</b> - <a href="{html.escape(caller_href, quote=True)}">{html.escape(caller_name)}</a>\n'
-            f'<tg-emoji emoji-id="{GRX_TIMES_CALLED_EMOJI_ID}">📊</tg-emoji> '
-            f'<b>Times Called</b> - {times_called}'
-        )
-        await message.answer_photo(BufferedInputFile(png, filename="grx_trending_test.png"), caption=caption)
-        try: await status.delete()
-        except Exception: pass
-    except Exception as exc:
-        logger.exception("/testtrending failed")
-        try: await status.edit_text(f"❌ Test card failed: {html.escape(str(exc))}")
-        except Exception: pass
+        png = await _render_offloop(build_pnl_card, called_mc, current_mc)
+        await message.answer_photo(BufferedInputFile(png, filename="grx_pnl.png"))
+    except Exception:
+        logger.exception("/pnl failed")
+        await message.answer("❌ Couldn't build that PNL card right now.")
 
 
 
@@ -5048,6 +5279,14 @@ async def handle_address(message: Message):
             if prior_recent and current_price and abs(prior_recent - current_price) > (current_price * 0.0005):
                 report["_viewer_recent_price"] = prior_recent
 
+            if report.get("_pnl_milestone_multiple"):
+                asyncio.create_task(_maybe_announce_pnl_milestone(
+                    message.bot, message.chat.id, report,
+                    message.from_user.id if message.from_user else None,
+                    scanner_meta.get("scanner_name"),
+                    message.from_user.username if message.from_user else None,
+                ))
+
             # _cache_report already ran get_scan_history internally and stashed
             # the result in REPORT_CACHE — reuse it instead of re-querying the
             # same rows from SQLite a second time.
@@ -5195,6 +5434,14 @@ async def handle_toggle(callback: CallbackQuery):
                         fresh_report["_viewer_first_scan"], chat_type,
                         getattr(callback.message.chat, "title", None),
                     )
+                    await asyncio.to_thread(_prepare_pnl_milestone_check, fresh_report, scope_key, callback.message.chat.id)
+                    if fresh_report.get("_pnl_milestone_multiple"):
+                        asyncio.create_task(_maybe_announce_pnl_milestone(
+                            callback.bot, callback.message.chat.id, fresh_report,
+                            callback.from_user.id if callback.from_user else None,
+                            scanner_meta.get("scanner_name"),
+                            callback.from_user.username if callback.from_user else None,
+                        ))
 
                     text_out = (
                         format_grx_stats(fresh_report)
