@@ -3516,7 +3516,18 @@ async def ton_live_stream_engine() -> None:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.ws_connect(
                     TON_STREAM_WS,
-                    heartbeat=15,
+                    # Was heartbeat=15 — aiohttp pings ~15s after connect and
+                    # waits roughly heartbeat/2 (~7.5s) for a pong before
+                    # deciding the connection is dead, which lines up almost
+                    # exactly with the ~23-25s forced disconnects we were
+                    # seeing every cycle. If TonAPI's WS server simply doesn't
+                    # answer aiohttp's ping frames, any heartbeat eventually
+                    # forces the same self-inflicted reconnect — stretching it
+                    # to 120s cuts that from ~twice a minute to at most once
+                    # every couple of minutes, while still giving up and
+                    # reconnecting (via the except block below) if the socket
+                    # is genuinely dead rather than hanging open forever.
+                    heartbeat=120,
                     autoping=True,
                     receive_timeout=None,
                 ) as ws:
@@ -4748,7 +4759,6 @@ async def cmd_testtrending(message: Message):
 
 
 
-@dp.message(Command("score"))
 def build_score_card(symbol: str, snap: dict) -> bytes:
     """Owner-only /score card: centered title, a gradient pill loading bar
     with just 'TOP BLAST' at the end, and Private/Group centered underneath.
@@ -4829,6 +4839,7 @@ def build_score_card(symbol: str, snap: dict) -> bytes:
     return buf.getvalue()
 
 
+@dp.message(Command("score"))
 async def cmd_score(message: Message):
     """Owner-only live Trending score for a token."""
     if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
