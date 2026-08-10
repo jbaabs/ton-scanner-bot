@@ -1930,6 +1930,77 @@ def _most_scanned_rows_global(seconds: int, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _most_scanned_rows_alltime(limit: int = 10) -> list[dict]:
+    """Same dedup rule as _most_scanned_rows_global (1 DM slot + 1 group
+    slot per person per day), just with no time cutoff at all — the
+    all-time ranked list that /topscans shows, since nothing else in the
+    bot currently surfaces scan counts as a leaderboard."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            WITH dm AS (
+                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
+                FROM scan_events
+                WHERE chat_type='private' AND scanner_id IS NOT NULL
+                GROUP BY token_key
+            ),
+            grp AS (
+                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
+                FROM scan_events
+                WHERE chat_type IN ('group','supergroup') AND scanner_id IS NOT NULL
+                GROUP BY token_key
+            ),
+            meta AS (
+                SELECT token_key, MAX(token_address) AS token_address, MAX(token_symbol) AS token_symbol
+                FROM scan_events
+                GROUP BY token_key
+            )
+            SELECT meta.token_key, meta.token_address, meta.token_symbol,
+                   COALESCE(dm.c,0) + COALESCE(grp.c,0) AS scan_count
+            FROM meta
+            LEFT JOIN dm ON dm.token_key=meta.token_key
+            LEFT JOIN grp ON grp.token_key=meta.token_key
+            ORDER BY scan_count DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def build_all_time_top_scans_message() -> str | None:
+    """Standalone all-time 'most scanned' leaderboard for /topscans — same
+    dedup counting as the daily recap's Most Scanned, just with no time
+    window. No Top Scans/multiple section here on purpose: /leaderboard
+    already covers who-called-what-and-how-well, so this command's one job
+    is the ranked scan-count list nothing else in the bot currently shows.
+    """
+    rows = _most_scanned_rows_alltime()
+    if not rows:
+        return None
+
+    lines = [f'{_ce("leaderboard", "🔥")} <b>ALL TOP SCANS</b>', ""]
+    lines.append(f'<tg-emoji emoji-id="{GRX_MOST_SCANNED_EMOJI_ID}">🔥</tg-emoji> <b>MOST SCANNED · ALL TIME</b>')
+
+    medals = ["🥇", "🥈", "🥉"]
+    ranking_lines = []
+    for i, row in enumerate(rows, 1):
+        rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
+        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        address = str(row.get("token_address") or "").strip()
+        scan_url = _deep_scan_url(address) if address else None
+        ticker = (
+            f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+            if scan_url else f"<b>${symbol}</b>"
+        )
+        times = int(row.get("scan_count") or 0)
+        ranking_lines.append(f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''}")
+
+    lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
+    return "\n".join(lines)
+
+
 async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> list[dict]:
     """Top calls by multiple in this chat over the window — same enrichment
     approach as /leaderboard, pulled out here so the recap can reuse it."""
@@ -5041,6 +5112,7 @@ GRX_TRENDING_BG_B64 = "/9j/4AAQSkZJRgABAQAAkACQAAD/4QECRXhpZgAATU0AKgAAAAgABwEOA
 GRX_TEST_TOKEN_CA = "EQBaCgUwOoc6gHCNln_oJzb0mVs79YG7wYoavh-o1ItaneLA"
 GRX_CALLER_EMOJI_ID = "5246974929194226712"
 GRX_TIMES_CALLED_EMOJI_ID = "5366424034189811245"
+GRX_MOST_SCANNED_EMOJI_ID = "5366516161238308466"
 
 def build_pnl_card(called_mc: float, current_mc: float) -> bytes:
     from io import BytesIO
@@ -5286,18 +5358,18 @@ async def cmd_pnl(message: Message):
 
 @dp.message(Command("topscans"))
 async def cmd_topscans(message: Message):
-    """On-demand version of the daily recap for the chat it's run in."""
-    status = await message.answer("Building today's recap…")
+    """All-time, bot-wide 'most scanned' leaderboard."""
+    status = await message.answer("Building the all-time scan leaderboard…")
     try:
-        text = await build_recap_message(message.chat.id, "daily")
+        text = await asyncio.to_thread(build_all_time_top_scans_message)
         if not text:
-            await status.edit_text("No scans recorded in this chat in the last 24 hours yet.")
+            await status.edit_text("No scans recorded yet.")
             return
         await status.edit_text(text, disable_web_page_preview=True)
     except Exception:
         logger.exception("/topscans failed")
         try:
-            await status.edit_text("❌ Couldn't build the recap right now.")
+            await status.edit_text("❌ Couldn't build the leaderboard right now.")
         except Exception:
             pass
 
