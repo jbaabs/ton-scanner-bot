@@ -20,6 +20,7 @@ import sqlite3
 import aiohttp
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
@@ -73,6 +74,42 @@ def _rate_limited(bucket: str, identity: int | None) -> float:
             if ts < cutoff:
                 _RATE_LAST.pop(k, None)
     return 0.0
+
+async def _safe_edit_text(target, text, **kwargs) -> bool:
+    """Edits a message's text. Telegram's 'message is not modified' response
+    (thrown when the new content is byte-identical to what's already showing
+    — e.g. someone double-taps Refresh before anything's actually changed)
+    is treated as a harmless no-op, not an error. Returns True if a genuine
+    edit happened, False if it was skipped because nothing changed; any
+    other TelegramBadRequest or exception is re-raised for the caller's
+    existing error handling."""
+    try:
+        await target.edit_text(text, **kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return False
+        raise
+
+async def _safe_edit_media(target, media, **kwargs) -> bool:
+    """Same as _safe_edit_text, for edit_media (chart/refresh image swaps)."""
+    try:
+        await target.edit_media(media=media, **kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return False
+        raise
+
+async def _safe_edit_caption(target, caption, **kwargs) -> bool:
+    """Same as _safe_edit_text, for edit_caption."""
+    try:
+        await target.edit_caption(caption=caption, **kwargs)
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return False
+        raise
 
 DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
 DEXSCREENER_SEARCH_API = "https://api.dexscreener.com/latest/dex/search"
@@ -5407,8 +5444,10 @@ async def cb_topscans_refresh(callback: CallbackQuery):
         if not text:
             await callback.answer("No scans recorded yet.", show_alert=True)
             return
-        await callback.message.edit_text(text, disable_web_page_preview=True, reply_markup=_topscans_keyboard())
-        await callback.answer("Refreshed")
+        changed = await _safe_edit_text(
+            callback.message, text, disable_web_page_preview=True, reply_markup=_topscans_keyboard()
+        )
+        await callback.answer("Refreshed" if changed else "Already up to date")
     except Exception:
         logger.exception("/topscans refresh failed")
         await callback.answer("Couldn't refresh right now.", show_alert=True)
@@ -5599,8 +5638,10 @@ async def cb_myscans_refresh(callback: CallbackQuery):
         if not text:
             await callback.answer("No calls on record yet.", show_alert=True)
             return
-        await callback.message.edit_text(text, disable_web_page_preview=True, reply_markup=_myscans_keyboard(owner_id))
-        await callback.answer("Refreshed")
+        changed = await _safe_edit_text(
+            callback.message, text, disable_web_page_preview=True, reply_markup=_myscans_keyboard(owner_id)
+        )
+        await callback.answer("Refreshed" if changed else "Already up to date")
     except Exception:
         logger.exception("/myscans refresh failed")
         await callback.answer("Couldn't refresh right now.", show_alert=True)
@@ -6085,7 +6126,8 @@ async def handle_toggle(callback: CallbackQuery):
                 if chart_photo:
                     try:
                         media = InputMediaPhoto(media=chart_photo, caption=text_out)
-                        await callback.message.edit_media(media=media, reply_markup=keyboard)
+                        if not await _safe_edit_media(callback.message, media, reply_markup=keyboard):
+                            return  # nothing actually changed — no need to fall back and re-render
                         return
                     except Exception:
                         logger.exception("Error updating fast refresh card, falling back")
@@ -6143,7 +6185,7 @@ async def handle_toggle(callback: CallbackQuery):
         if chart_photo:
             try:
                 media = InputMediaPhoto(media=chart_photo, caption=text)
-                await callback.message.edit_media(media=media, reply_markup=keyboard)
+                await _safe_edit_media(callback.message, media, reply_markup=keyboard)
                 await callback.answer()
                 return
             except Exception:
@@ -6236,7 +6278,8 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
     keyboard = build_chart_keyboard(key, timeframe)
 
     try:
-        await callback.message.edit_media(media=media, reply_markup=keyboard)
+        if not await _safe_edit_media(callback.message, media, reply_markup=keyboard):
+            return  # timeframe already showing this exact chart — nothing to do
     except Exception:
         await callback.message.answer_photo(
             photo=BufferedInputFile(png_bytes, filename="chart.png"),
@@ -6300,7 +6343,9 @@ async def handle_leaderboard_timeframe(callback: CallbackQuery):
     await callback.answer("Updating leaderboard...")
     text = await build_leaderboard(callback.message.chat.id, timeframe)
     try:
-        await callback.message.edit_text(text, reply_markup=_lb_keyboard(timeframe), disable_web_page_preview=True)
+        await _safe_edit_text(
+            callback.message, text, reply_markup=_lb_keyboard(timeframe), disable_web_page_preview=True
+        )
     except Exception:
         logger.exception("Error updating leaderboard")
         await callback.answer("Couldn't update the leaderboard right now.", show_alert=True)
@@ -6436,7 +6481,7 @@ async def handle_timeframe(callback: CallbackQuery):
     keyboard = build_chart_keyboard(key, timeframe)
 
     try:
-        await callback.message.edit_media(media=media, reply_markup=keyboard)
+        await _safe_edit_media(callback.message, media, reply_markup=keyboard)
     except Exception:
         logger.exception("Error switching chart timeframe")
 
