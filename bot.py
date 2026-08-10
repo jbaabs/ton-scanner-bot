@@ -500,6 +500,17 @@ def init_db():
         )
         """
     )
+    # Tracks the last date (YYYY-MM-DD, UTC) each recap kind actually sent,
+    # so a bot restart partway through the day can never cause a duplicate
+    # daily or weekly recap to go out.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recap_state (
+            kind TEXT PRIMARY KEY,
+            last_sent_date TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -1850,8 +1861,253 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     return "\n".join(lines)
 
 
-def save_recent_chat_scan(message: Message, report: dict, sent_message: Message) -> None:
-    token_key = _history_key(report)
+RECAP_WINDOWS = {"daily": (86400, "TODAY"), "weekly": (7 * 86400, "THIS WEEK")}
+
+
+def _most_scanned_rows(chat_id: int, seconds: int, limit: int = 10) -> list[dict]:
+    """Top tokens by raw scan count in this chat over the window — this is
+    the 'Most Scanned' side of the recap, independent of performance."""
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT token_key,
+                   MAX(token_address) AS token_address,
+                   MAX(token_symbol) AS token_symbol,
+                   COUNT(*) AS scan_count
+            FROM scan_events
+            WHERE chat_id=? AND scan_ts>=?
+            GROUP BY token_key
+            ORDER BY scan_count DESC
+            LIMIT ?
+            """,
+            (chat_id, cutoff, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> list[dict]:
+    """Top calls by multiple in this chat over the window — same enrichment
+    approach as /leaderboard, pulled out here so the recap can reuse it."""
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM leaderboard_calls WHERE chat_id=? AND called_ts>=? ORDER BY called_ts DESC",
+            (chat_id, cutoff),
+        ).fetchall()]
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(8)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+    ) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+
+    ranked.sort(key=lambda r: r["multiple"], reverse=True)
+    return ranked[:limit]
+
+
+async def build_recap_message(chat_id: int, kind: str) -> str | None:
+    """Builds the two-part scan recap for one group: MOST SCANNED (by raw
+    scan count) and TOP SCANS (by multiple), in the same visual language as
+    GRX SIGNALS / the leaderboard. Returns None if there's nothing to report
+    for this chat in the window, so callers can skip silently.
+    """
+    seconds, label = RECAP_WINDOWS.get(kind, RECAP_WINDOWS["daily"])
+    title = "GRX DAILY RECAP" if kind == "daily" else "GRX WEEKLY RECAP"
+
+    most_scanned = await asyncio.to_thread(_most_scanned_rows, chat_id, seconds)
+    top_scans = await _recap_top_scans_rows(chat_id, seconds)
+    if not most_scanned and not top_scans:
+        return None
+
+    lines = [f'{_ce("leaderboard", "🔥")} <b>{title} · {label}</b>', ""]
+
+    lines.append("<b>MOST SCANNED</b>")
+    if most_scanned:
+        most_lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, row in enumerate(most_scanned, 1):
+            rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
+            symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+            address = str(row.get("token_address") or "").strip()
+            scan_url = _deep_scan_url(address) if address else None
+            ticker = (
+                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+                if scan_url else f"<b>${symbol}</b>"
+            )
+            times = int(row.get("scan_count") or 0)
+            most_lines.append(f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''}")
+        lines.append("<blockquote>" + "\n".join(most_lines) + "</blockquote>")
+    else:
+        lines.append("No scans recorded yet.")
+
+    lines += ["", "<b>TOP SCANS</b>"]
+    if top_scans:
+        medals = ["🥇", "🥈", "🥉"]
+        top_lines = []
+        for i, row in enumerate(top_scans, 1):
+            rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
+            symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+            address = str(row.get("token_address") or "").strip()
+            scan_url = _deep_scan_url(address) if address else None
+            ticker = (
+                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+                if scan_url else f"<b>${symbol}</b>"
+            )
+            top_lines.append(
+                f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
+            )
+        lines.append("<blockquote>" + "\n".join(top_lines) + "</blockquote>")
+    else:
+        lines.append("No qualifying calls yet.")
+
+    return "\n".join(lines)
+
+
+def _active_recap_chat_ids(seconds: int) -> list[int]:
+    """Every group/supergroup that actually had scan activity in the window
+    — the recap has nothing to say to a chat that hasn't scanned anything,
+    so it's skipped rather than sent empty."""
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT chat_id FROM scan_events
+            WHERE scan_ts>=? AND chat_type IN ('group','supergroup') AND chat_id IS NOT NULL
+            """,
+            (cutoff,),
+        ).fetchall()
+    return [int(r[0]) for r in rows if r[0]]
+
+
+def _recap_already_sent_today(kind: str) -> bool:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT last_sent_date FROM recap_state WHERE kind=?", (kind,)).fetchone()
+    return bool(row and row[0] == today)
+
+
+def _mark_recap_sent(kind: str) -> None:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO recap_state(kind,last_sent_date) VALUES(?,?) "
+            "ON CONFLICT(kind) DO UPDATE SET last_sent_date=excluded.last_sent_date",
+            (kind, today),
+        )
+
+
+async def _send_weekly_biggest_mover(chat_id: int) -> None:
+    """Its own standalone message — not folded into the weekly recap text —
+    highlighting whichever single call in this chat put up the best multiple
+    over the past 7 days. Uses the same PNL card visual as the milestone
+    and trending posts, since it's the same idea: called at X, now at Y.
+    """
+    rows = await _recap_top_scans_rows(chat_id, RECAP_WINDOWS["weekly"][0], limit=1)
+    if not rows:
+        return
+    row = rows[0]
+    called_mc = _as_float(row.get("called_market_cap"))
+    multiple = row.get("multiple")
+    if not called_mc or not multiple or called_mc <= 0:
+        return
+    current_mc = called_mc * multiple
+
+    symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+    address = str(row.get("token_address") or "").strip()
+    scan_url = _deep_scan_url(address) if address else None
+    ticker = (
+        f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+        if scan_url else f"<b>${symbol}</b>"
+    )
+    caption = (
+        f'🚀 <b>BIGGEST MOVER OF THE WEEK</b>\n\n'
+        f'{ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(multiple)}</b>'
+    )
+    try:
+        png = await _render_offloop(build_pnl_card, called_mc, current_mc)
+        await bot.send_photo(chat_id, BufferedInputFile(png, filename="grx_biggest_mover.png"), caption=caption)
+    except Exception:
+        logger.exception("Could not send weekly Biggest Mover card for chat %s", chat_id)
+
+
+DAILY_RECAP_HOUR_UTC = max(0, min(23, int(os.getenv("DAILY_RECAP_HOUR_UTC", "0"))))
+
+
+async def recap_scheduler():
+    """Fires the daily group recap once every 24h at DAILY_RECAP_HOUR_UTC,
+    and — only on Fridays — additionally fires the weekly recap right after.
+    Uses recap_state to survive restarts without double-sending on the same day.
+    """
+    await asyncio.sleep(10)
+    while True:
+        try:
+            now = time.gmtime()
+            if now.tm_hour == DAILY_RECAP_HOUR_UTC:
+                if not _recap_already_sent_today("daily"):
+                    for chat_id in _active_recap_chat_ids(RECAP_WINDOWS["daily"][0]):
+                        try:
+                            text = await build_recap_message(chat_id, "daily")
+                            if text:
+                                await bot.send_message(chat_id, text, disable_web_page_preview=True)
+                        except Exception:
+                            logger.exception("Daily recap failed for chat %s", chat_id)
+                        await asyncio.sleep(0.3)
+                    _mark_recap_sent("daily")
+
+                # Friday, UTC.
+                if now.tm_wday == 4 and not _recap_already_sent_today("weekly"):
+                    for chat_id in _active_recap_chat_ids(RECAP_WINDOWS["weekly"][0]):
+                        try:
+                            text = await build_recap_message(chat_id, "weekly")
+                            if text:
+                                await bot.send_message(chat_id, text, disable_web_page_preview=True)
+                        except Exception:
+                            logger.exception("Weekly recap failed for chat %s", chat_id)
+                        # Separate message, sent right after — not merged into the recap text.
+                        try:
+                            await _send_weekly_biggest_mover(chat_id)
+                        except Exception:
+                            logger.exception("Weekly Biggest Mover failed for chat %s", chat_id)
+                        await asyncio.sleep(0.3)
+                    _mark_recap_sent("weekly")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("recap_scheduler cycle failed")
+        await asyncio.sleep(600)  # check every 10 minutes — cheap, and recap_state prevents dupes
+
+
+@dp.message(Command("topscans"))
+async def cmd_topscans(message: Message):
+    """On-demand version of the daily recap for the chat it's run in."""
+    status = await message.answer("Building today's recap…")
+    try:
+        text = await build_recap_message(message.chat.id, "daily")
+        if not text:
+            await status.edit_text("No scans recorded in this chat in the last 24 hours yet.")
+            return
+        await status.edit_text(text, disable_web_page_preview=True)
+    except Exception:
+        logger.exception("/topscans failed")
+        try:
+            await status.edit_text("❌ Couldn't build the recap right now.")
+        except Exception:
+            pass
     if not token_key:
         return
     chat_username = getattr(message.chat, "username", None)
@@ -5886,14 +6142,18 @@ async def main():
     logger.info("Starting TON Meme Token Scanner bot... GRX_UI_V5_CARBON_ALERTS")
     watcher = asyncio.create_task(alert_watcher())
     live_stream = asyncio.create_task(ton_live_stream_engine())
+    recap_task = asyncio.create_task(recap_scheduler())
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
         live_stream.cancel()
+        recap_task.cancel()
         try: await watcher
         except asyncio.CancelledError: pass
         try: await live_stream
+        except asyncio.CancelledError: pass
+        try: await recap_task
         except asyncio.CancelledError: pass
 
 
