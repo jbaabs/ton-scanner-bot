@@ -49,6 +49,8 @@ _RATE_LIMITS = {
     "refresh": 5.0,     # per user
     "chart": 2.0,       # per user
     "leaderboard": 0.0,  # per chat — disabled, unnecessary friction
+    "score": 2.0,       # per user — /score does a live fetch + render, force=True bypasses caching
+    "pnl": 2.0,         # per user — same reason as score
 }
 _RATE_LAST: dict[tuple[str, int], float] = {}
 
@@ -5306,6 +5308,11 @@ async def cmd_start(message: Message):
 async def cmd_pnl(message: Message):
     """Renders the same PNL card format the auto-milestone posts use, on
     demand for any token — image only, no caption text, per request."""
+    remaining = _rate_limited("pnl", message.from_user.id if message.from_user else None)
+    if remaining > 0:
+        await message.answer(f"Slow down a bit — try again in {max(1, int(remaining + 0.99))}s.")
+        return
+
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Usage: <code>/pnl TICKER</code> or <code>/pnl &lt;contract address&gt;</code>")
@@ -5452,6 +5459,80 @@ async def cmd_allscans(message: Message):
         await message.answer("❌ Couldn't pull scan totals right now.")
 
 
+@dp.message(Command("mystats"))
+async def cmd_mystats(message: Message):
+    """Personal stats — global across every chat this person has ever
+    called a token in, not scoped to just the chat they run this in.
+    Best call highlighted on its own, then the next 5 below it."""
+    if not message.from_user:
+        return
+    caller_id = message.from_user.id
+    status = await message.answer("Pulling your stats…")
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM leaderboard_calls WHERE caller_id=? ORDER BY called_ts DESC",
+                (caller_id,),
+            ).fetchall()]
+
+        if not rows:
+            await status.edit_text("No calls on record for you yet — scan something first!")
+            return
+
+        sem = asyncio.Semaphore(8)
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+        ) as session:
+            async def enrich(row):
+                async with sem:
+                    mc = await _lb_current_mcap(session, row["token_address"])
+                called = _as_float(row.get("called_market_cap"))
+                if not mc or not called or called <= 0:
+                    return None
+                row["multiple"] = mc / called
+                return row
+
+            ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+
+        if not ranked:
+            await status.edit_text("No qualifying calls yet — try again once your calls have live market data.")
+            return
+
+        ranked.sort(key=lambda r: r["multiple"], reverse=True)
+
+        def _line(row):
+            symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+            address = str(row.get("token_address") or "").strip()
+            scan_url = _deep_scan_url(address) if address else None
+            ticker = (
+                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+                if scan_url else f"<b>${symbol}</b>"
+            )
+            return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
+
+        best = ranked[0]
+        rest = ranked[1:6]
+
+        lines = [f'{_ce("leaderboard", "🏆")} <b>YOUR STATS</b>', ""]
+        lines.append("<b>BEST CALL</b>")
+        lines.append(f"🏆 {_line(best)}")
+
+        if rest:
+            lines += ["", "<b>TOP 5</b>"]
+            rest_lines = [f"{i}. {_line(row)}" for i, row in enumerate(rest, 1)]
+            lines.append("<blockquote>" + "\n".join(rest_lines) + "</blockquote>")
+
+        await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+    except Exception:
+        logger.exception("/mystats failed")
+        try:
+            await status.edit_text("❌ Couldn't pull your stats right now.")
+        except Exception:
+            pass
+
+
 
 def build_score_card(symbol: str, snap: dict) -> bytes:
     """Owner-only /score card: centered title, a gradient pill loading bar
@@ -5536,6 +5617,11 @@ def build_score_card(symbol: str, snap: dict) -> bytes:
 @dp.message(Command("score"))
 async def cmd_score(message: Message):
     """Live Trending score for a token."""
+    remaining = _rate_limited("score", message.from_user.id if message.from_user else None)
+    if remaining > 0:
+        await message.answer(f"Slow down a bit — try again in {max(1, int(remaining + 0.99))}s.")
+        return
+
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Usage: <code>/score FAST</code>")
