@@ -986,6 +986,8 @@ def _usd_str_to_float(t) -> float | None:
         m, t = 1000, t[:-1]
     elif t.endswith("M"):
         m, t = 1_000_000, t[:-1]
+    elif t.endswith("B"):
+        m, t = 1_000_000_000, t[:-1]
     try:
         return float(t) * m
     except (TypeError, ValueError):
@@ -2090,24 +2092,6 @@ async def recap_scheduler():
         except Exception:
             logger.exception("recap_scheduler cycle failed")
         await asyncio.sleep(600)  # check every 10 minutes — cheap, and recap_state prevents dupes
-
-
-@dp.message(Command("topscans"))
-async def cmd_topscans(message: Message):
-    """On-demand version of the daily recap for the chat it's run in."""
-    status = await message.answer("Building today's recap…")
-    try:
-        text = await build_recap_message(message.chat.id, "daily")
-        if not text:
-            await status.edit_text("No scans recorded in this chat in the last 24 hours yet.")
-            return
-        await status.edit_text(text, disable_web_page_preview=True)
-    except Exception:
-        logger.exception("/topscans failed")
-        try:
-            await status.edit_text("❌ Couldn't build the recap right now.")
-        except Exception:
-            pass
     if not token_key:
         return
     chat_username = getattr(message.chat, "username", None)
@@ -5252,6 +5236,24 @@ async def cmd_pnl(message: Message):
     except Exception:
         logger.exception("/pnl failed")
         await message.answer("❌ Couldn't build that PNL card right now.")
+
+
+@dp.message(Command("topscans"))
+async def cmd_topscans(message: Message):
+    """On-demand version of the daily recap for the chat it's run in."""
+    status = await message.answer("Building today's recap…")
+    try:
+        text = await build_recap_message(message.chat.id, "daily")
+        if not text:
+            await status.edit_text("No scans recorded in this chat in the last 24 hours yet.")
+            return
+        await status.edit_text(text, disable_web_page_preview=True)
+    except Exception:
+        logger.exception("/topscans failed")
+        try:
+            await status.edit_text("❌ Couldn't build the recap right now.")
+        except Exception:
+            pass
 
 
 
