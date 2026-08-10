@@ -1587,8 +1587,6 @@ async def maybe_announce_trending(report: dict) -> None:
         return
     snap = _trending_snapshot(report)
     tier = int(snap.get("tier") or 0)
-    if tier <= 0:
-        return
 
     token_key = _history_key(report)
     now = int(time.time())
@@ -1602,10 +1600,22 @@ async def maybe_announce_trending(report: dict) -> None:
     entry_mc = _as_float(row[2]) if row else None
     orig_message_id = int(row[3]) if row and row[3] else None
 
-    # Only ever act on a genuinely new record tier for this token — no
-    # time-based cooldown needed, since a strictly-higher tier can only be
-    # crossed once per token (tiers never "re-trigger" at the same level).
-    if tier <= last_tier:
+    # Decay: last_tier is no longer a permanent, all-time-high floor. If the
+    # live rolling score has cooled off below a tier this token previously
+    # held, lower the bar to match. If it decays all the way back down to 0
+    # and later re-crosses Tier 1, that's treated as a genuine fresh
+    # entrance — the full "$TICKER HAS ENTERED GRX TRENDING" post with chart
+    # fires again, not just a reply, since the token has fully round-tripped
+    # back to "not trending" in between.
+    if row and tier < last_tier:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "UPDATE trending_alerts SET last_tier=? WHERE token_key=?",
+                (tier, token_key),
+            )
+        last_tier = tier
+
+    if tier <= 0 or tier <= last_tier:
         return
 
     info = report.get("jetton_info") or {}
@@ -1625,6 +1635,9 @@ async def maybe_announce_trending(report: dict) -> None:
         keyboard.row(_custom_icon_button(text=f"Scan ${symbol} on GRX", url=scan_url, emoji_name="trending_scan"))
         reply_markup = keyboard.as_markup()
 
+    # A fresh entrance is "last_tier was 0 right before this crossing" — true
+    # both for a token that's never trended before AND one that fully decayed
+    # back down and is climbing again from scratch.
     is_first_entry = last_tier == 0
     sent_message_id = orig_message_id
 
@@ -1683,6 +1696,12 @@ async def maybe_announce_trending(report: dict) -> None:
                     logger.exception("Could not notify owner about Trending channel failure")
             return
         entry_mc = current_mc
+        # Fresh entrance = fresh anchor. Without this, the PNL milestone
+        # dedup would still remember whatever multiple the *previous* cycle
+        # reached (e.g. 100x) and silently block 2x/5x/etc cards from firing
+        # again relative to this new entry price.
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM pnl_milestones WHERE scope_key='trending' AND token_key=?", (token_key,))
     else:
         # Tier bump — reply to the original entry post instead of posting a
         # whole new standalone message.
