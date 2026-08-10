@@ -1866,25 +1866,47 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
 RECAP_WINDOWS = {"daily": (86400, "TODAY"), "weekly": (7 * 86400, "THIS WEEK")}
 
 
-def _most_scanned_rows(chat_id: int, seconds: int, limit: int = 10) -> list[dict]:
-    """Top tokens by raw scan count in this chat over the window — this is
-    the 'Most Scanned' side of the recap, independent of performance."""
+def _most_scanned_rows_global(seconds: int, limit: int = 10) -> list[dict]:
+    """Bot-wide 'Most Scanned' — same counting rule as the trending score:
+    each user's DM scans of a token count as 1 (no matter how many times
+    they refresh/rescan it that day), and each user's group scans count as
+    another 1 (no matter how many different groups). A user who does both
+    contributes 2. This mirrors _get_trending_score's dedup exactly, just
+    without the point-weighting, and stays a 24h rolling window like
+    trending does — recomputed fresh against "now" every time it's called.
+    """
     cutoff = int(time.time()) - seconds
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT token_key,
-                   MAX(token_address) AS token_address,
-                   MAX(token_symbol) AS token_symbol,
-                   COUNT(*) AS scan_count
-            FROM scan_events
-            WHERE chat_id=? AND scan_ts>=?
-            GROUP BY token_key
+            WITH dm AS (
+                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
+                FROM scan_events
+                WHERE scan_ts>=? AND chat_type='private' AND scanner_id IS NOT NULL
+                GROUP BY token_key
+            ),
+            grp AS (
+                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
+                FROM scan_events
+                WHERE scan_ts>=? AND chat_type IN ('group','supergroup') AND scanner_id IS NOT NULL
+                GROUP BY token_key
+            ),
+            meta AS (
+                SELECT token_key, MAX(token_address) AS token_address, MAX(token_symbol) AS token_symbol
+                FROM scan_events
+                WHERE scan_ts>=?
+                GROUP BY token_key
+            )
+            SELECT meta.token_key, meta.token_address, meta.token_symbol,
+                   COALESCE(dm.c,0) + COALESCE(grp.c,0) AS scan_count
+            FROM meta
+            LEFT JOIN dm ON dm.token_key=meta.token_key
+            LEFT JOIN grp ON grp.token_key=meta.token_key
             ORDER BY scan_count DESC
             LIMIT ?
             """,
-            (chat_id, cutoff, limit),
+            (cutoff, cutoff, cutoff, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1923,15 +1945,16 @@ async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> 
 
 
 async def build_recap_message(chat_id: int, kind: str) -> str | None:
-    """Builds the two-part scan recap for one group: MOST SCANNED (by raw
-    scan count) and TOP SCANS (by multiple), in the same visual language as
-    GRX SIGNALS / the leaderboard. Returns None if there's nothing to report
-    for this chat in the window, so callers can skip silently.
+    """Builds the two-part scan recap for one group: MOST SCANNED (bot-wide,
+    per-user deduped, same rule as trending) and TOP SCANS (this group's own
+    calls, by multiple), in the same visual language as GRX SIGNALS / the
+    leaderboard. Returns None if there's nothing to report for this chat in
+    the window, so callers can skip silently.
     """
     seconds, label = RECAP_WINDOWS.get(kind, RECAP_WINDOWS["daily"])
     title = "GRX DAILY RECAP" if kind == "daily" else "GRX WEEKLY RECAP"
 
-    most_scanned = await asyncio.to_thread(_most_scanned_rows, chat_id, seconds)
+    most_scanned = await asyncio.to_thread(_most_scanned_rows_global, seconds)
     top_scans = await _recap_top_scans_rows(chat_id, seconds)
     if not most_scanned and not top_scans:
         return None
