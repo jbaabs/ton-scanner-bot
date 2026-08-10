@@ -1556,7 +1556,7 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
     ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
+    ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
                 bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
@@ -3068,6 +3068,21 @@ def _chart_axis_price(v, _pos=None):
     if a >= .000001: return f"{v:.8f}".rstrip("0").rstrip(".")
     return f"{v:.10f}".rstrip("0").rstrip(".")
 
+def _chart_price_label(v) -> str:
+    """Same full-decimal formatting as the y-axis, with a $ prefix — used for
+    the current-price pill on charts, and now the dashboard's PRICE stat box
+    too. Subscript-zero notation (e.g. $0.0₄137, fine in Telegram text
+    messages) doesn't reliably render as an actual subscript inside a
+    rasterized matplotlib image — depending on the font it can draw as a
+    normal-sized digit, making the number look wrong or run-together instead
+    of compact. Plain, fully-expanded decimal instead."""
+    try:
+        if v is None or float(v) <= 0:
+            return "N/A"
+    except (TypeError, ValueError):
+        return "N/A"
+    return f"${_chart_axis_price(v)}"
+
 def _normalize_chart_ohlcv(ohlcv: list | None) -> list:
     """Return valid OHLCV rows deduplicated by timestamp in chronological order."""
     by_ts = {}
@@ -3090,7 +3105,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None, anchor_label: str | None = None, ath_price: str | float | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None, anchor_label: str | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -3152,34 +3167,9 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN chart marker")
 
-    # ATH marker: a straight fact from the bot's own data (the highest price
-    # ever recorded for this token), not an interpretive overlay. Almost
-    # always sits above the currently-visible candle range, so the y-axis
-    # top gets extended to include it — otherwise it'd just be clipped off
-    # and never actually show up.
-    ath_price_f = None
-    if ath_price is not None:
-        try:
-            raw_ath_price = str(ath_price).replace("$", "").replace(",", "").strip()
-            ath_price_f = float(raw_ath_price)
-            if ath_price_f <= 0:
-                ath_price_f = None
-        except Exception:
-            ath_price_f = None
-
-    top = max(highs)
-    if ath_price_f and ath_price_f > top:
-        top = ath_price_f
-
     ax.set_xlim(-.8,len(ohlcv)+1.8)
-    pad=max((top-min(lows))*.055,abs(last)*.009,1e-12)
-    ax.set_ylim(min(lows)-pad,top+pad)
-
-    if ath_price_f:
-        ath_gold = "#F5C842"
-        ax.axhline(ath_price_f, color=ath_gold, linewidth=1.4, alpha=.85, linestyle="--", zorder=29)
-        ax.text(len(ohlcv)+1.7, ath_price_f, "ATH", ha="right", va="bottom",
-                color=ath_gold, fontsize=8.5, fontweight="bold", zorder=31, clip_on=False)
+    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
+    ax.set_ylim(min(lows)-pad,max(highs)+pad)
 
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
     ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
@@ -3193,7 +3183,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
+    ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
                 bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
@@ -3319,7 +3309,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
-    ax.annotate(_fmt_price_compact(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
+    ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
 
     # Compact pulse/caller band. Right card grew a touch taller (.135 vs the
     # old .115) to fit the new "CALLED BY" row without crowding PERFORMANCE.
@@ -3356,7 +3346,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
     # exactly with MARKET PULSE / FIRST CALLED BY, but the previous dead space
     # is filled horizontally.
     left_stats = [
-        ("PRICE", _fmt_price_compact(dex.get("price_usd")), text),
+        ("PRICE", _chart_price_label(dex.get("price_usd")), text),
         ("MARKET CAP", _fmt_usd(dex.get("market_cap")), text),
         ("AGE", age, text),
         ("LIQUIDITY", _fmt_usd(dex.get("liquidity_usd")), text),
@@ -6180,7 +6170,6 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
         entry["report"].get("_viewer_scan_label"),
-        (entry["report"].get("dex_data") or {}).get("ath_price"),
     )
 
     media = InputMediaPhoto(
@@ -6381,7 +6370,6 @@ async def handle_timeframe(callback: CallbackQuery):
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
         entry["report"].get("_viewer_scan_label"),
-        (entry["report"].get("dex_data") or {}).get("ath_price"),
     )
 
     media = InputMediaPhoto(
