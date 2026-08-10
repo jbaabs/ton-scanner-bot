@@ -5302,6 +5302,84 @@ async def cmd_topscans(message: Message):
             pass
 
 
+@dp.message(Command("allscans"))
+async def cmd_allscans(message: Message):
+    """Total lifetime scan count for a token, bot-wide — same dedup rule as
+    trending (1 DM slot + 1 group slot per person per calendar day), just
+    summed across every day in the token's history instead of a 24h window.
+    A person spamming refresh, or rescanning across ten different groups in
+    one day, still only ever contributes up to 2 toward this total for that day.
+    """
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Usage: <code>/allscans TICKER</code> or <code>/allscans &lt;contract address&gt;</code>")
+        return
+
+    query = parts[1].strip()
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+        ) as session:
+            if is_valid_ton_address(query):
+                address = query
+            else:
+                address, error_text = await resolve_ticker_to_address(session, query)
+                if error_text or not address:
+                    await message.answer(error_text or "Token not found.")
+                    return
+
+            report = await get_token_state(session, address, force=True)
+
+        if not report.get("found"):
+            await message.answer("Token not found.")
+            return
+
+        token_key = _history_key(report)
+        info = report.get("jetton_info") or {}
+        symbol = html.escape(str(info.get("symbol") or "TOKEN").lstrip("$"))
+
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                """
+                WITH days AS (
+                    SELECT strftime('%Y-%m-%d', scan_ts, 'unixepoch') AS day,
+                           scanner_id,
+                           MAX(CASE WHEN chat_type='private' THEN 1 ELSE 0 END) AS dm_hit,
+                           MAX(CASE WHEN chat_type IN ('group','supergroup') THEN 1 ELSE 0 END) AS group_hit
+                    FROM scan_events
+                    WHERE token_key=? AND scanner_id IS NOT NULL
+                    GROUP BY day, scanner_id
+                )
+                SELECT COALESCE(SUM(dm_hit),0) AS dm_scans,
+                       COALESCE(SUM(group_hit),0) AS group_scans,
+                       COUNT(DISTINCT scanner_id) AS unique_scanners
+                FROM days
+                """,
+                (token_key,),
+            ).fetchone()
+
+        dm_scans = int(row[0] or 0) if row else 0
+        group_scans = int(row[1] or 0) if row else 0
+        unique_scanners = int(row[2] or 0) if row else 0
+        total = dm_scans + group_scans
+
+        if total == 0:
+            await message.answer(f"$&#8203;{symbol} hasn't been scanned yet.", parse_mode="HTML")
+            return
+
+        text = (
+            f'<b>${symbol} — ALL-TIME SCANS</b>\n\n'
+            f'Total scans: <b>{total}</b>\n'
+            f'» DM: <b>{dm_scans}</b>  •  Group: <b>{group_scans}</b>\n'
+            f'Unique scanners: <b>{unique_scanners}</b>'
+        )
+        await message.answer(text)
+    except Exception:
+        logger.exception("/allscans failed")
+        await message.answer("❌ Couldn't pull scan totals right now.")
+
+
 
 def build_score_card(symbol: str, snap: dict) -> bytes:
     """Owner-only /score card: centered title, a gradient pill loading bar
@@ -5385,11 +5463,7 @@ def build_score_card(symbol: str, snap: dict) -> bytes:
 
 @dp.message(Command("score"))
 async def cmd_score(message: Message):
-    """Owner-only live Trending score for a token."""
-    if not message.from_user or int(message.from_user.id) != OWNER_TELEGRAM_ID:
-        await message.answer("This command is restricted to the GRX bot owner.")
-        return
-
+    """Live Trending score for a token."""
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("Usage: <code>/score FAST</code>")
