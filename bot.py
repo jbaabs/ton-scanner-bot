@@ -3090,7 +3090,7 @@ def _chart_time_format(timeframe_label: str) -> str:
     return "%H:%M" if str(timeframe_label or "").lower() in {"1m", "5m", "15m", "30m", "1h", "4h"} else "%b %d"
 
 
-def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None, anchor_label: str | None = None) -> bytes:
+def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, token_icon_bytes: bytes | None = None, grx_watermark_bytes: bytes | None = None, scan_price: str | float | None = None, anchor_label: str | None = None, ath_price: str | float | None = None) -> bytes:
     """Standalone chart view matching the clean chart used by the main GRX dashboard."""
     import matplotlib
     matplotlib.use("Agg")
@@ -3152,9 +3152,35 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN chart marker")
 
+    # ATH marker: a straight fact from the bot's own data (the highest price
+    # ever recorded for this token), not an interpretive overlay. Almost
+    # always sits above the currently-visible candle range, so the y-axis
+    # top gets extended to include it — otherwise it'd just be clipped off
+    # and never actually show up.
+    ath_price_f = None
+    if ath_price is not None:
+        try:
+            raw_ath_price = str(ath_price).replace("$", "").replace(",", "").strip()
+            ath_price_f = float(raw_ath_price)
+            if ath_price_f <= 0:
+                ath_price_f = None
+        except Exception:
+            ath_price_f = None
+
+    top = max(highs)
+    if ath_price_f and ath_price_f > top:
+        top = ath_price_f
+
     ax.set_xlim(-.8,len(ohlcv)+1.8)
-    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
-    ax.set_ylim(min(lows)-pad,max(highs)+pad)
+    pad=max((top-min(lows))*.055,abs(last)*.009,1e-12)
+    ax.set_ylim(min(lows)-pad,top+pad)
+
+    if ath_price_f:
+        ath_gold = "#F5C842"
+        ax.axhline(ath_price_f, color=ath_gold, linewidth=1.4, alpha=.85, linestyle="--", zorder=29)
+        ax.text(len(ohlcv)+1.7, ath_price_f, "ATH", ha="right", va="bottom",
+                color=ath_gold, fontsize=8.5, fontweight="bold", zorder=31, clip_on=False)
+
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
     ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
@@ -5459,8 +5485,8 @@ async def cmd_allscans(message: Message):
         await message.answer("❌ Couldn't pull scan totals right now.")
 
 
-@dp.message(Command("mystats"))
-async def cmd_mystats(message: Message):
+@dp.message(Command("myscans"))
+async def cmd_myscans(message: Message):
     """Personal stats — global across every chat this person has ever
     called a token in, not scoped to just the chat they run this in.
     Best call highlighted on its own, then the next 5 below it."""
@@ -6154,6 +6180,7 @@ async def _send_chart(callback: CallbackQuery, key: str, timeframe: str):
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
         entry["report"].get("_viewer_scan_label"),
+        (entry["report"].get("dex_data") or {}).get("ath_price"),
     )
 
     media = InputMediaPhoto(
@@ -6354,6 +6381,7 @@ async def handle_timeframe(callback: CallbackQuery):
         # same for every viewer/group instead of being anchor-specific.
         (entry["report"].get("_viewer_first_scan") or {}).get("scan_price"),
         entry["report"].get("_viewer_scan_label"),
+        (entry["report"].get("dex_data") or {}).get("ath_price"),
     )
 
     media = InputMediaPhoto(
