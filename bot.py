@@ -2092,6 +2092,10 @@ async def recap_scheduler():
         except Exception:
             logger.exception("recap_scheduler cycle failed")
         await asyncio.sleep(600)  # check every 10 minutes — cheap, and recap_state prevents dupes
+
+
+def save_recent_chat_scan(message: Message, report: dict, sent_message: Message) -> None:
+    token_key = _history_key(report)
     if not token_key:
         return
     chat_username = getattr(message.chat, "username", None)
