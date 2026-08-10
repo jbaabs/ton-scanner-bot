@@ -5312,10 +5312,7 @@ async def cmd_start(message: Message):
                 logger.exception("Deep-link scan failed")
                 await message.answer("I couldn't open that scan. Please send the token address directly.")
                 return
-    await message.answer(
-        "<b>TON Meme Token Scanner</b>\n\n"
-        "Send a TON jetton contract address or ticker."
-    )
+    await message.answer("Send CA / $TICKER")
 
 
 
@@ -5379,6 +5376,12 @@ async def cmd_pnl(message: Message):
         await message.answer("❌ Couldn't build that PNL card right now.")
 
 
+def _topscans_keyboard():
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🔄 Refresh", callback_data="ts:refresh"))
+    return b.as_markup()
+
+
 @dp.message(Command("topscans"))
 async def cmd_topscans(message: Message):
     """All-time, bot-wide 'most scanned' leaderboard."""
@@ -5388,13 +5391,27 @@ async def cmd_topscans(message: Message):
         if not text:
             await status.edit_text("No scans recorded yet.")
             return
-        await status.edit_text(text, disable_web_page_preview=True)
+        await status.edit_text(text, disable_web_page_preview=True, reply_markup=_topscans_keyboard())
     except Exception:
         logger.exception("/topscans failed")
         try:
             await status.edit_text("❌ Couldn't build the leaderboard right now.")
         except Exception:
             pass
+
+
+@dp.callback_query(F.data == "ts:refresh")
+async def cb_topscans_refresh(callback: CallbackQuery):
+    try:
+        text = await asyncio.to_thread(build_all_time_top_scans_message)
+        if not text:
+            await callback.answer("No scans recorded yet.", show_alert=True)
+            return
+        await callback.message.edit_text(text, disable_web_page_preview=True, reply_markup=_topscans_keyboard())
+        await callback.answer("Refreshed")
+    except Exception:
+        logger.exception("/topscans refresh failed")
+        await callback.answer("Couldn't refresh right now.", show_alert=True)
 
 
 @dp.message(Command("allscans"))
@@ -5475,6 +5492,72 @@ async def cmd_allscans(message: Message):
         await message.answer("❌ Couldn't pull scan totals right now.")
 
 
+async def _build_myscans_message(caller_id: int) -> str | None:
+    """Shared by /myscans and its Refresh button — global across every chat
+    this person has ever called a token in. Returns None if they have no
+    qualifying calls yet, so callers can handle that distinctly from an error."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM leaderboard_calls WHERE caller_id=? ORDER BY called_ts DESC",
+            (caller_id,),
+        ).fetchall()]
+
+    if not rows:
+        return None
+
+    sem = asyncio.Semaphore(8)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
+    ) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda r: r["multiple"], reverse=True)
+
+    def _line(row):
+        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        address = str(row.get("token_address") or "").strip()
+        scan_url = _deep_scan_url(address) if address else None
+        ticker = (
+            f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+            if scan_url else f"<b>${symbol}</b>"
+        )
+        return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
+
+    best = ranked[0]
+    rest = ranked[1:6]
+
+    lines = [f'{_ce("leaderboard", "🏆")} <b>YOUR STATS</b>', ""]
+    lines.append("<b>BEST CALL</b>")
+    lines.append(f"🏆 {_line(best)}")
+
+    if rest:
+        lines += ["", "<b>TOP 5</b>"]
+        rest_lines = [f"{i}. {_line(row)}" for i, row in enumerate(rest, 1)]
+        lines.append("<blockquote>" + "\n".join(rest_lines) + "</blockquote>")
+
+    return "\n".join(lines)
+
+
+def _myscans_keyboard(caller_id: int):
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🔄 Refresh", callback_data=f"ms:refresh:{caller_id}"))
+    return b.as_markup()
+
+
 @dp.message(Command("myscans"))
 async def cmd_myscans(message: Message):
     """Personal stats — global across every chat this person has ever
@@ -5485,68 +5568,42 @@ async def cmd_myscans(message: Message):
     caller_id = message.from_user.id
     status = await message.answer("Pulling your stats…")
     try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM leaderboard_calls WHERE caller_id=? ORDER BY called_ts DESC",
-                (caller_id,),
-            ).fetchall()]
-
-        if not rows:
+        text = await _build_myscans_message(caller_id)
+        if not text:
             await status.edit_text("No calls on record for you yet — scan something first!")
             return
-
-        sem = asyncio.Semaphore(8)
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12),
-            connector=aiohttp.TCPConnector(limit=16, ttl_dns_cache=300),
-        ) as session:
-            async def enrich(row):
-                async with sem:
-                    mc = await _lb_current_mcap(session, row["token_address"])
-                called = _as_float(row.get("called_market_cap"))
-                if not mc or not called or called <= 0:
-                    return None
-                row["multiple"] = mc / called
-                return row
-
-            ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
-
-        if not ranked:
-            await status.edit_text("No qualifying calls yet — try again once your calls have live market data.")
-            return
-
-        ranked.sort(key=lambda r: r["multiple"], reverse=True)
-
-        def _line(row):
-            symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
-            address = str(row.get("token_address") or "").strip()
-            scan_url = _deep_scan_url(address) if address else None
-            ticker = (
-                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
-                if scan_url else f"<b>${symbol}</b>"
-            )
-            return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
-
-        best = ranked[0]
-        rest = ranked[1:6]
-
-        lines = [f'{_ce("leaderboard", "🏆")} <b>YOUR STATS</b>', ""]
-        lines.append("<b>BEST CALL</b>")
-        lines.append(f"🏆 {_line(best)}")
-
-        if rest:
-            lines += ["", "<b>TOP 5</b>"]
-            rest_lines = [f"{i}. {_line(row)}" for i, row in enumerate(rest, 1)]
-            lines.append("<blockquote>" + "\n".join(rest_lines) + "</blockquote>")
-
-        await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+        await status.edit_text(text, disable_web_page_preview=True, reply_markup=_myscans_keyboard(caller_id))
     except Exception:
-        logger.exception("/mystats failed")
+        logger.exception("/myscans failed")
         try:
             await status.edit_text("❌ Couldn't pull your stats right now.")
         except Exception:
             pass
+
+
+@dp.callback_query(F.data.startswith("ms:refresh:"))
+async def cb_myscans_refresh(callback: CallbackQuery):
+    try:
+        owner_id = int(callback.data.split(":", 2)[2])
+    except (IndexError, ValueError):
+        await callback.answer("Couldn't refresh right now.", show_alert=True)
+        return
+    # Refresh always shows the original /myscans caller's stats, regardless
+    # of who taps the button — a personal card shouldn't switch identity
+    # just because someone else in a group clicked it.
+    if callback.from_user and callback.from_user.id != owner_id:
+        await callback.answer("This isn't your stats card — run /myscans yourself.", show_alert=True)
+        return
+    try:
+        text = await _build_myscans_message(owner_id)
+        if not text:
+            await callback.answer("No calls on record yet.", show_alert=True)
+            return
+        await callback.message.edit_text(text, disable_web_page_preview=True, reply_markup=_myscans_keyboard(owner_id))
+        await callback.answer("Refreshed")
+    except Exception:
+        logger.exception("/myscans refresh failed")
+        await callback.answer("Couldn't refresh right now.", show_alert=True)
 
 
 
