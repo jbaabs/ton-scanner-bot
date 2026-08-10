@@ -3065,17 +3065,25 @@ async def get_gecko_price_changes(
         pass
     return result
 
-async def get_gecko_ath(session: aiohttp.ClientSession, pool_address: str) -> float | None:
-    """Return the highest USD trade price available for the pool (up to 1000 daily candles)."""
+async def get_gecko_ath(pool_address: str) -> float | None:
+    """Return the highest USD trade price available for the pool (up to 1000
+    daily candles). Opens its own dedicated session rather than accepting a
+    caller's — this call gets shared across concurrent requests for the same
+    pool via _singleflight, so it can easily outlive whichever single scan's
+    session happened to start it first. Borrowing that session meant a
+    second person's request could die mid-flight the moment the first
+    person's scan finished and closed its session, with the failure then
+    silently swallowed instead of falling back to N/A cleanly."""
     url = f"{GECKOTERMINAL_BASE}/networks/ton/pools/{pool_address}/ohlcv/day"
     params = {"aggregate": 1, "limit": 1000, "currency": "usd"}
     try:
-        async with session.get(
-            url, params=params, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-        ) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+        ) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
 
@@ -4304,10 +4312,10 @@ async def _cached_holders(session,address,limit=10):
     if value is not None: _ttl_put(HOLDERS_CACHE,key,value)
     return value
 
-async def _cached_ath(session,pool):
+async def _cached_ath(pool):
     cached=_ttl_get(ATH_CACHE,pool,ATH_CACHE_TTL)
     if cached is not None: return cached
-    value=await _singleflight("ath",pool,lambda: get_gecko_ath(session,pool))
+    value=await _singleflight("ath",pool,lambda: get_gecko_ath(pool))
     if value is not None: _ttl_put(ATH_CACHE,pool,value)
     return value
 
@@ -4485,7 +4493,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             try:
                 gecko_changes, ath_price = await asyncio.gather(
                     get_gecko_price_changes(session, pool_address),
-                    _cached_ath(session, pool_address),
+                    _cached_ath(pool_address),
                 )
                 # Store the independent cross-check separately. Do NOT mutate
                 # V5's original dex_data fields here: the report-card/chart path
