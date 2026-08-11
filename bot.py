@@ -1969,6 +1969,34 @@ def _most_scanned_rows_global(seconds: int, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _most_scanned_rows_local(chat_id: int, seconds: int, limit: int = 10) -> list[dict]:
+    """This specific group's own 'Most Scanned', not bot-wide — how many
+    distinct people in THIS chat scanned each token in the window. Deduped
+    per person (COUNT DISTINCT scanner_id), same anti-spam principle as the
+    global version, so one person refresh-spamming a token doesn't inflate
+    the count — it's about how many different people in this group noticed
+    it, not how many times a button got pressed.
+    """
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT token_key,
+                   MAX(token_address) AS token_address,
+                   MAX(token_symbol) AS token_symbol,
+                   COUNT(DISTINCT scanner_id) AS scan_count
+            FROM scan_events
+            WHERE chat_id=? AND scan_ts>=? AND scanner_id IS NOT NULL
+            GROUP BY token_key
+            ORDER BY scan_count DESC
+            LIMIT ?
+            """,
+            (chat_id, cutoff, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _most_scanned_rows_alltime(limit: int = 10) -> list[dict]:
     """Same dedup rule as _most_scanned_rows_global (1 DM slot + 1 group
     slot per person per day), just with no time cutoff at all — the
@@ -2074,27 +2102,30 @@ async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> 
 
 
 async def build_recap_message(chat_id: int, kind: str) -> str | None:
-    """Builds the two-part scan recap for one group: MOST SCANNED (bot-wide,
-    per-user deduped, same rule as trending) and TOP SCANS (this group's own
-    calls, by multiple), in the same visual language as GRX SIGNALS / the
-    leaderboard. Returns None if there's nothing to report for this chat in
-    the window, so callers can skip silently.
+    """Three sections per group recap:
+    1. MOST SCANNED (local) — this specific group's own scan activity, over
+       the recap's own window (24h for daily, 7d for weekly).
+    2. TOP SCANS — this group's own calls by multiple, same window. Unchanged.
+    3. MOST SCANNED (global, bottom) — bot-wide, always a fixed 24h window
+       regardless of daily/weekly, since this section is specifically meant
+       to always show "most scanned, daily, bot-wide" as its own constant
+       reference point rather than stretching to 7 days on the weekly post.
+    Returns None if there's nothing to report at all, so callers can skip silently.
     """
     seconds, label = RECAP_WINDOWS.get(kind, RECAP_WINDOWS["daily"])
     title = "GRX DAILY RECAP" if kind == "daily" else "GRX WEEKLY RECAP"
+    local_header_suffix = "24HR" if kind == "daily" else label  # "THIS WEEK" for the weekly post
 
-    most_scanned = await asyncio.to_thread(_most_scanned_rows_global, seconds)
+    local_most_scanned = await asyncio.to_thread(_most_scanned_rows_local, chat_id, seconds)
     top_scans = await _recap_top_scans_rows(chat_id, seconds)
-    if not most_scanned and not top_scans:
+    global_most_scanned = await asyncio.to_thread(_most_scanned_rows_global, RECAP_WINDOWS["daily"][0])
+    if not local_most_scanned and not top_scans and not global_most_scanned:
         return None
 
-    lines = [f'{_ce("leaderboard", "🔥")} <b>{title} · {label}</b>', ""]
-
-    lines.append("<b>MOST SCANNED</b>")
-    if most_scanned:
-        most_lines = []
+    def _most_scanned_block(rows):
         medals = ["🥇", "🥈", "🥉"]
-        for i, row in enumerate(most_scanned, 1):
+        block_lines = []
+        for i, row in enumerate(rows, 1):
             rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
             symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
             address = str(row.get("token_address") or "").strip()
@@ -2104,10 +2135,13 @@ async def build_recap_message(chat_id: int, kind: str) -> str | None:
                 if scan_url else f"<b>${symbol}</b>"
             )
             times = int(row.get("scan_count") or 0)
-            most_lines.append(f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''}")
-        lines.append("<blockquote>" + "\n".join(most_lines) + "</blockquote>")
-    else:
-        lines.append("No scans recorded yet.")
+            block_lines.append(f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''}")
+        return "<blockquote>" + "\n".join(block_lines) + "</blockquote>"
+
+    lines = [f'{_ce("leaderboard", "🔥")} <b>{title} · {label}</b>', ""]
+
+    lines.append(f"<b>MOST SCANNED {local_header_suffix}</b>")
+    lines.append(_most_scanned_block(local_most_scanned) if local_most_scanned else "No scans recorded yet.")
 
     lines += ["", "<b>TOP SCANS</b>"]
     if top_scans:
@@ -2128,6 +2162,12 @@ async def build_recap_message(chat_id: int, kind: str) -> str | None:
         lines.append("<blockquote>" + "\n".join(top_lines) + "</blockquote>")
     else:
         lines.append("No qualifying calls yet.")
+
+    lines += [
+        "",
+        f'<tg-emoji emoji-id="{GRX_RECAP_GLOBAL_MOST_SCANNED_EMOJI_ID}">🔥</tg-emoji> <b>MOST SCANNED</b>',
+    ]
+    lines.append(_most_scanned_block(global_most_scanned) if global_most_scanned else "No scans recorded yet.")
 
     return "\n".join(lines)
 
@@ -5176,6 +5216,7 @@ GRX_TEST_TOKEN_CA = "EQBaCgUwOoc6gHCNln_oJzb0mVs79YG7wYoavh-o1ItaneLA"
 GRX_CALLER_EMOJI_ID = "5246974929194226712"
 GRX_TIMES_CALLED_EMOJI_ID = "5366424034189811245"
 GRX_MOST_SCANNED_EMOJI_ID = "5366516161238308466"
+GRX_RECAP_GLOBAL_MOST_SCANNED_EMOJI_ID = "5287292843763713628"
 
 def build_pnl_card(called_mc: float, current_mc: float) -> bytes:
     from io import BytesIO
