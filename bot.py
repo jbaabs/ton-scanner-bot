@@ -5138,8 +5138,8 @@ def format_token_report(
         else:
             bonding_progress = _centre_html_line("<b>Progress: N/A</b>", 34)
         bonding_amounts = _centre_html_line(
-            f"<b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}</b> {_ce('gram', '💎')} collected  •  "
-            f"<b>{html.escape(_fmt_gram(bonding.get('remaining_gram')))}</b> {_ce('gram', '💎')} left",
+            f"<b>{html.escape(_fmt_gram(bonding.get('collected_gram')))}/"
+            f"{html.escape(_fmt_gram(bonding.get('target_gram')))}</b> {_ce('gram', '💎')}",
             34,
         )
         lines += ["", bonding_title, bonding_progress, bonding_amounts]
