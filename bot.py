@@ -2024,24 +2024,33 @@ def _most_scanned_rows_local(chat_id: int, seconds: int, limit: int = 10) -> lis
 
 
 def _most_scanned_rows_alltime(limit: int = 10) -> list[dict]:
-    """Same dedup rule as _most_scanned_rows_global (1 DM slot + 1 group
-    slot per person per day), just with no time cutoff at all — the
-    all-time ranked list that /topscans shows, since nothing else in the
-    bot currently surfaces scan counts as a leaderboard."""
+    """The all-time ranked list /topscans shows. Uses the exact same
+    dedup rule as /allscans: each person can contribute up to 1 DM count +
+    1 group count PER CALENDAR DAY, summed across every day in the token's
+    whole history — so sustained daily attention actually accumulates,
+    rather than a person who scanned once a year ago counting the same as
+    someone who has scanned every day since. Also returns how many unique
+    people that total came from, alongside the total itself.
+    """
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            WITH dm AS (
-                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
+            WITH days AS (
+                SELECT token_key,
+                       strftime('%Y-%m-%d', scan_ts, 'unixepoch') AS day,
+                       scanner_id,
+                       MAX(CASE WHEN chat_type='private' THEN 1 ELSE 0 END) AS dm_hit,
+                       MAX(CASE WHEN chat_type IN ('group','supergroup') THEN 1 ELSE 0 END) AS group_hit
                 FROM scan_events
-                WHERE chat_type='private' AND scanner_id IS NOT NULL
-                GROUP BY token_key
+                WHERE scanner_id IS NOT NULL
+                GROUP BY token_key, day, scanner_id
             ),
-            grp AS (
-                SELECT token_key, COUNT(DISTINCT scanner_id) AS c
-                FROM scan_events
-                WHERE chat_type IN ('group','supergroup') AND scanner_id IS NOT NULL
+            totals AS (
+                SELECT token_key,
+                       SUM(dm_hit + group_hit) AS scan_count,
+                       COUNT(DISTINCT scanner_id) AS unique_scanners
+                FROM days
                 GROUP BY token_key
             ),
             meta AS (
@@ -2050,11 +2059,10 @@ def _most_scanned_rows_alltime(limit: int = 10) -> list[dict]:
                 GROUP BY token_key
             )
             SELECT meta.token_key, meta.token_address, meta.token_symbol,
-                   COALESCE(dm.c,0) + COALESCE(grp.c,0) AS scan_count
+                   totals.scan_count, totals.unique_scanners
             FROM meta
-            LEFT JOIN dm ON dm.token_key=meta.token_key
-            LEFT JOIN grp ON grp.token_key=meta.token_key
-            ORDER BY scan_count DESC
+            JOIN totals ON totals.token_key = meta.token_key
+            ORDER BY totals.scan_count DESC
             LIMIT ?
             """,
             (limit,),
@@ -2088,7 +2096,11 @@ def build_all_time_top_scans_message() -> str | None:
             if scan_url else f"<b>${symbol}</b>"
         )
         times = int(row.get("scan_count") or 0)
-        ranking_lines.append(f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''}")
+        unique = int(row.get("unique_scanners") or 0)
+        ranking_lines.append(
+            f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''} "
+            f"· {unique} unique"
+        )
 
     lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
     return "\n".join(lines)
@@ -5736,13 +5748,20 @@ async def cmd_allscans(message: Message):
             await message.answer(f"$&#8203;{symbol} hasn't been scanned yet.", parse_mode="HTML")
             return
 
-        text = (
-            f'<b>${symbol} — ALL-TIME SCANS</b>\n\n'
-            f'Total scans: <b>{total}</b>\n'
-            f'» DM: <b>{dm_scans}</b>  •  Group: <b>{group_scans}</b>\n'
-            f'Unique scanners: <b>{unique_scanners}</b>'
+        scan_url = _deep_scan_url(address) if address else None
+        ticker = (
+            f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+            if scan_url else f"<b>${symbol}</b>"
         )
-        await message.answer(text)
+        text = (
+            f'{_ce("leaderboard", "📊")} <b>{ticker} — ALL-TIME SCANS</b>\n\n'
+            "<blockquote>"
+            f"Total scans: <b>{total}</b>\n"
+            f"» DM: <b>{dm_scans}</b>  •  Group: <b>{group_scans}</b>\n"
+            f"Unique scanners: <b>{unique_scanners}</b>"
+            "</blockquote>"
+        )
+        await message.answer(text, disable_web_page_preview=True)
     except Exception:
         logger.exception("/allscans failed")
         await message.answer("❌ Couldn't pull scan totals right now.")
