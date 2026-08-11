@@ -1546,7 +1546,7 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
     lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
     bg="#050607"; text="#ffffff"; muted="#b7c0ca"; grid="#282d33"
-    green="#42c99a"; red="#f06468"; trend_blue="#168BFF"
+    green="#4FBF8F"; red="#E0696D"; trend_blue="#168BFF"
     first=closes[0]; last=closes[-1]
     move=((last-first)/first*100) if first else 0.0
     move_col=green if move>=0 else red
@@ -1570,12 +1570,16 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
     ax=fig.add_axes([.055,.12,.875,.67],facecolor=bg)
+    from matplotlib.patches import FancyBboxPatch
     n=len(ohlcv); width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
         ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
-        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
+        rad=min(width,height)*.28
+        ax.add_patch(FancyBboxPatch((i-width/2,bottom),width,height,
+            boxstyle=f"round,pad=0,rounding_size={rad}",
+            facecolor=col,edgecolor=col,linewidth=.25,mutation_aspect=1))
 
     try:
         raw=str(trending_price).replace("$","").replace(",","").strip()
@@ -1583,19 +1587,21 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
         if price > 0:
             ax.axhline(price,color=trend_blue,linewidth=2.2,alpha=1.0,zorder=30)
             ax.text(-.65,price,"GRX TRENDING",ha="left",va="bottom",color=trend_blue,
-                    fontsize=9.0,fontweight="bold",zorder=31,clip_on=False)
+                    fontsize=9.0,fontweight="bold",zorder=31,clip_on=True)
     except Exception:
         logger.debug("Could not draw GRX TRENDING marker", exc_info=True)
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
-    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
-    # Ensure the Trending level remains visible even if price moved outside candle range.
-    y_min=min(lows); y_max=max(highs)
+    # Trim outlier wick tails so one spike doesn't compress every other
+    # candle into an unreadable strip, but the Trending level itself must
+    # always stay on-screen regardless of trimming.
     try:
         tp=float(str(trending_price).replace("$","").replace(",",""))
-        if tp > 0: y_min=min(y_min,tp); y_max=max(y_max,tp)
-    except Exception: pass
-    span=max(y_max-y_min,abs(last)*.009,1e-12); pad=max(span*.055,pad)
+        tp=tp if tp > 0 else None
+    except Exception:
+        tp=None
+    y_min,y_max=_smart_price_range(highs,lows,must_include=[last,tp])
+    span=max(y_max-y_min,abs(last)*.009,1e-12); pad=span*.07
     ax.set_ylim(y_min-pad,y_max+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
     ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
@@ -1603,14 +1609,17 @@ def build_trending_chart(ohlcv: list, symbol: str, timeframe_label: str,
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
     ax.yaxis.tick_right()
     from matplotlib.ticker import FuncFormatter, MaxNLocator
-    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price)); ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price_compact)); ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
-    ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
+    ax.grid(axis="y",color=grid,linewidth=.42,alpha=.32,linestyle=(0,(1,2)))
+    ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
     ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
-                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
+                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),
+                arrowprops=dict(arrowstyle="-",color=move_col,lw=1.0,shrinkA=0,shrinkB=0),
+                clip_on=False)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
 
 
@@ -3148,6 +3157,33 @@ async def get_gecko_ath(pool_address: str) -> float | None:
     return max(highs) if highs else None
 
 
+def _percentile(values, pct):
+    """Plain-Python percentile — no numpy dependency needed for two small helpers."""
+    s = sorted(values)
+    if not s:
+        return 0.0
+    k = (len(s) - 1) * (pct / 100)
+    f, c = int(k), min(int(k) + 1, len(s) - 1)
+    return s[f] if f == c else s[f] + (s[c] - s[f]) * (k - f)
+
+def _smart_price_range(highs, lows, must_include=None):
+    """Trims the most extreme 2% of wick tails when computing the visible
+    y-range, so a single outlier spike (a 40% wick in an otherwise normal
+    session) doesn't compress every other candle into an unreadable strip
+    near the bottom. Anything in must_include (current price, a reference
+    level that must stay on-screen) still guarantees that value is included
+    regardless of trimming. Falls back to the true min/max whenever
+    trimming would collapse the range to nothing.
+    """
+    all_vals = list(highs) + list(lows)
+    lo, hi = _percentile(all_vals, 2), _percentile(all_vals, 98)
+    for v in (must_include or []):
+        if v is not None:
+            lo, hi = min(lo, v), max(hi, v)
+    if hi <= lo:
+        lo, hi = min(lows), max(highs)
+    return lo, hi
+
 def _chart_axis_price(v, _pos=None):
     """Human price labels without Matplotlib scientific-offset notation."""
     try:
@@ -3161,6 +3197,35 @@ def _chart_axis_price(v, _pos=None):
     if a >= .0001: return f"{v:.6f}".rstrip("0").rstrip(".")
     if a >= .000001: return f"{v:.8f}".rstrip("0").rstrip(".")
     return f"{v:.10f}".rstrip("0").rstrip(".")
+
+def _chart_axis_price_compact(v, _pos=None):
+    """DTrade-style axis label for tiny prices — e.g. 0.0₄897 instead of a
+    long run of leading zeros. Same subscript-zero notation as
+    _fmt_price_compact, just without the $ prefix (bare axis labels don't
+    need one) and applied specifically to the chart's y-axis gridlines,
+    which have real breathing room around them — unlike the small colored
+    price pill, where this same notation read as illegible/ambiguous at
+    that tiny size and was deliberately kept as plain full decimals instead.
+    """
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if v == 0:
+        return "0"
+    a = abs(v)
+    if a >= 1:
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    if a >= 0.0001:
+        return f"{v:.6f}".rstrip("0").rstrip(".")
+    import math
+    zero_count = max(1, int(-math.floor(math.log10(a))) - 1)
+    subs = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+    sub_count = str(zero_count).translate(subs)
+    significant = a * (10 ** (zero_count + 1))
+    digits = f"{significant:.3g}".replace(".", "")
+    sign = "-" if v < 0 else ""
+    return f"{sign}0.0{sub_count}{digits}"
 
 def _chart_price_label(v) -> str:
     """Same full-decimal formatting as the y-axis, with a $ prefix — used for
@@ -3215,7 +3280,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     opens=[float(c[1]) for c in ohlcv]; highs=[float(c[2]) for c in ohlcv]
     lows=[float(c[3]) for c in ohlcv]; closes=[float(c[4]) for c in ohlcv]
     bg="#050607"; text="#ffffff"; muted="#b7c0ca"; grid="#282d33"
-    green="#42c99a"; red="#f06468"
+    green="#4FBF8F"; red="#E0696D"
     first=closes[0]; last=closes[-1]
     move=((last-first)/first*100) if first else 0.0
     move_col=green if move>=0 else red
@@ -3239,13 +3304,17 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     fig.text(.945,.92,f"{move:+.2f}%",color=move_col,fontsize=14,fontweight="bold",ha="right",va="center")
 
     ax=fig.add_axes([.055,.12,.875,.67],facecolor=bg)
+    from matplotlib.patches import FancyBboxPatch
     n=len(ohlcv)
     width=max(.22,min(.54,18.0/max(n,1)))
     for i,(o,h,l,c) in enumerate(zip(opens,highs,lows,closes)):
         col=green if c>=o else red
         ax.plot([i,i],[l,h],color=col,linewidth=.62,solid_capstyle="round")
         bottom=min(o,c); height=abs(c-o) or max((h-l)*.012,abs(h)*.0004,1e-12)
-        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.25))
+        rad=min(width,height)*.28
+        ax.add_patch(FancyBboxPatch((i-width/2,bottom),width,height,
+            boxstyle=f"round,pad=0,rounding_size={rad}",
+            facecolor=col,edgecolor=col,linewidth=.25,mutation_aspect=1))
 
     # GRX SCAN marker: horizontal line at the price where GRX first scanned/called the token.
     if scan_price is not None:
@@ -3262,8 +3331,9 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
             logger.exception("Could not draw horizontal GRX SCAN chart marker")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
-    pad=max((max(highs)-min(lows))*.055,abs(last)*.009,1e-12)
-    ax.set_ylim(min(lows)-pad,max(highs)+pad)
+    y_min,y_max=_smart_price_range(highs,lows,must_include=[last])
+    pad=max((y_max-y_min)*.07,abs(last)*.009,1e-12)
+    ax.set_ylim(y_min-pad,y_max+pad)
 
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]
     ids=sorted(set(ids)); fmt=_chart_time_format(timeframe_label)
@@ -3271,15 +3341,18 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors=muted,labelsize=8.5,length=0,pad=8)
     ax.yaxis.tick_right()
     from matplotlib.ticker import FuncFormatter, MaxNLocator
-    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price_compact))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
-    ax.grid(axis="y",color=grid,linewidth=.48,alpha=.46); ax.grid(axis="x",visible=False)
+    ax.grid(axis="y",color=grid,linewidth=.42,alpha=.32,linestyle=(0,(1,2)))
+    ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=move_col,linewidth=.75,alpha=.48)
     ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.45,last),textcoords="data",
                 ha="left",va="center",fontsize=8.0,color="#ffffff",
-                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),clip_on=False)
+                bbox=dict(boxstyle="round,pad=.22",fc=move_col,ec="none"),
+                arrowprops=dict(arrowstyle="-",color=move_col,lw=1.0,shrinkA=0,shrinkB=0),
+                clip_on=False)
     buf=BytesIO(); fig.savefig(buf,format="png",facecolor=bg); plt.close(fig); return buf.getvalue()
 
 
@@ -3302,7 +3375,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         try:return float(v)
         except:return None
 
-    bg="#050607"; panel="#090b0d"; cell="#0b0f13"; line="#343b43"; text="#ffffff"; muted="#b7c0ca"; green="#55e0ad"; red="#ff7478"; purple="#a968ff"
+    bg="#050607"; panel="#090b0d"; cell="#0b0f13"; line="#343b43"; text="#ffffff"; muted="#b7c0ca"; green="#4FBF8F"; red="#E0696D"; purple="#a968ff"
     def pc(v):
         n=f(v); return green if n is not None and n>=0 else red if n is not None else muted
     ohlcv = _normalize_chart_ohlcv(ohlcv)
@@ -3349,7 +3422,10 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
         col=green if c>=o else red
         ax.vlines(i,l,h,color=col,linewidth=.68,alpha=.95)
         bottom=min(o,c); height=max(abs(c-o),max(h,l)*1e-8)
-        ax.add_patch(plt.Rectangle((i-width/2,bottom),width,height,facecolor=col,edgecolor=col,linewidth=.2))
+        rad=min(width,height)*.28
+        ax.add_patch(FancyBboxPatch((i-width/2,bottom),width,height,
+            boxstyle=f"round,pad=0,rounding_size={rad}",
+            facecolor=col,edgecolor=col,linewidth=.2,mutation_aspect=1))
 
     # GRX SCAN marker on the main dashboard: horizontal at the first GRX scan
     # price for THIS viewer (DM) or THIS group's first scanner. Deliberately
@@ -3373,20 +3449,21 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
-    lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
+    lo,hi=_smart_price_range(highs,lows,must_include=[last])
+    pad=(hi-lo)*.07 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
     ticks=min(5,len(ohlcv)); ids=[round(i*(len(ohlcv)-1)/(ticks-1)) for i in range(ticks)] if ticks>1 else [0]; ids=sorted(set(ids))
     fmt=_chart_time_format(timeframe_label)
     ax.set_xticks(ids); ax.set_xticklabels([times[i].strftime(fmt) for i in ids],color=muted,fontsize=8.5,fontweight="bold")
     ax.tick_params(axis="x",length=0,pad=9); ax.tick_params(axis="y",colors="#b5bbc2",labelsize=8.5,length=0,pad=8); ax.yaxis.tick_right()
     ax.set_axisbelow(False)
     from matplotlib.ticker import FuncFormatter, MaxNLocator
-    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price))
+    ax.yaxis.set_major_formatter(FuncFormatter(_chart_axis_price_compact))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.get_offset_text().set_visible(False)
-    ax.grid(axis="y",color="#24282c",linewidth=.48,alpha=.43); ax.grid(axis="x",visible=False)
+    ax.grid(axis="y",color="#24282c",linewidth=.42,alpha=.32,linestyle=(0,(1,2))); ax.grid(axis="x",visible=False)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.axhline(last,color=pc(move),linewidth=.7,alpha=.45)
-    ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),clip_on=False)
+    ax.annotate(_chart_price_label(last),xy=(len(ohlcv)-1,last),xytext=(len(ohlcv)+.48,last),textcoords="data",ha="left",va="center",fontsize=7.9,color="#ffffff",bbox=dict(boxstyle="round,pad=.22",fc=pc(move),ec="none"),arrowprops=dict(arrowstyle="-",color=pc(move),lw=1.0,shrinkA=0,shrinkB=0),clip_on=False)
 
     # Compact pulse/caller band. Right card grew a touch taller (.135 vs the
     # old .115) to fit the new "CALLED BY" row without crowding PERFORMANCE.
