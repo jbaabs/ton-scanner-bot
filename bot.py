@@ -2590,13 +2590,8 @@ def _persist_new_scan_sync(message, report, scanner_meta, chat_type, scope_key, 
     )
     _prepare_pnl_milestone_check(report, scope_key, message.chat.id)
 
-    prior_recent = None
-    if message.from_user and current_price:
-        prior_recent = get_recent_scan_anchor(scope_key, report.get("address"))
-        set_recent_scan_anchor(scope_key, report.get("address"), current_price)
-
     key = _cache_report(report, scanner_meta=scanner_meta)
-    return key, prior_recent
+    return key
 
 
 def _prune_report_cache():
@@ -5212,24 +5207,6 @@ def format_token_report(
         *([social_line] if social_line else []),
     ]
 
-    # Text equivalent of the old "YOUR LAST SCAN" chart line — same idea
-    # (how has this moved since this scope last looked, distinct from the
-    # permanent GRX SCAN anchor), but as a quiet stat instead of a second
-    # line competing for space on the chart itself.
-    recent_price_val = report.get("_viewer_recent_price")
-    current_price_val = _as_float(dex.get("price_usd"))
-    if recent_price_val and current_price_val:
-        try:
-            recent_price_f = float(recent_price_val)
-            if recent_price_f > 0:
-                since_last_pct = ((current_price_val - recent_price_f) / recent_price_f) * 100
-                since_last_line = _centre_html_line(
-                    f"Since last scan: <b>{_fmt_pct(since_last_pct)}</b>", 34
-                )
-                lines.append(since_last_line)
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
-
     if bonding and not bonding.get("bonded", False):
         percent = bonding.get("percent")
         bonding_title = _centre_html_line("<b>🧨 Bonding Curve</b>", 34)
@@ -6163,11 +6140,9 @@ async def handle_address(message: Message):
             # (see _persist_new_scan_sync) instead of directly on the event
             # loop, so it can no longer stall every other user's request while
             # this scan's writes are hitting disk.
-            key, prior_recent = await asyncio.to_thread(
+            key = await asyncio.to_thread(
                 _persist_new_scan_sync, message, report, scanner_meta, chat_type, scope_key, current_price
             )
-            if prior_recent and current_price and abs(prior_recent - current_price) > (current_price * 0.0005):
-                report["_viewer_recent_price"] = prior_recent
 
             if report.get("_pnl_milestone_multiple"):
                 asyncio.create_task(_maybe_announce_pnl_milestone(
@@ -6326,20 +6301,6 @@ async def handle_toggle(callback: CallbackQuery):
                     )
                     await asyncio.to_thread(_prepare_pnl_milestone_check, fresh_report, scope_key, callback.message.chat.id)
 
-                    # The new-scan flow already did this (see _persist_new_scan_sync);
-                    # Refresh needs the same read-then-write so "Since last scan"
-                    # actually has something to compare against on the far more
-                    # common path of tapping Refresh rather than retyping the ticker.
-                    current_price_for_recent = _as_float((fresh_report.get("dex_data") or {}).get("price_usd"))
-                    if current_price_for_recent:
-                        prior_recent = await asyncio.to_thread(
-                            get_recent_scan_anchor, scope_key, fresh_report.get("address")
-                        )
-                        if prior_recent and abs(prior_recent - current_price_for_recent) > (current_price_for_recent * 0.0005):
-                            fresh_report["_viewer_recent_price"] = prior_recent
-                        await asyncio.to_thread(
-                            set_recent_scan_anchor, scope_key, fresh_report.get("address"), current_price_for_recent
-                        )
                     if fresh_report.get("_pnl_milestone_multiple"):
                         asyncio.create_task(_maybe_announce_pnl_milestone(
                             callback.bot, callback.message.chat.id, fresh_report,
@@ -6739,36 +6700,6 @@ async def handle_timeframe(callback: CallbackQuery):
         await _safe_edit_media(callback.message, media, reply_markup=keyboard)
     except Exception:
         logger.exception("Error switching chart timeframe")
-
-
-# --- SCAN ANCHORS (USER / GROUP, ENTRY vs RECENT) ---
-# NOTE: these must be defined before main()/dp.start_polling(), since polling
-# blocks forever — any code placed after the old `if __name__ == "__main__":`
-# guard never actually ran. handle_address() calls these while the bot is
-# live, so they're defined here, ahead of the blocking entry point.
-def set_recent_scan_anchor(scope_key: str, token: str, price: float) -> None:
-    """Persists the 'YOUR LAST SCAN' reference price. Uses the exact same
-    scope_key as the permanent GRX SCAN anchor (_viewer_scope_key), so the
-    two lines share identical DM-vs-group behavior by construction rather
-    than by two separately-maintained pieces of logic."""
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT INTO recent_scan_anchor(scope_key, token_key, price, updated_ts)
-            VALUES (?,?,?,?)
-            ON CONFLICT(scope_key, token_key) DO UPDATE SET
-                price=excluded.price, updated_ts=excluded.updated_ts
-            """,
-            (scope_key, str(token), float(price), int(time.time())),
-        )
-
-def get_recent_scan_anchor(scope_key: str, token: str) -> float | None:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT price FROM recent_scan_anchor WHERE scope_key=? AND token_key=?",
-            (scope_key, str(token)),
-        ).fetchone()
-    return float(row[0]) if row else None
 
 
 # --- CAPTION LIVE TIMESTAMP ---
