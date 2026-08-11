@@ -550,6 +550,21 @@ def init_db():
         )
         """
     )
+    # "YOUR LAST SCAN" chart line — the price from this scope's (DM user's,
+    # or group's) previous scan of a token. Same scope_key concept as the
+    # permanent viewer_first_scan anchor, so both lines behave identically
+    # in DM vs. group by construction.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recent_scan_anchor (
+            scope_key TEXT NOT NULL,
+            token_key TEXT NOT NULL,
+            price REAL NOT NULL,
+            updated_ts INTEGER NOT NULL,
+            PRIMARY KEY (scope_key, token_key)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -2566,14 +2581,8 @@ def _persist_new_scan_sync(message, report, scanner_meta, chat_type, scope_key, 
 
     prior_recent = None
     if message.from_user and current_price:
-        is_private_chat = chat_type == "private"
-        prior_recent = get_recent_anchor(
-            message.from_user.id, message.chat.id, report.get("address"), is_private_chat
-        )
-        set_scan_anchor(
-            message.from_user.id, message.chat.id, report.get("address"),
-            current_price, is_private_chat,
-        )
+        prior_recent = get_recent_scan_anchor(scope_key, report.get("address"))
+        set_recent_scan_anchor(scope_key, report.get("address"), current_price)
 
     key = _cache_report(report, scanner_meta=scanner_meta)
     return key, prior_recent
@@ -3362,23 +3371,6 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
                         color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
-
-    # Personal RECENT marker: horizontal line at the price when this specific
-    # viewer last scanned this token (per-user/per-group in-memory anchor).
-    # Only set when it's meaningfully different from the GRX SCAN line above,
-    # to avoid drawing two overlapping lines for a viewer's very first scan.
-    recent_price_for_line = report.get("_viewer_recent_price")
-    if recent_price_for_line:
-        try:
-            recent_price_f = float(recent_price_for_line)
-            if recent_price_f > 0:
-                recent_purple = "#B366FF"
-                ax.axhline(recent_price_f, color=recent_purple, linewidth=1.6, alpha=0.9,
-                           linestyle="--", zorder=29)
-                ax.text(-.65, recent_price_f, "YOUR LAST SCAN", ha="left", va="top",
-                        color=recent_purple, fontsize=8.0, fontweight="bold", zorder=31, clip_on=False)
-        except Exception:
-            logger.exception("Could not draw horizontal viewer RECENT chart marker")
 
     ax.set_xlim(-.8,len(ohlcv)+1.8)
     lo=min(lows); hi=max(highs); pad=(hi-lo)*.055 if hi>lo else max(hi*.012,1e-12); ax.set_ylim(lo-pad,hi+pad)
@@ -5039,6 +5031,24 @@ def format_token_report(
         *([social_line] if social_line else []),
     ]
 
+    # Text equivalent of the old "YOUR LAST SCAN" chart line — same idea
+    # (how has this moved since this scope last looked, distinct from the
+    # permanent GRX SCAN anchor), but as a quiet stat instead of a second
+    # line competing for space on the chart itself.
+    recent_price_val = report.get("_viewer_recent_price")
+    current_price_val = _as_float(dex.get("price_usd"))
+    if recent_price_val and current_price_val:
+        try:
+            recent_price_f = float(recent_price_val)
+            if recent_price_f > 0:
+                since_last_pct = ((current_price_val - recent_price_f) / recent_price_f) * 100
+                since_last_line = _centre_html_line(
+                    f"Since last scan: <b>{_fmt_pct(since_last_pct)}</b>", 34
+                )
+                lines.append(since_last_line)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
     if bonding and not bonding.get("bonded", False):
         percent = bonding.get("percent")
         bonding_title = _centre_html_line("<b>🧨 Bonding Curve</b>", 34)
@@ -6540,35 +6550,29 @@ async def handle_timeframe(callback: CallbackQuery):
 # blocks forever — any code placed after the old `if __name__ == "__main__":`
 # guard never actually ran. handle_address() calls these while the bot is
 # live, so they're defined here, ahead of the blocking entry point.
-user_scan_anchor = {}     # (user_id, token) -> price   [entry / first-ever]
-group_scan_anchor = {}    # (chat_id, token) -> price   [entry / first-ever]
-user_recent_anchor = {}   # (user_id, token) -> price   [most recent scan]
-group_recent_anchor = {}  # (chat_id, token) -> price   [most recent scan]
+def set_recent_scan_anchor(scope_key: str, token: str, price: float) -> None:
+    """Persists the 'YOUR LAST SCAN' reference price. Uses the exact same
+    scope_key as the permanent GRX SCAN anchor (_viewer_scope_key), so the
+    two lines share identical DM-vs-group behavior by construction rather
+    than by two separately-maintained pieces of logic."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO recent_scan_anchor(scope_key, token_key, price, updated_ts)
+            VALUES (?,?,?,?)
+            ON CONFLICT(scope_key, token_key) DO UPDATE SET
+                price=excluded.price, updated_ts=excluded.updated_ts
+            """,
+            (scope_key, str(token), float(price), int(time.time())),
+        )
 
-def set_scan_anchor(user_id, chat_id, token, price, is_private):
-    key_user = (int(user_id), str(token))
-    key_group = (int(chat_id), str(token))
-
-    if is_private:
-        # ENTRY (first ever)
-        if key_user not in user_scan_anchor:
-            user_scan_anchor[key_user] = float(price)
-        # RECENT (always update)
-        user_recent_anchor[key_user] = float(price)
-    else:
-        if key_group not in group_scan_anchor:
-            group_scan_anchor[key_group] = float(price)
-        group_recent_anchor[key_group] = float(price)
-
-def get_scan_anchor(user_id, chat_id, token, is_private):
-    if is_private:
-        return user_scan_anchor.get((int(user_id), str(token)))
-    return group_scan_anchor.get((int(chat_id), str(token)))
-
-def get_recent_anchor(user_id, chat_id, token, is_private):
-    if is_private:
-        return user_recent_anchor.get((int(user_id), str(token)))
-    return group_recent_anchor.get((int(chat_id), str(token)))
+def get_recent_scan_anchor(scope_key: str, token: str) -> float | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT price FROM recent_scan_anchor WHERE scope_key=? AND token_key=?",
+            (scope_key, str(token)),
+        ).fetchone()
+    return float(row[0]) if row else None
 
 
 # --- CAPTION LIVE TIMESTAMP ---
