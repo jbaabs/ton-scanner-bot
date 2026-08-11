@@ -3257,7 +3257,7 @@ def build_candlestick_chart(ohlcv: list, symbol: str, timeframe_label: str, toke
                 label = str(anchor_label or "GRX SCAN")
                 ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
                 ax.text(-.65, scan_price_f, label, ha="left", va="bottom",
-                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
+                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=True)
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN chart marker")
 
@@ -3368,7 +3368,7 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
                 anchor_label = str(report.get("_viewer_scan_label") or "GRX SCAN")
                 ax.axhline(scan_price_f, color=scan_blue, linewidth=2.2, alpha=1.0, zorder=30)
                 ax.text(-.65, scan_price_f, anchor_label, ha="left", va="bottom",
-                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=False)
+                        color=scan_blue, fontsize=9.0, fontweight="bold", zorder=31, clip_on=True)
         except Exception:
             logger.exception("Could not draw horizontal GRX SCAN marker on main dashboard")
 
@@ -3460,10 +3460,12 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             value = str(val)
             # Adaptive type keeps every value inside a fixed uniform card.
             fs = 11.2
-            if len(value) > 11:
+            if len(value) > 10:
                 fs = 9.9
-            if len(value) > 15:
-                fs = 8.8
+            if len(value) > 13:
+                fs = 8.6
+            if len(value) > 16:
+                fs = 7.6
 
             fig.text(x + .010, y + card_h * .68, label, color=muted,
                      fontsize=7.1, fontweight="bold", ha="left", va="center")
@@ -6144,6 +6146,21 @@ async def handle_toggle(callback: CallbackQuery):
                         getattr(callback.message.chat, "title", None),
                     )
                     await asyncio.to_thread(_prepare_pnl_milestone_check, fresh_report, scope_key, callback.message.chat.id)
+
+                    # The new-scan flow already did this (see _persist_new_scan_sync);
+                    # Refresh needs the same read-then-write so "Since last scan"
+                    # actually has something to compare against on the far more
+                    # common path of tapping Refresh rather than retyping the ticker.
+                    current_price_for_recent = _as_float((fresh_report.get("dex_data") or {}).get("price_usd"))
+                    if current_price_for_recent:
+                        prior_recent = await asyncio.to_thread(
+                            get_recent_scan_anchor, scope_key, fresh_report.get("address")
+                        )
+                        if prior_recent and abs(prior_recent - current_price_for_recent) > (current_price_for_recent * 0.0005):
+                            fresh_report["_viewer_recent_price"] = prior_recent
+                        await asyncio.to_thread(
+                            set_recent_scan_anchor, scope_key, fresh_report.get("address"), current_price_for_recent
+                        )
                     if fresh_report.get("_pnl_milestone_multiple"):
                         asyncio.create_task(_maybe_announce_pnl_milestone(
                             callback.bot, callback.message.chat.id, fresh_report,
