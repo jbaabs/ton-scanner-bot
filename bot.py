@@ -265,6 +265,8 @@ HOLDERS_CACHE: dict[str, tuple[float, object]] = {}
 HOLDERS_CACHE_TTL = 45
 ATH_CACHE: dict[str, tuple[float, object]] = {}
 ATH_CACHE_TTL = 15 * 60
+TON_USD_CACHE: dict[str, tuple[float, object]] = {}
+TON_USD_CACHE_TTL = 5 * 60
 SCAN_INFLIGHT: dict[str, asyncio.Task] = {}
 TOKEN_STATE_CACHE: dict[str, tuple[float, dict]] = {}
 TOKEN_STATE_TTL = max(2.0, float(os.getenv("TOKEN_STATE_TTL", "6")))
@@ -4430,6 +4432,35 @@ async def _cached_ath(pool):
     if value is not None: _ttl_put(ATH_CACHE,pool,value)
     return value
 
+async def _fetch_ton_usd_price() -> float | None:
+    """Live TON/USD rate, used to convert a bonding curve's TON-denominated
+    'collected' reserve into a USD liquidity estimate. Opens its own
+    dedicated session rather than accepting a caller's — this gets shared
+    across concurrent requests via _singleflight below, so it can easily
+    outlive whichever single scan's session happened to start it first,
+    same reasoning as the ATH fetch fix earlier."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as session:
+            async with session.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "the-open-network", "vs_currencies": "usd"},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        return float((data.get("the-open-network") or {}).get("usd"))
+    except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError, KeyError):
+        return None
+
+async def _cached_ton_usd_price() -> float | None:
+    cached = _ttl_get(TON_USD_CACHE, "ton", TON_USD_CACHE_TTL)
+    if cached is not None:
+        return cached
+    value = await _singleflight("ton_usd", "ton", _fetch_ton_usd_price)
+    if value is not None:
+        _ttl_put(TON_USD_CACHE, "ton", value)
+    return value
+
 async def _render_offloop(func,*args):
     # Prevent a burst of users from starting too many Matplotlib jobs at once.
     started=time.perf_counter()
@@ -4657,6 +4688,77 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
             report["bonding_curve"] = bonding_curve
     except Exception:
         logger.exception("Error loading TopBlast bonding curve data")
+
+    # Market Cap: DexScreener/DeDust return a live price for a bonding-curve
+    # token but no market_cap field, since there's no real pool yet for them
+    # to calculate one from. It's just price × supply — both of which we
+    # already have independently — so compute it ourselves instead of
+    # showing N/A for something that's genuinely knowable.
+    try:
+        dex_now = report.setdefault("dex_data", {})
+        if not dex_now.get("market_cap"):
+            price_now = float(dex_now.get("price_usd") or 0)
+            info_now = report.get("jetton_info") or {}
+            raw_supply = info_now.get("total_supply")
+            decimals = int(info_now.get("decimals") or 9)
+            if price_now > 0 and raw_supply:
+                supply_tokens = float(raw_supply) / (10 ** decimals)
+                if supply_tokens > 0:
+                    dex_now["market_cap"] = price_now * supply_tokens
+    except (TypeError, ValueError):
+        logger.exception("Could not derive bonding-curve market cap")
+
+    # Liquidity: a real DEX pool doesn't exist yet during bonding, so there's
+    # no liquidity figure to report in the traditional sense — but the
+    # curve's own collected reserve IS the honest equivalent at this stage
+    # (it's literally what's backing the curve). Convert it to USD using a
+    # live TON rate so it reads on the same scale as a normal liquidity figure.
+    try:
+        dex_now = report.setdefault("dex_data", {})
+        bc = report.get("bonding_curve")
+        if not dex_now.get("liquidity_usd") and bc:
+            collected_ton = float(bc.get("collected_gram") or 0)
+            if collected_ton > 0:
+                ton_usd = await _cached_ton_usd_price()
+                if ton_usd:
+                    dex_now["liquidity_usd"] = collected_ton * ton_usd
+    except (TypeError, ValueError):
+        logger.exception("Could not derive bonding-curve liquidity estimate")
+
+    # ATH fallback: GeckoTerminal has no pool to query yet during bonding
+    # (and can occasionally come back empty even for graduated tokens). The
+    # chart's own reconstructed candle data isn't a safe substitute here —
+    # it's capped at the last 100 on-chain transactions, so taking a max
+    # from it could show a real-looking but understated number for any
+    # token with meaningful trading volume, which is worse than N/A.
+    # token_snapshots, however, already records this token's price on every
+    # single scan GRX has ever done, for an entirely different reason
+    # (weekly recap history) — reusing it here costs nothing new and is
+    # never wrong, only ever incomplete if GRX simply hasn't seen the token
+    #'s true peak yet.
+    try:
+        dex_now = report.setdefault("dex_data", {})
+        if not dex_now.get("ath_price"):
+            token_key_now = _history_key(report)
+            current_price_now = _as_float(dex_now.get("price_usd"))
+            snapshot_ath = None
+            if token_key_now:
+                with sqlite3.connect(DB_PATH) as conn:
+                    row = conn.execute(
+                        "SELECT MAX(price_usd) FROM token_snapshots WHERE token_key=?",
+                        (token_key_now,),
+                    ).fetchone()
+                snapshot_ath = _as_float(row[0]) if row else None
+            candidates = [v for v in (snapshot_ath, current_price_now) if v]
+            if candidates:
+                ath_candidate = max(candidates)
+                dex_now["ath_price"] = ath_candidate
+                dex_now["ath_source"] = "grx_snapshots"
+                current_mcap_now = _as_float(dex_now.get("market_cap"))
+                if current_mcap_now and current_price_now and current_price_now > 0:
+                    dex_now["ath_market_cap"] = current_mcap_now * (ath_candidate / current_price_now)
+    except Exception:
+        logger.exception("Could not derive GRX-tracked ATH fallback")
 
     _register_report_live_pool(report)
     _trim_perf_caches()
