@@ -2139,6 +2139,108 @@ async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> 
     return ranked[:limit]
 
 
+def _alltime_scan_counts_by_token() -> dict[str, int]:
+    """Same day-bucketed dedup rule as /allscans and /topscans (up to 1 DM +
+    1 group count per person per calendar day, summed forever), returned as
+    a token_key -> count lookup so /bestscans can attach a scan count to
+    each entry without a separate query per row."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            WITH days AS (
+                SELECT token_key,
+                       strftime('%Y-%m-%d', scan_ts, 'unixepoch') AS day,
+                       scanner_id,
+                       MAX(CASE WHEN chat_type='private' THEN 1 ELSE 0 END) AS dm_hit,
+                       MAX(CASE WHEN chat_type IN ('group','supergroup') THEN 1 ELSE 0 END) AS group_hit
+                FROM scan_events
+                WHERE scanner_id IS NOT NULL
+                GROUP BY token_key, day, scanner_id
+            )
+            SELECT token_key, SUM(dm_hit + group_hit) AS scan_count
+            FROM days GROUP BY token_key
+            """
+        ).fetchall()
+    return {r[0]: int(r[1] or 0) for r in rows}
+
+
+async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
+    """Bot-wide leaderboard by multiple — not scoped to one chat like
+    /leaderboard. Deduped to one entry per token (its single best-performing
+    call, wherever that happened), with an all-time scan count attached to
+    each row so it reads as both 'how well' and 'how much attention.'
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute("SELECT * FROM leaderboard_calls").fetchall()]
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(10)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+    ) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+    if not ranked:
+        return []
+
+    # One entry per token — keep only its single best-performing call.
+    best_per_token: dict[str, dict] = {}
+    for row in ranked:
+        key = row["token_key"]
+        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+            best_per_token[key] = row
+
+    scan_counts = _alltime_scan_counts_by_token()
+    for row in best_per_token.values():
+        row["scan_count"] = scan_counts.get(row["token_key"], 0)
+
+    final = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
+    return final[:limit]
+
+
+def _best_scans_keyboard():
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="🔄 Refresh", callback_data="bs:refresh"))
+    return b.as_markup()
+
+
+async def build_best_scans_message() -> str | None:
+    rows = await _global_best_scans_rows()
+    if not rows:
+        return None
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [f'{_ce("leaderboard", "🏆")} <b>BEST SCANS · ALL TIME</b>', ""]
+    ranking_lines = []
+    for i, row in enumerate(rows, 1):
+        rank = medals[i - 1] if i <= 3 else f"<b>{i}.</b>"
+        symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+        address = str(row.get("token_address") or "").strip()
+        scan_url = _deep_scan_url(address) if address else None
+        ticker = (
+            f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+            if scan_url else f"<b>${symbol}</b>"
+        )
+        scans = int(row.get("scan_count") or 0)
+        ranking_lines.append(
+            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b> "
+            f"· {scans} scan{'s' if scans != 1 else ''}"
+        )
+    lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
+    return "\n".join(lines)
+
+
 async def build_recap_message(chat_id: int, kind: str) -> str | None:
     """Three sections per group recap:
     1. MOST SCANNED (local) — this specific group's own scan activity, over
@@ -5679,6 +5781,42 @@ async def cb_topscans_refresh(callback: CallbackQuery):
         await callback.answer("Refreshed" if changed else "Already up to date")
     except Exception:
         logger.exception("/topscans refresh failed")
+        await callback.answer("Couldn't refresh right now.", show_alert=True)
+
+
+@dp.message(Command("bestscans"))
+async def cmd_bestscans(message: Message):
+    """Bot-wide leaderboard by multiple, not scoped to one chat like
+    /leaderboard — the token's single best-performing call, wherever it
+    happened, with an all-time scan count attached to each entry."""
+    status = await message.answer("Building the best scans leaderboard…")
+    try:
+        text = await build_best_scans_message()
+        if not text:
+            await status.edit_text("No qualifying calls yet.")
+            return
+        await status.edit_text(text, disable_web_page_preview=True, reply_markup=_best_scans_keyboard())
+    except Exception:
+        logger.exception("/bestscans failed")
+        try:
+            await status.edit_text("❌ Couldn't build the leaderboard right now.")
+        except Exception:
+            pass
+
+
+@dp.callback_query(F.data == "bs:refresh")
+async def cb_bestscans_refresh(callback: CallbackQuery):
+    try:
+        text = await build_best_scans_message()
+        if not text:
+            await callback.answer("No qualifying calls yet.", show_alert=True)
+            return
+        changed = await _safe_edit_text(
+            callback.message, text, disable_web_page_preview=True, reply_markup=_best_scans_keyboard()
+        )
+        await callback.answer("Refreshed" if changed else "Already up to date")
+    except Exception:
+        logger.exception("/bestscans refresh failed")
         await callback.answer("Couldn't refresh right now.", show_alert=True)
 
 
