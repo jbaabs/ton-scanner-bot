@@ -1,1 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>GRAMX6900 // SNAKE</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --void:#05070a;
+    --panel:#0a1017;
+    --panel-edge:#152233;
+    --blue:#2ea6ff;
+    --blue-deep:#0d6dc4;
+    --blue-glow:#9fd8ff;
+    --ink:#000000;
+    --text:#e7f0f7;
+    --muted:#5f7488;
+    --red:#ff4d4d;
+    --green:#3ee67f;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0;padding:0;
+    height:100%;
+    width:100%;
+    background:var(--void);
+    font-family:'Arial Narrow',Arial,sans-serif;
+    color:var(--text);
+    display:flex;align-items:center;justify-content:center;
+    overflow:hidden;
+    -webkit-tap-highlight-color:transparent;
+    position:fixed;
+    inset:0;
+  }
+  #stage{
+    width:100%;
+    height:100%;
+    max-width:440px;
+    padding:12px;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+  }
+
+  .ticker{
+    overflow:hidden;
+    white-space:nowrap;
+    background:var(--ink);
+    border:1px solid var(--panel-edge);
+    border-radius:3px;
+    margin-bottom:10px;
+    padding:5px 0;
+  }
+  .ticker-inner{
+    display:inline-block;
+    font-family:'Courier New',monospace;
+    font-size:10px;
+    letter-spacing:0.05em;
+    color:var(--blue);
+    animation:scroll 14s linear infinite;
+  }
+  .ticker-inner span.up{color:var(--green);}
+  .ticker-inner span.down{color:var(--red);}
+  @keyframes scroll{ 0%{transform:translateX(0);} 100%{transform:translateX(-50%);} }
+
+  .frame{
+    background:var(--panel);
+    border:1px solid var(--panel-edge);
+    border-radius:6px;
+    padding:14px;
+    position:relative;
+    box-shadow: 0 0 0 1px rgba(46,166,255,0.05), 0 8px 30px rgba(0,0,0,0.5);
+    display:flex;
+    flex-direction:column;
+    min-height:0;
+  }
+  .frame::before{
+    content:"";
+    position:absolute;
+    top:-1px;left:14px;right:14px;
+    height:2px;
+    background:linear-gradient(90deg, transparent, var(--blue), transparent);
+    opacity:.8;
+  }
+
+  .topbar{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:12px;
+    padding:0 2px;
+  }
+  .brandwrap{ display:flex; align-items:center; gap:7px; }
+  .brand{
+    font-size:13px;
+    letter-spacing:0.06em;
+    color:var(--text);
+    text-transform:uppercase;
+    font-weight:800;
+    font-style:italic;
+  }
+  .brand em{ color:var(--blue); font-style:italic; }
+  .brand small{
+    display:block;
+    font-size:8px;
+    letter-spacing:0.2em;
+    color:var(--muted);
+    font-weight:400;
+    font-style:normal;
+  }
+  .score{
+    font-family:'Courier New',monospace;
+    font-size:11px;
+    color:var(--muted);
+    text-align:right;
+    letter-spacing:0.05em;
+  }
+  .score b{
+    display:block;
+    color:var(--blue-glow);
+    font-size:20px;
+    font-family:Arial,sans-serif;
+    font-weight:800;
+  }
+
+  .canvas-wrap{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    flex:1;
+    min-height:0;
+    position:relative;
+  }
+  canvas{
+    display:block;
+    background:#060a10;
+    border:1px solid var(--panel-edge);
+    border-radius:3px;
+    touch-action:none;
+    image-rendering:pixelated;
+  }
+
+  .hint{
+    text-align:center;
+    font-family:'Courier New',monospace;
+    font-size:9px;
+    color:var(--muted);
+    margin-top:10px;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+  }
+
+  .overlay{
+    position:absolute;
+    inset:0;
+    background:rgba(5,7,10,0.95);
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:14px;
+    text-align:center;
+    border-radius:3px;
+    border:1px solid var(--panel-edge);
+  }
+  .overlay.hidden{display:none;}
+  .overlay .tag{
+    font-family:'Courier New',monospace;
+    font-size:9px;
+    letter-spacing:0.2em;
+    color:var(--blue);
+    text-transform:uppercase;
+  }
+  .overlay h1{
+    font-size:17px;
+    letter-spacing:0.02em;
+    color:var(--text);
+    margin:0;
+    text-transform:uppercase;
+    font-style:italic;
+    font-weight:800;
+  }
+  .overlay p{
+    font-size:11px;
+    color:var(--muted);
+    margin:0;
+    max-width:230px;
+    line-height:1.6;
+  }
+  .overlay .big{
+    font-size:34px;
+    color:var(--blue-glow);
+    font-weight:800;
+    font-family:Arial,sans-serif;
+  }
+  button{
+    background:var(--blue);
+    color:#00131f;
+    border:none;
+    padding:11px 26px;
+    font-family:Arial,sans-serif;
+    font-size:11px;
+    font-weight:800;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    border-radius:3px;
+    cursor:pointer;
+    font-style:italic;
+  }
+  button:active{background:var(--blue-glow);}
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <div class="ticker">
+    <div class="ticker-inner" id="tickerText"></div>
+  </div>
+
+  <div class="frame">
+    <div class="topbar">
+      <div class="brandwrap">
+        <div class="brand"><em>GRAMX</em>6900<small>FINANCIAL RESISTANCE</small></div>
+      </div>
+      <div class="score">SCORE<b id="scoreVal">0</b></div>
+    </div>
+
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="game"></canvas>
+
+      <div class="overlay" id="startOverlay">
+        <div class="tag">// DISPATCH · SNAKE PROTOCOL</div>
+        <h1>Infinite Conviction</h1>
+        <p>Collect the gem. Zero permission required. Swipe or use arrow keys — avoid the walls and yourself.</p>
+        <button id="startBtn">Start Run</button>
+      </div>
+      <div class="overlay hidden" id="overOverlay">
+        <div class="tag">// RUN TERMINATED</div>
+        <h1>Resistance Ended</h1>
+        <div class="big" id="finalScore">0</div>
+        <p>Best this session: <span id="bestScore">0</span></p>
+        <button id="retryBtn">Retry</button>
+      </div>
+    </div>
+
+    <div class="hint">Arrow keys / swipe — preview build</div>
+  </div>
+</div>
+
+<script>
+// Point this at your deployed endpoint, e.g. https://yourdomain.up.railway.app/api/snake/score
+const SCORE_ENDPOINT = '/api/snake/score';
+
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+if (tg) {
+  tg.ready();
+  tg.expand();
+}
+
+async function submitScore(finalScore){
+  if (!tg || !tg.initData) return null; // not opened inside Telegram — skip silently
+  try {
+    const res = await fetch(SCORE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: tg.initData, score: finalScore }),
+    });
+    if (!res.ok) return null;
+    return await res.json(); // { ok: true, best: <int> }
+  } catch (e) {
+    return null; // fail quietly — don't block the game-over screen on network issues
+  }
+}
+
+// ticker content matching site's marquee style
+const tickerItems = [
+  ['GRAMX6900', '▲ 69000%', 'up'],
+  ['FINANCIAL RESISTANCE', '▲ 6900%', 'up'],
+  ['GATEKEEPERS', '▼ 100%', 'down'],
+  ['PERMISSIONLESS', '▲ ∞', 'up'],
+  ['CONVICTION', '▲ 6900%', 'up'],
+  ['CENSORSHIP', '▼ 100%', 'down'],
+];
+function buildTicker(){
+  const one = tickerItems.map(([label,val,dir]) => `${label} <span class="${dir}">${val}</span>`).join(' &nbsp;|&nbsp; ');
+  document.getElementById('tickerText').innerHTML = one + ' &nbsp;|&nbsp; ' + one;
+}
+buildTicker();
+
+const canvas = document.getElementById('game');
+const wrap = document.getElementById('canvasWrap');
+const ctx = canvas.getContext('2d');
+const GRID = 18;
+let CELL = 20;
+
+function sizeCanvas(){
+  const box = wrap.getBoundingClientRect();
+  const available = Math.floor(Math.min(box.width, box.height));
+  CELL = Math.max(8, Math.floor(available / GRID));
+  const size = CELL * GRID; // always an exact multiple of GRID — no partial cells, no offcuts
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  canvas.width = size * dpr;
+  canvas.height = size * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  drawGrid(size);
+  if(typeof draw === 'function') draw();
+}
+
+function drawGrid(size){
+  canvas.style.backgroundImage =
+    `repeating-linear-gradient(0deg, #0c1620 0px, #0c1620 1px, transparent 1px, transparent ${CELL}px),` +
+    `repeating-linear-gradient(90deg, #0c1620 0px, #0c1620 1px, transparent 1px, transparent ${CELL}px)`;
+  canvas.style.backgroundSize = `${size}px ${size}px`;
+}
+
+let snake, dir, nextDir, food, score, best = 0, running = false, speed = 130;
+let loopTimer = null;
+
+function resetGame(){
+  snake = [{x:9,y:9},{x:8,y:9},{x:7,y:9}];
+  dir = {x:1,y:0};
+  nextDir = {x:1,y:0};
+  score = 0;
+  speed = 130;
+  document.getElementById('scoreVal').textContent = score;
+  placeFood();
+}
+
+function placeFood(){
+  let valid = false;
+  while(!valid){
+    food = { x: Math.floor(Math.random()*GRID), y: Math.floor(Math.random()*GRID) };
+    valid = !snake.some(s => s.x===food.x && s.y===food.y);
+  }
+}
+
+// Draws a simplified GRAMX6900 gem mark: hexagon with a 4-point star, coin ring behind it
+function drawGemLogo(px, py, size){
+  const cx = px + size/2, cy = py + size/2;
+  const r = size*0.46;
+
+  ctx.save();
+  ctx.shadowColor = '#2ea6ff';
+  ctx.shadowBlur = 9;
+
+  // outer ring (coin)
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI*2);
+  ctx.strokeStyle = '#2ea6ff';
+  ctx.lineWidth = size*0.09;
+  ctx.stroke();
+
+  ctx.shadowBlur = 4;
+  // hexagon gem
+  const hexR = r*0.62;
+  ctx.beginPath();
+  for(let i=0;i<6;i++){
+    const a = Math.PI/180 * (60*i - 90);
+    const x = cx + hexR*Math.cos(a);
+    const y = cy + hexR*Math.sin(a);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#2ea6ff';
+  ctx.fill();
+
+  // 4-point star (white)
+  ctx.shadowBlur = 0;
+  const sR = hexR*0.55, sR2 = hexR*0.16;
+  ctx.beginPath();
+  for(let i=0;i<8;i++){
+    const a = Math.PI/180 * (45*i - 90);
+    const rad = i%2===0 ? sR : sR2;
+    const x = cx + rad*Math.cos(a);
+    const y = cy + rad*Math.sin(a);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  drawGemLogo(food.x*CELL, food.y*CELL, CELL);
+
+  snake.forEach((seg, i) => {
+    const isHead = i === 0;
+    const pad = isHead ? 1 : 2.5;
+    ctx.save();
+    if(isHead){
+      ctx.shadowColor = '#2ea6ff';
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = '#9fd8ff';
+    } else {
+      ctx.fillStyle = i % 2 === 0 ? '#2ea6ff' : '#0d6dc4';
+    }
+    ctx.beginPath();
+    const x = seg.x*CELL+pad, y = seg.y*CELL+pad, w = CELL-pad*2, h = CELL-pad*2, rad = 3;
+    ctx.moveTo(x+rad,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rad);
+    ctx.arcTo(x+w,y+h,x,y+h,rad);
+    ctx.arcTo(x,y+h,x,y,rad);
+    ctx.arcTo(x,y,x+w,y,rad);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+function tick(){
+  dir = nextDir;
+  const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+  if(head.x < 0 || head.x >= GRID || head.y < 0 || head.y >= GRID || snake.some(s => s.x===head.x && s.y===head.y)){
+    return gameOver();
+  }
+
+  snake.unshift(head);
+
+  if(head.x === food.x && head.y === food.y){
+    score += 10;
+    document.getElementById('scoreVal').textContent = score;
+    placeFood();
+    speed = Math.max(70, speed - 3);
+    restartLoop();
+  } else {
+    snake.pop();
+  }
+
+  draw();
+}
+
+function restartLoop(){
+  clearInterval(loopTimer);
+  loopTimer = setInterval(tick, speed);
+}
+
+async function gameOver(){
+  running = false;
+  clearInterval(loopTimer);
+  best = Math.max(best, score);
+  document.getElementById('finalScore').textContent = score;
+  document.getElementById('bestScore').textContent = best;
+  document.getElementById('overOverlay').classList.remove('hidden');
+
+  const result = await submitScore(score);
+  if (result && result.ok) {
+    best = Math.max(best, result.best);
+    document.getElementById('bestScore').textContent = best;
+  }
+}
+
+function startGame(){
+  document.getElementById('startOverlay').classList.add('hidden');
+  document.getElementById('overOverlay').classList.add('hidden');
+  resetGame();
+  draw();
+  running = true;
+  restartLoop();
+}
+
+document.getElementById('startBtn').addEventListener('click', startGame);
+document.getElementById('retryBtn').addEventListener('click', startGame);
+
+window.addEventListener('keydown', e => {
+  if(!running) return;
+  const k = e.key;
+  if(k==='ArrowUp' && dir.y===0){ nextDir={x:0,y:-1}; }
+  else if(k==='ArrowDown' && dir.y===0){ nextDir={x:0,y:1}; }
+  else if(k==='ArrowLeft' && dir.x===0){ nextDir={x:-1,y:0}; }
+  else if(k==='ArrowRight' && dir.x===0){ nextDir={x:1,y:0}; }
+});
+
+let touchStart = null;
+canvas.addEventListener('touchstart', e => {
+  touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+});
+canvas.addEventListener('touchend', e => {
+  if(!touchStart || !running) return;
+  const dx = e.changedTouches[0].clientX - touchStart.x;
+  const dy = e.changedTouches[0].clientY - touchStart.y;
+  if(Math.abs(dx) > Math.abs(dy)){
+    if(dx > 20 && dir.x===0) nextDir = {x:1,y:0};
+    else if(dx < -20 && dir.x===0) nextDir = {x:-1,y:0};
+  } else {
+    if(dy > 20 && dir.y===0) nextDir = {x:0,y:1};
+    else if(dy < -20 && dir.y===0) nextDir = {x:0,y:-1};
+  }
+  touchStart = null;
+});
+
+window.addEventListener('resize', sizeCanvas);
+window.addEventListener('orientationchange', sizeCanvas);
+
+resetGame();
+sizeCanvas();
+draw();
+</script>
+</body>
+</html>
 
