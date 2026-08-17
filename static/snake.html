@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>GRAMX6900 // SNAKE</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js" crossorigin="anonymous"></script>
 <style>
   :root{
     --void:#05070a;
@@ -22,7 +22,7 @@
   *{box-sizing:border-box;}
   html,body{
     margin:0;padding:0;
-    height:100%;
+    height:100dvh;
     width:100%;
     background:var(--void);
     font-family:'Arial Narrow',Arial,sans-serif;
@@ -124,6 +124,36 @@
     font-weight:800;
   }
 
+  .multiplier-badge{
+    display:none;
+    align-items:center;
+    gap:5px;
+    background:var(--amber);
+    color:#1a1200;
+    font-family:Arial,sans-serif;
+    font-weight:800;
+    font-style:italic;
+    font-size:12px;
+    letter-spacing:0.03em;
+    padding:3px 9px;
+    border-radius:20px;
+    margin-top:4px;
+    animation: pulseBadge 0.6s ease-in-out infinite alternate;
+  }
+  .multiplier-badge.active{ display:inline-flex; }
+  @keyframes pulseBadge{
+    from{ box-shadow:0 0 4px rgba(230,184,62,0.4); transform:scale(1); }
+    to{ box-shadow:0 0 14px rgba(230,184,62,0.9); transform:scale(1.06); }
+  }
+
+  .frame.boosted{
+    animation: boostGlow 0.6s ease-in-out infinite alternate;
+  }
+  @keyframes boostGlow{
+    from{ box-shadow: 0 0 0 1px rgba(230,184,62,0.15), 0 8px 30px rgba(0,0,0,0.5); }
+    to{ box-shadow: 0 0 0 1px rgba(230,184,62,0.6), 0 0 26px rgba(230,184,62,0.35), 0 8px 30px rgba(0,0,0,0.5); }
+  }
+
   .canvas-wrap{
     display:flex;
     align-items:center;
@@ -218,12 +248,12 @@
     <div class="ticker-inner" id="tickerText"></div>
   </div>
 
-  <div class="frame">
+  <div class="frame" id="gameFrame">
     <div class="topbar">
       <div class="brandwrap">
         <div class="brand"><em>GRAMX</em>6900<small>FINANCIAL RESISTANCE</small></div>
       </div>
-      <div class="score">SCORE<b id="scoreVal">0</b></div>
+      <div class="score">SCORE<b id="scoreVal">0</b><span class="multiplier-badge" id="multiplierBadge">⚡ ×2</span></div>
     </div>
 
     <div class="canvas-wrap" id="canvasWrap">
@@ -253,35 +283,7 @@
 const SCORE_ENDPOINT = '/api/snake/score';
 
 const tg = window.Telegram ? window.Telegram.WebApp : null;
-if (tg) {
-  tg.ready();
-  tg.expand();
 
-  // True fullscreen (Bot API 8.0+): removes the drag handle entirely, so
-  // there's nothing left for a swipe-down to grab onto. On older clients
-  // that don't support it, this call is just ignored.
-  if (typeof tg.requestFullscreen === 'function') {
-    tg.requestFullscreen();
-  }
-
-  // Stops the swipe-down-to-close gesture so an accidental swipe mid-game
-  // doesn't kill the run. Requires Telegram client version supporting Bot API 7.7+;
-  // older clients just ignore the call harmlessly.
-  if (typeof tg.disableVerticalSwipes === 'function') {
-    tg.disableVerticalSwipes();
-  }
-  // Belt-and-braces: on clients where disableVerticalSwipes isn't available,
-  // this at least makes Telegram show a confirmation prompt before closing.
-  if (typeof tg.enableClosingConfirmation === 'function') {
-    tg.enableClosingConfirmation();
-  }
-}
-
-// Extra safety net in the page itself: block the touchmove-based swipe
-// Telegram's own gesture listens for, specifically while a run is active.
-document.body.addEventListener('touchmove', (e) => {
-  if (running) e.preventDefault();
-}, { passive: false });
 
 
 async function submitScore(finalScore){
@@ -347,12 +349,40 @@ function drawGrid(size){
 let snake, dir, nextDir, food, score, best = 0, running = false, speed = 130;
 let loopTimer = null;
 
+// Multiplier power-up: every 8 gems eaten, a random multiplier kicks in for 5 seconds.
+const MULTIPLIER_EVERY = 8;
+const MULTIPLIER_OPTIONS = [2, 3, 5];
+const MULTIPLIER_DURATION_MS = 5000;
+let multiplier = 1;
+let gemsSinceMultiplier = 0;
+let multiplierTimeout = null;
+
+function triggerMultiplier(){
+  multiplier = MULTIPLIER_OPTIONS[Math.floor(Math.random() * MULTIPLIER_OPTIONS.length)];
+  const badge = document.getElementById('multiplierBadge');
+  badge.textContent = `⚡ ×${multiplier}`;
+  badge.classList.add('active');
+  document.getElementById('gameFrame').classList.add('boosted');
+
+  clearTimeout(multiplierTimeout);
+  multiplierTimeout = setTimeout(() => {
+    multiplier = 1;
+    badge.classList.remove('active');
+    document.getElementById('gameFrame').classList.remove('boosted');
+  }, MULTIPLIER_DURATION_MS);
+}
+
 function resetGame(){
   snake = [{x:9,y:9},{x:8,y:9},{x:7,y:9}];
   dir = {x:1,y:0};
   nextDir = {x:1,y:0};
   score = 0;
   speed = 130;
+  multiplier = 1;
+  gemsSinceMultiplier = 0;
+  clearTimeout(multiplierTimeout);
+  document.getElementById('multiplierBadge').classList.remove('active');
+  document.getElementById('gameFrame').classList.remove('boosted');
   document.getElementById('scoreVal').textContent = score;
   placeFood();
 }
@@ -453,8 +483,15 @@ function tick(){
   snake.unshift(head);
 
   if(head.x === food.x && head.y === food.y){
-    score += 10;
+    score += 10 * multiplier;
     document.getElementById('scoreVal').textContent = score;
+
+    gemsSinceMultiplier++;
+    if (gemsSinceMultiplier >= MULTIPLIER_EVERY) {
+      gemsSinceMultiplier = 0;
+      triggerMultiplier();
+    }
+
     placeFood();
     speed = Math.max(70, speed - 3);
     restartLoop();
@@ -527,10 +564,71 @@ canvas.addEventListener('touchend', e => {
 window.addEventListener('resize', sizeCanvas);
 window.addEventListener('orientationchange', sizeCanvas);
 
+// Telegram's WebView doesn't always resolve CSS 100%/100dvh to the real
+// usable area, especially right after expand()/requestFullscreen() — the
+// container resizes asynchronously. So we pull the actual height straight
+// from Telegram's own API and apply it directly, then keep it in sync.
+function syncViewportHeight(){
+  if (tg && tg.viewportHeight) {
+    document.body.style.height = tg.viewportHeight + 'px';
+  } else {
+    document.body.style.height = window.innerHeight + 'px';
+  }
+  sizeCanvas();
+}
+
+if (tg) {
+  try {
+    tg.ready();
+    tg.expand();
+
+    // True fullscreen (Bot API 8.0+): removes the drag handle entirely, so
+    // there's nothing left for a swipe-down to grab onto. On older clients
+    // that don't support it, this call is just ignored.
+    if (typeof tg.requestFullscreen === 'function') {
+      tg.requestFullscreen();
+    }
+
+    // Stops the swipe-down-to-close gesture so an accidental swipe mid-game
+    // doesn't kill the run. Requires Telegram client version supporting Bot API 7.7+;
+    // older clients just ignore the call harmlessly.
+    if (typeof tg.disableVerticalSwipes === 'function') {
+      tg.disableVerticalSwipes();
+    }
+    // Belt-and-braces: on clients where disableVerticalSwipes isn't available,
+    // this at least makes Telegram show a confirmation prompt before closing.
+    if (typeof tg.enableClosingConfirmation === 'function') {
+      tg.enableClosingConfirmation();
+    }
+
+    // Container resizes happen after these calls fire, sometimes with a
+    // short delay — listen for Telegram's own resize event and re-sync.
+    if (typeof tg.onEvent === 'function') {
+      tg.onEvent('viewportChanged', syncViewportHeight);
+    }
+  } catch (err) {
+    // Never let a missing/unsupported Telegram API method break the game itself.
+    console.warn('Telegram WebApp init partial failure:', err);
+  }
+
+  syncViewportHeight();
+  // Catch the async resize even if the event fires late/not at all on some clients.
+  setTimeout(syncViewportHeight, 100);
+  setTimeout(syncViewportHeight, 400);
+} else {
+  window.addEventListener('resize', syncViewportHeight);
+  syncViewportHeight();
+}
+
+// Extra safety net in the page itself: block the touchmove-based swipe
+// Telegram's own gesture listens for, specifically while a run is active.
+document.body.addEventListener('touchmove', (e) => {
+  if (running) e.preventDefault();
+}, { passive: false });
+
 resetGame();
 sizeCanvas();
 draw();
 </script>
 </body>
 </html>
- hi
