@@ -256,7 +256,25 @@ const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
   tg.ready();
   tg.expand();
+  // Stops the swipe-down-to-close gesture so an accidental swipe mid-game
+  // doesn't kill the run. Requires Telegram client version supporting Bot API 7.7+;
+  // older clients just ignore the call harmlessly.
+  if (typeof tg.disableVerticalSwipes === 'function') {
+    tg.disableVerticalSwipes();
+  }
+  // Belt-and-braces: on clients where disableVerticalSwipes isn't available,
+  // this at least makes Telegram show a confirmation prompt before closing.
+  if (typeof tg.enableClosingConfirmation === 'function') {
+    tg.enableClosingConfirmation();
+  }
 }
+
+// Extra safety net in the page itself: block the touchmove-based swipe
+// Telegram's own gesture listens for, specifically while a run is active.
+document.body.addEventListener('touchmove', (e) => {
+  if (running) e.preventDefault();
+}, { passive: false });
+
 
 async function submitScore(finalScore){
   if (!tg || !tg.initData) return null; // not opened inside Telegram — skip silently
@@ -507,4 +525,3 @@ draw();
 </script>
 </body>
 </html>
-
