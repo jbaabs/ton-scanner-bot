@@ -699,27 +699,6 @@ def _snake_play_keyboard():
     return b.as_markup()
 
 
-@dp.message(Command("play", ignore_case=True))
-async def cmd_play(message: Message):
-    await message.answer(
-        "GRAMX6900 // SNAKE\nCollect the gem. Zero permission required.",
-        reply_markup=_snake_play_keyboard(),
-    )
-
-
-@dp.message(Command("topsnake", ignore_case=True))
-async def cmd_topsnake(message: Message):
-    rows = await asyncio.to_thread(get_top_scores, 10)
-    if not rows:
-        await message.answer("No runs yet. Be the first — /play")
-        return
-    lines = ["🏆 <b>Top Snake Scores</b>\n"]
-    for i, r in enumerate(rows, 1):
-        name = html.escape(r["username"] or f"user_{r['user_id']}")
-        lines.append(f"{i}. @{name} — {r['best']}")
-    await message.answer("\n".join(lines))
-
-
 def _parse_money_target(text: str) -> float | None:
     raw = str(text or "").strip().upper().replace("$", "").replace(",", "")
     m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([KMB]?)", raw)
@@ -5808,6 +5787,27 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
+
+
+@dp.message(Command("play", ignore_case=True))
+async def cmd_play(message: Message):
+    await message.answer(
+        "GRAMX6900 // SNAKE\nCollect the gem. Zero permission required.",
+        reply_markup=_snake_play_keyboard(),
+    )
+
+
+@dp.message(Command("topsnake", ignore_case=True))
+async def cmd_topsnake(message: Message):
+    rows = await asyncio.to_thread(get_top_scores, 10)
+    if not rows:
+        await message.answer("No runs yet. Be the first — /play")
+        return
+    lines = ["🏆 <b>Top Snake Scores</b>\n"]
+    for i, r in enumerate(rows, 1):
+        name = html.escape(r["username"] or f"user_{r['user_id']}")
+        lines.append(f"{i}. @{name} — {r['best']}")
+    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("start", "help"))
