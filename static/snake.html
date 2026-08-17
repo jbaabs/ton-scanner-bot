@@ -40,7 +40,6 @@
     padding:12px;
     display:flex;
     flex-direction:column;
-    justify-content:center;
   }
 
   .ticker{
@@ -73,6 +72,7 @@
     box-shadow: 0 0 0 1px rgba(46,166,255,0.05), 0 8px 30px rgba(0,0,0,0.5);
     display:flex;
     flex-direction:column;
+    flex:1;
     min-height:0;
   }
   .frame::before{
@@ -256,6 +256,14 @@ const tg = window.Telegram ? window.Telegram.WebApp : null;
 if (tg) {
   tg.ready();
   tg.expand();
+
+  // True fullscreen (Bot API 8.0+): removes the drag handle entirely, so
+  // there's nothing left for a swipe-down to grab onto. On older clients
+  // that don't support it, this call is just ignored.
+  if (typeof tg.requestFullscreen === 'function') {
+    tg.requestFullscreen();
+  }
+
   // Stops the swipe-down-to-close gesture so an accidental swipe mid-game
   // doesn't kill the run. Requires Telegram client version supporting Bot API 7.7+;
   // older clients just ignore the call harmlessly.
