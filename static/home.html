@@ -477,8 +477,9 @@
         </div>
       </div>
       <div class="swap-row">
-        <div class="swap-label">You Receive</div>
+        <div class="swap-label">You Receive · Estimated</div>
         <div class="swap-input-row">
+          <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
           <div class="token-pill"><span class="dot"></span>GRX6900</div>
         </div>
       </div>
@@ -869,6 +870,42 @@ async function executeSwap(){
 }
 
 document.getElementById('swapBtn').addEventListener('click', executeSwap);
+
+// ── Live "You Receive" estimate ─────────────────────────────────────────────
+// Uses DexScreener's priceNative (GRX6900's price directly in GRAM/TON) —
+// a straight-line estimate, not accounting for price impact on larger trades,
+// same caveat as most simple swap UIs show before you see the real quote in
+// your wallet.
+let _grxPerGram = null;
+
+async function refreshSwapRate(){
+  try {
+    const res = await fetch('/api/gram/stats');
+    const data = await res.json();
+    if (data.ok && data.price_native) {
+      _grxPerGram = 1 / data.price_native; // price_native = GRAM per GRX6900, so invert
+    }
+  } catch (err) {
+    console.warn('Swap rate refresh failed:', err);
+  }
+  updateReceiveEstimate();
+}
+
+function updateReceiveEstimate(){
+  const payInput = document.getElementById('payAmount');
+  const receiveInput = document.getElementById('receiveAmount');
+  const amount = parseFloat(payInput.value);
+  if (!amount || amount <= 0 || !_grxPerGram) {
+    receiveInput.value = '—';
+    return;
+  }
+  const estimate = amount * _grxPerGram;
+  receiveInput.value = estimate.toLocaleString(undefined, { maximumFractionDigits: estimate < 1 ? 6 : 2 });
+}
+
+document.getElementById('payAmount').addEventListener('input', updateReceiveEstimate);
+refreshSwapRate();
+setInterval(refreshSwapRate, 20000);
 </script>
 </body>
 </html>
