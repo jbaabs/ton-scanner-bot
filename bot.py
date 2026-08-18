@@ -715,15 +715,27 @@ async def _get_gram_stats(request: web.Request):
     jetton = report.get("jetton_info") or {}
     dex = report.get("dex_data") or {}
 
+    def _num(v):
+        # DexScreener returns some numeric fields (like priceUsd) as strings.
+        # Coerce everything to a real float here so the frontend never has to
+        # guess types — a bad/missing value becomes None instead of crashing
+        # the whole stats card downstream.
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
     data = {
         "ok": True,
         "name": jetton.get("name") or "GRAMX6900",
         "symbol": jetton.get("symbol") or "GRAM",
         "image": jetton.get("image"),
-        "price_usd": dex.get("price_usd"),
-        "price_change_24h": dex.get("price_change_24h") or dex.get("priceChange24h"),
-        "market_cap": dex.get("market_cap"),
-        "volume_24h": dex.get("volume_24h"),
+        "price_usd": _num(dex.get("price_usd")),
+        "price_change_24h": _num(dex.get("price_change_24h")),
+        "market_cap": _num(dex.get("market_cap")),
+        "volume_24h": _num(dex.get("volume_24h")),
         "holders": jetton.get("holders_count"),
         "address": GRAM_TOKEN_ADDRESS,
     }
