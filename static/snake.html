@@ -37,9 +37,15 @@
     width:100%;
     height:100%;
     max-width:440px;
-    padding:12px;
     display:flex;
     flex-direction:column;
+  }
+  #playArea{
+    flex:1;
+    min-height:0;
+    display:flex;
+    flex-direction:column;
+    padding:12px;
   }
 
   .ticker{
@@ -239,10 +245,36 @@
     font-style:italic;
   }
   button:active{background:var(--blue-glow);}
+
+  .tabbar{
+    display:flex;
+    border-top:1px solid var(--panel-edge);
+    background:var(--panel);
+    flex-shrink:0;
+    padding-bottom:env(safe-area-inset-bottom, 0);
+  }
+  .tab{
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:3px;
+    padding:10px 0 8px;
+    color:var(--muted);
+    font-size:10px;
+    letter-spacing:0.05em;
+    text-transform:uppercase;
+    font-weight:700;
+    cursor:pointer;
+    text-decoration:none;
+  }
+  .tab.active{ color:var(--blue-glow); }
+  .tab .icon{ font-size:18px; line-height:1; }
 </style>
 </head>
 <body>
 <div id="stage">
+  <div id="playArea">
 
   <div class="ticker">
     <div class="ticker-inner" id="tickerText"></div>
@@ -251,7 +283,6 @@
   <div class="frame" id="gameFrame">
     <div class="topbar">
       <div class="brandwrap">
-        <a href="/home" style="color:var(--muted);text-decoration:none;font-size:16px;margin-right:8px;">⌂</a>
         <div class="brand"><em>GRAMX</em>6900<small>FINANCIAL RESISTANCE</small></div>
       </div>
       <div class="score">SCORE<b id="scoreVal">0</b><span class="multiplier-badge" id="multiplierBadge">⚡ ×2</span></div>
@@ -276,6 +307,19 @@
     </div>
 
     <div class="hint">Arrow keys / swipe — preview build</div>
+  </div>
+
+  </div>
+
+  <div class="tabbar">
+    <a class="tab" href="/home">
+      <div class="icon">⌂</div>
+      <div>Home</div>
+    </a>
+    <div class="tab active">
+      <div class="icon">🎮</div>
+      <div>Games</div>
+    </div>
   </div>
 </div>
 
