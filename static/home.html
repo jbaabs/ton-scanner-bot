@@ -215,18 +215,7 @@
   }
   .balance-actions .connect-btn{
     margin-top:0;
-    flex:2;
-  }
-  .chart-jump-btn{
     flex:1;
-    background:#060a10;
-    border:1px solid var(--panel-edge);
-    color:var(--text);
-    font-family:Arial,sans-serif;
-    font-size:13px;
-    font-weight:800;
-    border-radius:8px;
-    cursor:pointer;
   }
 
   .chart-card{ padding-bottom:8px; }
@@ -469,14 +458,13 @@
       </div>
 
       <div class="balance-amounts" id="balanceAmounts">
-        <div class="amt"><div class="sym">TON</div><div class="num" id="tonBalanceVal">—</div></div>
-        <div class="amt"><div class="sym">GRAM</div><div class="num" id="gramBalanceVal">—</div></div>
+        <div class="amt"><div class="sym">GRAM</div><div class="num" id="tonBalanceVal">—</div></div>
+        <div class="amt"><div class="sym">GRX6900</div><div class="num" id="gramBalanceVal">—</div></div>
       </div>
 
       <div class="balance-note" id="balanceNote">Connect a TON wallet to see your balance, play and claim prizes.</div>
       <div class="balance-actions">
         <button class="connect-btn" id="connectBtn">Connect Wallet</button>
-        <button class="chart-jump-btn" id="chartJumpBtn">Chart</button>
       </div>
     </div>
 
@@ -485,14 +473,14 @@
         <div class="swap-label">You Pay</div>
         <div class="swap-input-row">
           <input class="swap-amount" id="payAmount" type="number" inputmode="decimal" placeholder="0.0" min="0" step="0.01">
-          <div class="token-pill"><span class="dot"></span>TON</div>
+          <div class="token-pill"><span class="dot"></span>GRAM</div>
         </div>
       </div>
       <div class="swap-row">
         <div class="swap-label">You Receive · Estimated</div>
         <div class="swap-input-row">
           <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
-          <div class="token-pill"><span class="dot"></span>GRAM</div>
+          <div class="token-pill"><span class="dot"></span>GRX6900</div>
         </div>
       </div>
       <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
@@ -714,10 +702,6 @@ document.getElementById('tfRow').addEventListener('click', (e) => {
   loadChart(btn.dataset.tf);
 });
 
-document.getElementById('chartJumpBtn').addEventListener('click', () => {
-  document.querySelector('.chart-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
-});
-
 window.addEventListener('resize', () => loadChart(currentTf));
 
 loadStats();
@@ -726,19 +710,11 @@ setInterval(loadStats, 20000); // keep it fresh without hammering the endpoint
 setInterval(() => loadChart(currentTf), 60000);
 </script>
 
-<script type="module">
-// ── Wallet connect (TonConnect) + swap execution (DeDust SDK) ────────────
-// Uses the official DeDust SDK's high-level sendSwap() rather than hand-built
-// cell payloads — the SDK handles the exact on-chain encoding. This has NOT
-// been tested against a live wallet from this environment; test with a small
-// real amount before trusting it at scale. Currently supports TON -> GRAM
-// only (matches the swap card's fixed direction); GRAM -> TON is a fast
-// follow-up once this direction is confirmed working.
-
-import { Factory, MAINNET_FACTORY_ADDR, Asset, PoolType } from 'https://esm.sh/@dedust/sdk@1?bundle';
-import { TonClient4, Address, toNano } from 'https://esm.sh/@ton/ton@15?bundle';
-
-const GRAM_TOKEN_ADDRESS = 'EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3';
+<script>
+// ── Wallet connect (TonConnect) ───────────────────────────────────────────
+// Kept in its own plain script, deliberately with zero external module
+// imports, so a CDN hiccup loading the DeDust SDK (used only for the swap,
+// below) can never take wallet connect down with it.
 
 const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
   manifestUrl: window.location.origin + '/tonconnect-manifest.json',
@@ -804,26 +780,62 @@ function updateWalletUI(){
   }
 }
 
-tonConnectUI.onStatusChange((wallet) => {
-  connectedWallet = wallet;
-  updateWalletUI();
-});
+if (typeof TON_CONNECT_UI === 'undefined') {
+  console.error('TonConnect UI failed to load from CDN.');
+  const connectBtn = document.getElementById('connectBtn');
+  connectBtn.textContent = 'Wallet unavailable — retry';
+  connectBtn.addEventListener('click', () => location.reload());
+} else {
+  tonConnectUI.onStatusChange((wallet) => {
+    connectedWallet = wallet;
+    updateWalletUI();
+  });
 
-document.getElementById('connectBtn').addEventListener('click', () => {
-  if (connectedWallet) {
-    tonConnectUI.disconnect();
-  } else {
-    tonConnectUI.openModal();
-  }
-});
+  document.getElementById('connectBtn').addEventListener('click', () => {
+    if (connectedWallet) {
+      tonConnectUI.disconnect();
+    } else {
+      tonConnectUI.openModal();
+    }
+  });
 
-document.getElementById('chartJumpBtn').addEventListener('click', () => {
-  document.querySelector('.chart-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
-});
+  // Restore wallet state on reload if TonConnect already has a session.
+  tonConnectUI.connectionRestored.then(() => {
+    connectedWallet = tonConnectUI.wallet;
+    updateWalletUI();
+  });
+}
+</script>
+
+<script>
+// ── Swap execution (DeDust SDK) ───────────────────────────────────────────
+// Uses the official DeDust SDK's high-level sendSwap() rather than hand-built
+// cell payloads — the SDK handles the exact on-chain encoding. This has NOT
+// been tested against a live wallet from this environment; test with a small
+// real amount before trusting it at scale. Currently supports GRAM (native
+// TON, GRAM is TON's original pre-rebrand name) -> GRX6900 only; the reverse
+// direction is a fast follow-up once this is confirmed working.
+//
+// The DeDust/TON SDK modules are only fetched lazily, on first swap attempt —
+// dynamic import() here (not a static top-level import) so a CDN hiccup only
+// affects the swap button, never wallet connect or the rest of the page.
+
+const GRX_TOKEN_ADDRESS = 'EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3';
+let _dedustSdk = null;
+
+async function loadDedustSdk(){
+  if (_dedustSdk) return _dedustSdk;
+  const [dedust, tonCore] = await Promise.all([
+    import('https://esm.sh/@dedust/sdk@1?bundle'),
+    import('https://esm.sh/@ton/ton@15?bundle'),
+  ]);
+  _dedustSdk = { ...dedust, ...tonCore };
+  return _dedustSdk;
+}
 
 // Adapts TonConnect's sendTransaction into the { address, send } Sender
 // shape the DeDust SDK's vault methods expect.
-function makeTonConnectSender(){
+function makeTonConnectSender(Address){
   return {
     address: Address.parse(connectedWallet.account.address),
     send: async (args) => {
@@ -853,18 +865,22 @@ async function executeSwap(){
 
   const swapBtn = document.getElementById('swapBtn');
   swapBtn.disabled = true;
-  setSwapStatus('Preparing swap — check your wallet to confirm…', 'pending');
+  setSwapStatus('Loading swap engine…', 'pending');
 
   try {
+    const { Factory, MAINNET_FACTORY_ADDR, Asset, PoolType, TonClient4, Address, toNano } = await loadDedustSdk();
+
+    setSwapStatus('Preparing swap — check your wallet to confirm…', 'pending');
+
     const tonClient = new TonClient4({ endpoint: 'https://mainnet-v4.tonhubapi.com' });
     const factory = tonClient.open(Factory.createFromAddress(MAINNET_FACTORY_ADDR));
     const TON = Asset.native();
-    const GRAM = Asset.jetton(Address.parse(GRAM_TOKEN_ADDRESS));
+    const GRX = Asset.jetton(Address.parse(GRX_TOKEN_ADDRESS));
 
-    const pool = tonClient.open(await factory.getPool(PoolType.VOLATILE, [TON, GRAM]));
+    const pool = tonClient.open(await factory.getPool(PoolType.VOLATILE, [TON, GRX]));
     const tonVault = tonClient.open(await factory.getNativeVault());
 
-    const sender = makeTonConnectSender();
+    const sender = makeTonConnectSender(Address);
 
     await tonVault.sendSwap(sender, {
       poolAddress: pool.address,
@@ -883,12 +899,6 @@ async function executeSwap(){
 }
 
 document.getElementById('swapBtn').addEventListener('click', executeSwap);
-
-// Restore wallet state on reload if TonConnect already has a session.
-tonConnectUI.connectionRestored.then(() => {
-  connectedWallet = tonConnectUI.wallet;
-  updateWalletUI();
-});
 </script>
 </body>
 </html>
