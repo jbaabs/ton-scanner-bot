@@ -472,7 +472,7 @@
       <div class="swap-row">
         <div class="swap-label">You Pay</div>
         <div class="swap-input-row">
-          <input class="swap-amount" id="payAmount" type="number" inputmode="decimal" placeholder="0.0" min="0" step="0.01">
+          <input class="swap-amount" id="payAmount" type="number" inputmode="decimal" placeholder="0.0" min="1" step="0.1">
           <div class="token-pill"><span class="dot"></span>GRAM</div>
         </div>
       </div>
@@ -486,9 +486,9 @@
         </div>
       </div>
       <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
-        <button class="connect-btn disabled" id="swapBtn" disabled>Swap Paused</button>
+        <button class="connect-btn disabled" id="swapBtn" disabled>Connect Wallet To Swap</button>
         <div class="swap-status" id="swapStatus"></div>
-        <div class="note" style="margin-top:8px;color:var(--red);">Swap execution is temporarily paused — a real test transaction bounced (exit code 9, cell underflow), meaning the message format is missing a field we haven't confirmed yet. Nothing was lost (funds bounce back automatically), but we're holding off on further attempts until we have better data.</div>
+        <div class="note" style="margin-top:8px;">Minimum 1 GRAM per swap. Still experimental — the last real test bounced (exit code 9), and this doesn't fully fix that. Funds bounce back automatically if it fails (minus a small network fee).</div>
       </div>
     </div>
 
@@ -776,9 +776,11 @@ function updateWalletUI(){
     connectBtn.disabled = false;
     note.textContent = 'Wallet connected. Balances refresh automatically.';
     loadBalance(addr);
-    // Swap execution is intentionally paused — see the red note under the
-    // swap button. Do NOT re-enable this on wallet connect until a verified
-    // fix for the exit-code-9 (cell underflow) failure is confirmed.
+    if (swapBtn) {
+      swapBtn.textContent = 'Swap';
+      swapBtn.classList.remove('disabled');
+      swapBtn.disabled = false;
+    }
   } else {
     pill.innerHTML = `<span class="dot-ring"></span>No wallet`;
     connectBtn.textContent = 'Connect Wallet';
@@ -822,13 +824,16 @@ if (typeof TON_CONNECT_UI === 'undefined') {
 </script>
 
 <script>
-// ── Swap execution (DeDust CPMM v2, verified format) ────────────────────────
-// The swap message format was reverse-engineered from a real, successful
-// on-chain transaction (not guessed from docs) — see boc_parser.py and
-// /api/swap/build in bot.py for the byte-level details and how it was
-// verified. The backend builds the exact message bytes; this just passes
-// them to TonConnect for the wallet to sign. No slippage/minimum-output
-// protection exists in this message format — flagged in the UI below.
+// ── Swap execution (DeDust CPMM v2 — attempt #2, still unverified) ─────────
+// Base structure (opcode + query_id + amount) was decoded from a real,
+// successful transaction — verified byte-for-byte. That exact structure
+// bounced with exit code 9 (cell underflow) when tested at a different
+// amount, meaning a field is missing. A trailing `limit:Coins` field
+// (0 = no minimum output) has been added as an educated guess based on
+// DeDust's documented swap-step parameters — NOT confirmed against a real
+// transaction. If this still bounces, the guess was wrong; a second real
+// transaction is needed to pin down the actual format. Minimum 1 GRAM per
+// swap. Funds bounce back automatically on failure, minus a small network fee.
 
 function setSwapStatus(msg, kind){
   const el = document.getElementById('swapStatus');
@@ -844,8 +849,8 @@ async function executeSwap(){
   }
   const amountStr = document.getElementById('payAmount').value;
   const amount = parseFloat(amountStr);
-  if (!amount || amount <= 0) {
-    setSwapStatus('Enter an amount above 0.', 'error');
+  if (!amount || amount < 1) {
+    setSwapStatus('Minimum swap is 1 GRAM.', 'error');
     return;
   }
 
@@ -871,7 +876,7 @@ async function executeSwap(){
       }],
     });
 
-    setSwapStatus('Swap sent — confirm in your wallet, then check your balance shortly.', 'success');
+    setSwapStatus('Sent — check Tonscan/your wallet to see if it went through or bounced.', 'success');
     setTimeout(() => loadBalance(connectedWallet.account.address), 5000);
   } catch (err) {
     console.error('Swap failed:', err);
