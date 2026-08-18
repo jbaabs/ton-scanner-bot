@@ -648,23 +648,41 @@ async def _find_dedust_pool_address(session: aiohttp.ClientSession) -> str | Non
             return None
         pools = await resp.json()
 
+    # TON addresses have two valid "friendly" string forms (EQ... bounceable
+    # vs UQ... non-bounceable) that both decode to the same underlying raw
+    # address. Comparing raw form avoids silently missing a match just
+    # because DeDust's API happens to list it under the other variant.
+    target_raw = (_friendly_to_raw(GRAM_TOKEN_ADDRESS) or "").lower()
+    matched_count = 0
+
     for pool in pools:
-        if pool.get("type") != "volatile":
-            continue
         assets = pool.get("assets") or []
         if len(assets) != 2:
             continue
         has_native = any(a.get("type") == "native" for a in assets)
-        has_grx = any(
-            a.get("type") == "jetton" and a.get("address") == GRAM_TOKEN_ADDRESS
-            for a in assets
-        )
+        jetton_assets = [a for a in assets if a.get("type") == "jetton"]
+        has_grx = False
+        for a in jetton_assets:
+            addr = a.get("address") or ""
+            if addr == GRAM_TOKEN_ADDRESS or addr.lower() == GRAM_TOKEN_ADDRESS.lower():
+                has_grx = True
+                break
+            addr_raw = (_friendly_to_raw(addr) or "").lower()
+            if target_raw and addr_raw == target_raw:
+                has_grx = True
+                break
         if has_native and has_grx:
+            matched_count += 1
             address = pool.get("address")
             _DEDUST_POOL_CACHE["address"] = address
             _DEDUST_POOL_CACHE["ts"] = now
+            logger.info("Matched DeDust TON/GRX6900 pool: %s", address)
             return address
 
+    logger.warning(
+        "No DeDust TON/GRX6900 pool matched among %d pools (target_raw=%s)",
+        len(pools), target_raw,
+    )
     return None
 
 
