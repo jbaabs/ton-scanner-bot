@@ -812,47 +812,16 @@ if (typeof TON_CONNECT_UI === 'undefined') {
 
 <script>
 // ── Swap execution (DeDust SDK) ───────────────────────────────────────────
-// Uses the official DeDust SDK's high-level sendSwap() rather than hand-built
-// cell payloads — the SDK handles the exact on-chain encoding. This has NOT
-// been tested against a live wallet from this environment; test with a small
-// real amount before trusting it at scale. Currently supports GRAM (native
-// TON, GRAM is TON's original pre-rebrand name) -> GRX6900 only; the reverse
-// direction is a fast follow-up once this is confirmed working.
-//
-// The DeDust/TON SDK modules are only fetched lazily, on first swap attempt —
-// dynamic import() here (not a static top-level import) so a CDN hiccup only
-// affects the swap button, never wallet connect or the rest of the page.
-
-const GRX_TOKEN_ADDRESS = 'EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3';
-let _dedustSdk = null;
-
-async function loadDedustSdk(){
-  if (_dedustSdk) return _dedustSdk;
-  const [dedust, tonCore] = await Promise.all([
-    import('https://esm.sh/@dedust/sdk@1?bundle'),
-    import('https://esm.sh/@ton/ton@15?bundle'),
-  ]);
-  _dedustSdk = { ...dedust, ...tonCore };
-  return _dedustSdk;
-}
-
-// Adapts TonConnect's sendTransaction into the { address, send } Sender
-// shape the DeDust SDK's vault methods expect.
-function makeTonConnectSender(Address){
-  return {
-    address: Address.parse(connectedWallet.account.address),
-    send: async (args) => {
-      await tonConnectUI.sendTransaction({
-        validUntil: Math.floor(Date.now() / 1000) + 300,
-        messages: [{
-          address: args.to.toString(),
-          amount: args.value.toString(),
-          payload: args.body ? args.body.toBoc().toString('base64') : undefined,
-        }],
-      });
-    },
-  };
-}
+// ── Swap execution (DeDust) ────────────────────────────────────────────────
+// Redesigned after confirming Telegram's in-app browser reliably fails to
+// load ES module CDN imports ("Importing a module script failed"). Instead
+// of running the DeDust SDK client-side, the server does all the on-chain
+// lookup + transaction-payload construction (plain HTTP + the official
+// `dedust` Python SDK — see /api/swap/quote in bot.py) and hands back a
+// plain {to, amount, payload} object. The browser's only job is passing
+// that straight to TonConnect for the wallet to sign — no crypto libraries
+// need to load in the WebView at all. Still genuinely untested against a
+// live wallet from this environment; test with a small real amount first.
 
 async function executeSwap(){
   if (!connectedWallet) {
@@ -881,25 +850,24 @@ async function executeSwap(){
       throw new Error(`GRX6900 liquidity is on ${stats.dex_id}, not DeDust — this swap button only supports DeDust right now.`);
     }
 
-    setSwapStatus('Loading swap engine…', 'pending');
-    const { Factory, MAINNET_FACTORY_ADDR, Asset, PoolType, TonClient4, Address, toNano } = await loadDedustSdk();
+    setSwapStatus('Building swap transaction…', 'pending');
+    const quoteRes = await fetch(
+      `/api/swap/quote?amount=${encodeURIComponent(amountStr)}&payer=${encodeURIComponent(connectedWallet.account.address)}`
+    );
+    const quote = await quoteRes.json();
+    console.log('Swap quote response:', quote); // remove once confirmed working
+    if (!quote.ok) {
+      throw new Error(quote.message || quote.error || 'Server could not build the swap.');
+    }
 
-    setSwapStatus('Preparing swap — check your wallet to confirm…', 'pending');
-
-    const tonClient = new TonClient4({ endpoint: 'https://mainnet-v4.tonhubapi.com' });
-    const factory = tonClient.open(Factory.createFromAddress(MAINNET_FACTORY_ADDR));
-    const TON = Asset.native();
-    const GRX = Asset.jetton(Address.parse(GRX_TOKEN_ADDRESS));
-
-    const pool = tonClient.open(await factory.getPool(PoolType.VOLATILE, [TON, GRX]));
-    const tonVault = tonClient.open(await factory.getNativeVault());
-
-    const sender = makeTonConnectSender(Address);
-
-    await tonVault.sendSwap(sender, {
-      poolAddress: pool.address,
-      amount: toNano(amountStr),
-      gasAmount: toNano('0.25'),
+    setSwapStatus('Check your wallet to confirm…', 'pending');
+    await tonConnectUI.sendTransaction({
+      validUntil: Math.floor(Date.now() / 1000) + 300,
+      messages: [{
+        address: quote.to,
+        amount: quote.amount_nano,
+        payload: quote.payload_boc_base64,
+      }],
     });
 
     setSwapStatus('Swap sent — confirm in your wallet, then check your balance shortly.', 'success');
