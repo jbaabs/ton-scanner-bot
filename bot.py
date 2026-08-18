@@ -55,6 +55,7 @@ GRAM_TOKEN_ADDRESS = os.getenv(
 # public Railway domain (Settings -> Networking -> Generate Domain).
 PORT = int(os.getenv("PORT", "8080"))
 GAME_URL = os.getenv("GAME_URL", "https://your-app.up.railway.app/games/snake")
+HOME_URL = os.getenv("HOME_URL", "https://your-app.up.railway.app/home")
 GAME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "snake.html")
 HOME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "home.html")
 
@@ -5848,6 +5849,16 @@ async def cmd_play(message: Message):
     await message.answer(
         "GRAMX6900 // SNAKE\nCollect the gem. Zero permission required.",
         reply_markup=_snake_play_keyboard(),
+    )
+
+
+@dp.message(Command("home", ignore_case=True))
+async def cmd_home(message: Message):
+    b = InlineKeyboardBuilder()
+    b.button(text="🏠 Open GRX Home", web_app=WebAppInfo(url=HOME_URL))
+    await message.answer(
+        "GRAMX6900 // HOME\nLive stats, straight from the scanner.",
+        reply_markup=b.as_markup(),
     )
 
 
