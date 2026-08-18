@@ -651,20 +651,126 @@ async def _build_swap(request: web.Request):
     if amount <= 0:
         return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
 
+    token_address = (request.query.get("token") or "").strip()
+
+    if token_address:
+        # Resolve the target token's pool dynamically via the same
+        # scan_token()/DexScreener pipeline your /scan command already uses.
+        # DeDust's own /v2/pools listing turned out to only cover the older
+        # pool type — it never listed GRX6900's real (CPMM v2) pool at all —
+        # so DexScreener's indexed pair data is the more reliable source here.
+        try:
+            async with aiohttp.ClientSession() as session:
+                report = await scan_token(session, token_address)
+        except Exception:
+            logger.exception("Swap token lookup failed for %s", token_address)
+            return web.json_response({"ok": False, "error": "token_lookup_failed"}, status=502)
+
+        dex = (report or {}).get("dex_data") or {}
+        dex_id = str(dex.get("dex_id") or "").lower()
+        pool_address = dex.get("pair_address")
+
+        if not pool_address:
+            return web.json_response(
+                {"ok": False, "error": "no_pool_found",
+                 "message": "Could not find a TON pool for this token."},
+                status=404,
+            )
+        if "dedust" not in dex_id:
+            return web.json_response(
+                {"ok": False, "error": "not_on_dedust",
+                 "message": f"This token's liquidity is on {dex_id or 'an unknown DEX'}, not DeDust — in-app swap isn't supported for it yet."},
+                status=400,
+            )
+        pool_address_used = pool_address
+    else:
+        pool_address_used = DEDUST_POOL_ADDRESS
+
     try:
         amount_nano = int(round(amount * 1e9))
         gas_nano = int(DEDUST_SWAP_GAS_TON * 1e9)
         query_id = int(time.time() * 1000) % (2**64)
-        payload_b64 = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano)
+        payload_b64 = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano, limit_nano=0)
     except Exception:
         logger.exception("Swap payload build failed")
         return web.json_response({"ok": False, "error": "build_failed"}, status=500)
 
     return web.json_response({
         "ok": True,
-        "to": DEDUST_POOL_ADDRESS,
+        "to": pool_address_used,
         "amount_nano": str(amount_nano + gas_nano),
         "payload_boc_base64": payload_b64,
+    })
+
+
+# ── Token search + lookup for the swap picker ─────────────────────────────
+async def _search_tokens(request: web.Request):
+    query = (request.query.get("q") or "").strip()
+    if len(query) < 2:
+        return web.json_response({"ok": True, "results": []})
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.dexscreener.com/latest/dex/search",
+                params={"q": query},
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    return web.json_response({"ok": True, "results": []})
+                data = await resp.json()
+    except Exception:
+        logger.exception("Token search failed for query=%s", query)
+        return web.json_response({"ok": True, "results": []})
+
+    seen = set()
+    results = []
+    for pair in (data.get("pairs") or []):
+        if str(pair.get("chainId", "")).lower() != "ton":
+            continue
+        base = pair.get("baseToken") or {}
+        addr = base.get("address")
+        if not addr or addr in seen:
+            continue
+        seen.add(addr)
+        results.append({
+            "address": addr,
+            "symbol": base.get("symbol"),
+            "name": base.get("name"),
+            "price_usd": pair.get("priceUsd"),
+            "dex_id": pair.get("dexId"),
+        })
+        if len(results) >= 12:
+            break
+
+    return web.json_response({"ok": True, "results": results})
+
+
+async def _lookup_token(request: web.Request):
+    ca = (request.query.get("ca") or "").strip()
+    if not ca:
+        return web.json_response({"ok": False, "error": "missing_address"}, status=400)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            report = await scan_token(session, ca)
+    except Exception:
+        logger.exception("Token lookup failed for %s", ca)
+        return web.json_response({"ok": False, "error": "lookup_failed"}, status=502)
+
+    if not report.get("found"):
+        return web.json_response({"ok": False, "error": "not_found"}, status=404)
+
+    jetton = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
+    return web.json_response({
+        "ok": True,
+        "address": ca,
+        "symbol": jetton.get("symbol"),
+        "name": jetton.get("name"),
+        "image": jetton.get("image"),
+        "price_usd": dex.get("price_usd"),
+        "dex_id": dex.get("dex_id"),
     })
 
 
@@ -979,6 +1085,8 @@ async def _start_web_server():
     app.router.add_get("/api/gram/stats", _get_gram_stats)
     app.router.add_get("/api/gram/chart", _get_gram_chart)
     app.router.add_get("/api/swap/build", _build_swap)
+    app.router.add_get("/api/tokens/search", _search_tokens)
+    app.router.add_get("/api/tokens/lookup", _lookup_token)
     app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
     app.router.add_get("/static/icon.png", _serve_static_icon)
     app.router.add_get("/api/wallet/balance", _get_wallet_balance)
