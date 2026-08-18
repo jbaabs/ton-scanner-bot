@@ -612,151 +612,59 @@ import hmac as _hmac
 import json as _json
 from urllib.parse import parse_qsl as _parse_qsl
 
-# DeDust swap payload construction — guarded, so a missing dependency (until
-# `pip install dedust pytoniq` is added to requirements.txt) disables just
-# this one feature instead of crashing the whole bot at startup.
-try:
-    from dedust import Asset as _DedustAsset, SwapParams as _DedustSwapParams, VaultNative as _DedustVaultNative
-    _DEDUST_SDK_AVAILABLE = True
-except ImportError:
-    _DEDUST_SDK_AVAILABLE = False
-    logger.warning("`dedust`/`pytoniq` not installed — swap quote endpoint will return an error until added to requirements.txt")
-
-# Fixed, documented mainnet address for DeDust's native (TON) Vault — the
-# contract you send TON to in order to trigger a TON->jetton swap. Sourced
-# directly from the official Python SDK's own usage example.
-DEDUST_NATIVE_VAULT = os.getenv("DEDUST_NATIVE_VAULT", "EQDa4VOnTYlLvDJ0gZjNYm5PXfSmmtL6Vs6A_CZEtXCNICq_")
-
-# Confirmed TON/GRX6900 pool address (found directly, since DeDust's public
-# /v2/pools index apparently doesn't reliably surface every pool — the full
-# 52k+ pool scan genuinely found no match despite the pool existing). Set
-# directly rather than relying on that scan; override via env var if the
-# pool is ever recreated at a new address.
-DEDUST_POOL_ADDRESS_OVERRIDE = os.getenv(
-    "DEDUST_POOL_ADDRESS_OVERRIDE", "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3"
+# Confirmed GRX6900/GRAM pool on DeDust's newer "CPMM v2" architecture.
+# The swap message format below was reverse-engineered from a real, successful
+# on-chain transaction (not guessed from docs — verified byte-for-byte against
+# the exact destination address and TON amount of a confirmed swap):
+#   swap#a5a7cbf8 query_id:uint64 amount:Coins = InternalMsgBody;
+# Sent directly to the pool address itself (no separate Vault contract, unlike
+# the older DeDust architecture). See boc_parser.py for the cell builder.
+#
+# IMPORTANT: this message format has no on-chain slippage/minimum-output
+# protection field — a swap can execute at a worse price if the market moves
+# between submission and confirmation. Flag this to users in the UI.
+DEDUST_POOL_ADDRESS = os.getenv(
+    "DEDUST_POOL_ADDRESS", "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3"
 )
+DEDUST_POOL_URL = f"https://dedust.io/pools/{DEDUST_POOL_ADDRESS}"
+DEDUST_SWAP_GAS_TON = 0.2  # matches the gas margin observed in the real captured transaction
 
-_DEDUST_POOL_CACHE = {"address": None, "ts": 0}
-_DEDUST_POOL_CACHE_TTL = 3600  # pool addresses don't change — cache long
-
-
-async def _find_dedust_pool_address(session: aiohttp.ClientSession) -> str | None:
-    """Returns the confirmed TON/GRX6900 pool address if one is configured.
-    Falls back to scanning DeDust's public REST API (https://api.dedust.io/v2/pools)
-    only if no override is set — that full-index scan proved unreliable for
-    this pool (found no match among 52k+ listed pools despite it existing),
-    so the direct override is the primary, trusted path."""
-    if DEDUST_POOL_ADDRESS_OVERRIDE:
-        return DEDUST_POOL_ADDRESS_OVERRIDE
-
-    now = time.time()
-    if _DEDUST_POOL_CACHE["address"] and (now - _DEDUST_POOL_CACHE["ts"]) < _DEDUST_POOL_CACHE_TTL:
-        return _DEDUST_POOL_CACHE["address"]
-
-    async with session.get(
-        "https://api.dedust.io/v2/pools",
-        timeout=aiohttp.ClientTimeout(total=20),
-    ) as resp:
-        if resp.status != 200:
-            logger.warning("DeDust /v2/pools returned %s", resp.status)
-            return None
-        pools = await resp.json()
-
-    # TON addresses have two valid "friendly" string forms (EQ... bounceable
-    # vs UQ... non-bounceable) that both decode to the same underlying raw
-    # address. Comparing raw form avoids silently missing a match just
-    # because DeDust's API happens to list it under the other variant.
-    target_raw = (_friendly_to_raw(GRAM_TOKEN_ADDRESS) or "").lower()
-    matched_count = 0
-
-    for pool in pools:
-        assets = pool.get("assets") or []
-        if len(assets) != 2:
-            continue
-        has_native = any(a.get("type") == "native" for a in assets)
-        jetton_assets = [a for a in assets if a.get("type") == "jetton"]
-        has_grx = False
-        for a in jetton_assets:
-            addr = a.get("address") or ""
-            if addr == GRAM_TOKEN_ADDRESS or addr.lower() == GRAM_TOKEN_ADDRESS.lower():
-                has_grx = True
-                break
-            addr_raw = (_friendly_to_raw(addr) or "").lower()
-            if target_raw and addr_raw == target_raw:
-                has_grx = True
-                break
-        if has_native and has_grx:
-            matched_count += 1
-            address = pool.get("address")
-            _DEDUST_POOL_CACHE["address"] = address
-            _DEDUST_POOL_CACHE["ts"] = now
-            logger.info("Matched DeDust TON/GRX6900 pool: %s", address)
-            return address
-
-    logger.warning(
-        "No DeDust TON/GRX6900 pool matched among %d pools (target_raw=%s)",
-        len(pools), target_raw,
-    )
-    return None
+try:
+    from boc_parser import build_swap_v2_payload
+    _SWAP_BUILDER_AVAILABLE = True
+except ImportError:
+    _SWAP_BUILDER_AVAILABLE = False
+    logger.warning("boc_parser.py not found — swap build endpoint will return an error until it's added alongside bot.py")
 
 
-async def _get_swap_quote(request: web.Request):
-    if not _DEDUST_SDK_AVAILABLE:
+async def _build_swap(request: web.Request):
+    if not _SWAP_BUILDER_AVAILABLE:
         return web.json_response(
-            {"ok": False, "error": "swap_engine_not_installed",
-             "message": "Server is missing the `dedust`/`pytoniq` packages — add them to requirements.txt and redeploy."},
+            {"ok": False, "error": "swap_builder_missing",
+             "message": "boc_parser.py is missing from the deployment."},
             status=503,
         )
-
     try:
         amount = float(request.query.get("amount") or 0)
-        payer_address = (request.query.get("payer") or "").strip()
     except (TypeError, ValueError):
         return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
-
     if amount <= 0:
         return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
-    if not payer_address:
-        return web.json_response({"ok": False, "error": "missing_payer"}, status=400)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            pool_address = await _find_dedust_pool_address(session)
+        amount_nano = int(round(amount * 1e9))
+        gas_nano = int(DEDUST_SWAP_GAS_TON * 1e9)
+        query_id = int(time.time() * 1000) % (2**64)
+        payload_b64 = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano)
     except Exception:
-        logger.exception("DeDust pool lookup failed")
-        return web.json_response({"ok": False, "error": "pool_lookup_failed"}, status=502)
-
-    if not pool_address:
-        return web.json_response(
-            {"ok": False, "error": "pool_not_found",
-             "message": "No TON/GRX6900 volatile pool found on DeDust."},
-            status=404,
-        )
-
-    try:
-        amount_nano = int(amount * 1e9)
-        gas_nano = int(0.25 * 1e9)
-
-        swap_params = _DedustSwapParams(
-            deadline=int(time.time()) + 300,
-            recipient_address=payer_address,
-        )
-        payload_cell = _DedustVaultNative.create_swap_payload(
-            amount=amount_nano,
-            pool_address=pool_address,
-            swap_params=swap_params,
-        )
-        payload_boc_b64 = base64.b64encode(payload_cell.to_boc()).decode("ascii")
-    except Exception:
-        logger.exception("DeDust swap payload construction failed")
-        return web.json_response({"ok": False, "error": "payload_build_failed"}, status=500)
+        logger.exception("Swap payload build failed")
+        return web.json_response({"ok": False, "error": "build_failed"}, status=500)
 
     return web.json_response({
         "ok": True,
-        "to": DEDUST_NATIVE_VAULT,
+        "to": DEDUST_POOL_ADDRESS,
         "amount_nano": str(amount_nano + gas_nano),
-        "payload_boc_base64": payload_boc_b64,
-        "pool_address": pool_address,
+        "payload_boc_base64": payload_b64,
     })
 
 
@@ -1069,7 +977,7 @@ async def _start_web_server():
     app.router.add_get("/home", _serve_home_app)
     app.router.add_get("/api/gram/stats", _get_gram_stats)
     app.router.add_get("/api/gram/chart", _get_gram_chart)
-    app.router.add_get("/api/swap/quote", _get_swap_quote)
+    app.router.add_get("/api/swap/build", _build_swap)
     app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
     app.router.add_get("/static/icon.png", _serve_static_icon)
     app.router.add_get("/api/wallet/balance", _get_wallet_balance)
