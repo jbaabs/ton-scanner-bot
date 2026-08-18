@@ -477,19 +477,19 @@
         </div>
       </div>
       <div class="swap-row">
-        <div class="swap-label">You Receive · Estimated</div>
+        <div class="swap-label">You Receive</div>
         <div class="swap-input-row">
-          <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
           <div class="token-pill"><span class="dot"></span>GRX6900</div>
         </div>
       </div>
       <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
         <button class="connect-btn disabled" id="swapBtn" disabled>Connect Wallet To Swap</button>
         <div class="swap-status" id="swapStatus"></div>
+        <div class="note" style="margin-top:8px;">No on-chain slippage protection on this pool — double-check the amount shown in your wallet before confirming.</div>
       </div>
     </div>
 
-    <div class="note" id="footerNote">Swap routed through DeDust, an external DEX on TON.<br>Stats above are live from the scanner.</div>
+    <div class="note" id="footerNote">Stats above are live from the scanner.</div>
   </div>
 
   <div class="tabbar">
@@ -727,12 +727,6 @@ function shortAddr(a){
   return a.slice(0, 4) + '…' + a.slice(-4);
 }
 
-function setSwapStatus(msg, kind){
-  const el = document.getElementById('swapStatus');
-  el.textContent = msg || '';
-  el.className = 'swap-status' + (kind ? ' ' + kind : '');
-}
-
 async function loadBalance(address){
   const amounts = document.getElementById('balanceAmounts');
   const note = document.getElementById('balanceNote');
@@ -755,9 +749,9 @@ async function loadBalance(address){
 function updateWalletUI(){
   const pill = document.getElementById('walletPill');
   const connectBtn = document.getElementById('connectBtn');
-  const swapBtn = document.getElementById('swapBtn');
   const note = document.getElementById('balanceNote');
   const amounts = document.getElementById('balanceAmounts');
+  const swapBtn = document.getElementById('swapBtn');
 
   if (connectedWallet) {
     const addr = connectedWallet.account.address;
@@ -766,10 +760,12 @@ function updateWalletUI(){
     connectBtn.classList.remove('disabled');
     connectBtn.disabled = false;
     note.textContent = 'Wallet connected. Balances refresh automatically.';
-    swapBtn.textContent = 'Swap';
-    swapBtn.classList.remove('disabled');
-    swapBtn.disabled = false;
     loadBalance(addr);
+    if (swapBtn) {
+      swapBtn.textContent = 'Swap';
+      swapBtn.classList.remove('disabled');
+      swapBtn.disabled = false;
+    }
   } else {
     pill.innerHTML = `<span class="dot-ring"></span>No wallet`;
     connectBtn.textContent = 'Connect Wallet';
@@ -777,9 +773,11 @@ function updateWalletUI(){
     connectBtn.disabled = false;
     note.textContent = 'Connect a TON wallet to see your balance and swap.';
     amounts.classList.remove('visible');
-    swapBtn.textContent = 'Connect Wallet To Swap';
-    swapBtn.classList.add('disabled');
-    swapBtn.disabled = true;
+    if (swapBtn) {
+      swapBtn.textContent = 'Connect Wallet To Swap';
+      swapBtn.classList.add('disabled');
+      swapBtn.disabled = true;
+    }
   }
 }
 
@@ -811,17 +809,20 @@ if (typeof TON_CONNECT_UI === 'undefined') {
 </script>
 
 <script>
-// ── Swap execution (DeDust SDK) ───────────────────────────────────────────
-// ── Swap execution (DeDust) ────────────────────────────────────────────────
-// Redesigned after confirming Telegram's in-app browser reliably fails to
-// load ES module CDN imports ("Importing a module script failed"). Instead
-// of running the DeDust SDK client-side, the server does all the on-chain
-// lookup + transaction-payload construction (plain HTTP + the official
-// `dedust` Python SDK — see /api/swap/quote in bot.py) and hands back a
-// plain {to, amount, payload} object. The browser's only job is passing
-// that straight to TonConnect for the wallet to sign — no crypto libraries
-// need to load in the WebView at all. Still genuinely untested against a
-// live wallet from this environment; test with a small real amount first.
+// ── Swap execution (DeDust CPMM v2, verified format) ────────────────────────
+// The swap message format was reverse-engineered from a real, successful
+// on-chain transaction (not guessed from docs) — see boc_parser.py and
+// /api/swap/build in bot.py for the byte-level details and how it was
+// verified. The backend builds the exact message bytes; this just passes
+// them to TonConnect for the wallet to sign. No slippage/minimum-output
+// protection exists in this message format — flagged in the UI below.
+
+function setSwapStatus(msg, kind){
+  const el = document.getElementById('swapStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'swap-status' + (kind ? ' ' + kind : '');
+}
 
 async function executeSwap(){
   if (!connectedWallet) {
@@ -837,36 +838,23 @@ async function executeSwap(){
 
   const swapBtn = document.getElementById('swapBtn');
   swapBtn.disabled = true;
-  setSwapStatus('Checking liquidity venue…', 'pending');
+  setSwapStatus('Building swap transaction…', 'pending');
 
   try {
-    const statsRes = await fetch('/api/gram/stats');
-    const stats = await statsRes.json();
-    console.log('Pre-swap stats check:', stats); // remove once confirmed working
-    if (!stats.ok) {
-      throw new Error('Could not verify GRX6900 liquidity before swapping.');
-    }
-    if (stats.dex_id && stats.dex_id !== 'dedust') {
-      throw new Error(`GRX6900 liquidity is on ${stats.dex_id}, not DeDust — this swap button only supports DeDust right now.`);
-    }
-
-    setSwapStatus('Building swap transaction…', 'pending');
-    const quoteRes = await fetch(
-      `/api/swap/quote?amount=${encodeURIComponent(amountStr)}&payer=${encodeURIComponent(connectedWallet.account.address)}`
-    );
-    const quote = await quoteRes.json();
-    console.log('Swap quote response:', quote); // remove once confirmed working
-    if (!quote.ok) {
-      throw new Error(quote.message || quote.error || 'Server could not build the swap.');
+    const buildRes = await fetch('/api/swap/build?amount=' + encodeURIComponent(amountStr));
+    const built = await buildRes.json();
+    console.log('Swap build response:', built); // remove once confirmed working
+    if (!built.ok) {
+      throw new Error(built.message || built.error || 'Server could not build the swap.');
     }
 
     setSwapStatus('Check your wallet to confirm…', 'pending');
     await tonConnectUI.sendTransaction({
       validUntil: Math.floor(Date.now() / 1000) + 300,
       messages: [{
-        address: quote.to,
-        amount: quote.amount_nano,
-        payload: quote.payload_boc_base64,
+        address: built.to,
+        amount: built.amount_nano,
+        payload: built.payload_boc_base64,
       }],
     });
 
