@@ -744,6 +744,7 @@ async def _get_gram_stats(request: web.Request):
         "holders": jetton.get("holders_count"),
         "address": GRAM_TOKEN_ADDRESS,
         "pair_address": dex.get("pair_address"),
+        "dex_id": dex.get("dex_id"),
     }
 
     # 24h high — computed from real hourly candles, not something DexScreener
@@ -845,7 +846,13 @@ async def _get_wallet_balance(request: web.Request):
                 headers=_tonapi_headers(),
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
             ) as resp:
+                account_status = resp.status
                 account = await resp.json() if resp.status == 200 else {}
+                if resp.status != 200:
+                    logger.warning(
+                        "TonAPI /accounts/%s returned %s: %s",
+                        address, resp.status, (await resp.text())[:300],
+                    )
 
             async with session.get(
                 f"{TONAPI_BASE}/accounts/{address}/jettons",
@@ -853,7 +860,13 @@ async def _get_wallet_balance(request: web.Request):
                 params={"currencies": "usd"},
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
             ) as resp:
+                jettons_status = resp.status
                 jettons_resp = await resp.json() if resp.status == 200 else {}
+                if resp.status != 200:
+                    logger.warning(
+                        "TonAPI /accounts/%s/jettons returned %s: %s",
+                        address, resp.status, (await resp.text())[:300],
+                    )
     except Exception:
         logger.exception("Wallet balance fetch failed for %s", address)
         return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
@@ -865,13 +878,21 @@ async def _get_wallet_balance(request: web.Request):
         except (TypeError, ValueError):
             ton_balance = None
 
+    # Normalize once — TonAPI returns jetton master addresses in raw "0:hex"
+    # form on this endpoint, while GRAM_TOKEN_ADDRESS is stored in friendly
+    # "EQ..." form. Comparing them directly (as before) could never match.
+    gram_raw = _friendly_to_raw(GRAM_TOKEN_ADDRESS)
+
     gram_balance = None
     for item in jettons_resp.get("balances", []) or []:
         jetton_meta = (item.get("jetton") or {})
-        jetton_addr = jetton_meta.get("address", "")
-        # TonAPI can return either raw or friendly form here — compare loosely.
-        if GRAM_TOKEN_ADDRESS in (jetton_addr, jetton_meta.get("address", "")) or \
-           jetton_addr.lower() == GRAM_TOKEN_ADDRESS.lower():
+        jetton_addr = (jetton_meta.get("address") or "").strip()
+        matches = (
+            jetton_addr == GRAM_TOKEN_ADDRESS
+            or jetton_addr.lower() == GRAM_TOKEN_ADDRESS.lower()
+            or (gram_raw and jetton_addr.lower() == gram_raw.lower())
+        )
+        if matches:
             try:
                 decimals = int(jetton_meta.get("decimals", 9))
                 gram_balance = float(item.get("balance", 0)) / (10 ** decimals)
@@ -883,7 +904,13 @@ async def _get_wallet_balance(request: web.Request):
         "ok": True,
         "ton_balance": ton_balance,
         "gram_balance": gram_balance,
+        "_debug": {
+            "account_status": account_status,
+            "jettons_status": jettons_status,
+            "jetton_count": len(jettons_resp.get("balances", []) or []),
+        },
     })
+
 
 
 async def _start_web_server():
