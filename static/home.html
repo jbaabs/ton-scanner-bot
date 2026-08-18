@@ -2,927 +2,196 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>GRX Scanner // Home</title>
-<script src="https://telegram.org/js/telegram-web-app.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@tonconnect/ui@2/dist/tonconnect-ui.min.js" crossorigin="anonymous"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GRX Swap</title>
+
+<script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+<script src="https://unpkg.com/tonweb/dist/tonweb.js"></script>
+
 <style>
-  :root{
-    --void:#05070a;
-    --panel:#0a1017;
-    --panel-edge:#152233;
-    --blue:#2ea6ff;
-    --blue-deep:#0d6dc4;
-    --blue-glow:#9fd8ff;
-    --text:#e7f0f7;
-    --muted:#5f7488;
-    --red:#ff4d4d;
-    --green:#3ee67f;
-  }
-  *{box-sizing:border-box;}
-  html,body{
-    margin:0;padding:0;
-    height:100dvh;
-    width:100%;
-    background:var(--void);
-    font-family:Arial,sans-serif;
-    color:var(--text);
-    overflow:hidden;
-    position:fixed;
-    inset:0;
-    -webkit-tap-highlight-color:transparent;
-  }
-  #app{
-    display:flex;
-    flex-direction:column;
-    height:100%;
-    max-width:460px;
-    margin:0 auto;
-    padding-top:var(--tg-safe-top, env(safe-area-inset-top, 0px));
-  }
-  .ticker{
-    overflow:hidden;
-    white-space:nowrap;
-    background:#000;
-    border-bottom:1px solid var(--panel-edge);
-    padding:6px 0;
-    flex-shrink:0;
-  }
-  .ticker-inner{
-    display:inline-block;
-    font-family:'Courier New',monospace;
-    font-size:10px;
-    letter-spacing:0.05em;
-    color:var(--blue);
-    animation:scroll 14s linear infinite;
-  }
-  .ticker-inner span.up{color:var(--green);}
-  .ticker-inner span.down{color:var(--red);}
-  @keyframes scroll{ 0%{transform:translateX(0);} 100%{transform:translateX(-50%);} }
-
-  .content{
-    flex:1;
-    min-height:0;
-    overflow-y:auto;
-    padding:16px;
-    -webkit-overflow-scrolling:touch;
-  }
-
-  .brand-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:14px;
-  }
-  .brand{
-    font-size:20px;
-    font-weight:800;
-    font-style:italic;
-    letter-spacing:0.01em;
-  }
-  .brand em{ color:var(--blue); font-style:italic; }
-  .brand small{
-    display:block;
-    font-size:9px;
-    letter-spacing:0.18em;
-    color:var(--muted);
-    font-weight:400;
-    font-style:normal;
-    margin-top:2px;
-  }
-
-  .card{
-    background:var(--panel);
-    border:1px solid var(--panel-edge);
-    border-radius:10px;
-    padding:16px;
-    margin-bottom:14px;
-    position:relative;
-  }
-  .card::before{
-    content:"";
-    position:absolute;
-    top:-1px;left:14px;right:14px;
-    height:2px;
-    background:linear-gradient(90deg, transparent, var(--blue), transparent);
-    opacity:.7;
-  }
-
-  .price-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-  }
-  .price-label{
-    font-size:10px;
-    letter-spacing:0.15em;
-    color:var(--muted);
-    text-transform:uppercase;
-  }
-  .price-val{
-    font-size:32px;
-    font-weight:800;
-    color:var(--blue-glow);
-    margin-top:4px;
-  }
-  .price-val sub{
-    font-size:0.55em;
-    color:var(--blue);
-  }
-  .price-change{
-    font-size:12px;
-    font-weight:700;
-    padding:4px 10px;
-    border-radius:20px;
-    margin-top:2px;
-  }
-  .price-change.up{ color:var(--green); background:rgba(62,230,127,0.1); }
-  .price-change.down{ color:var(--red); background:rgba(255,77,77,0.1); }
-
-  .stats-grid{
-    display:grid;
-    grid-template-columns:1fr 1fr 1fr;
-    gap:8px;
-    margin-top:16px;
-  }
-  .stat-box{
-    background:#060a10;
-    border:1px solid var(--panel-edge);
-    border-radius:6px;
-    padding:10px 8px;
-    text-align:center;
-  }
-  .stat-box .label{
-    font-size:8px;
-    letter-spacing:0.1em;
-    color:var(--muted);
-    text-transform:uppercase;
-  }
-  .stat-box .val{
-    font-size:14px;
-    font-weight:800;
-    color:var(--text);
-    margin-top:4px;
-  }
-
-  .swap-card{ padding:0; overflow:hidden; }
-
-  .balance-card{
-    background:var(--panel);
-    border:1px dashed var(--panel-edge);
-    border-radius:10px;
-    padding:16px;
-    margin-bottom:14px;
-  }
-  .balance-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:12px;
-  }
-  .balance-label{
-    font-size:9px;
-    letter-spacing:0.15em;
-    color:var(--muted);
-    text-transform:uppercase;
-  }
-  .wallet-pill{
-    display:flex;
-    align-items:center;
-    gap:6px;
-    background:#060a10;
-    border:1px solid var(--panel-edge);
-    border-radius:20px;
-    padding:5px 12px;
-    font-size:11px;
-    font-weight:700;
-    color:var(--muted);
-  }
-  .wallet-pill .dot-ring{
-    width:8px;height:8px;
-    border-radius:50%;
-    border:1.5px solid var(--muted);
-  }
-  .balance-note{
-    font-size:11px;
-    color:var(--muted);
-    line-height:1.5;
-    margin-bottom:12px;
-  }
-  .balance-actions{
-    display:flex;
-    gap:8px;
-  }
-  .balance-actions .connect-btn{
-    margin-top:0;
-    flex:1;
-  }
-
-  .chart-card{ padding-bottom:8px; }
-  .chart-header{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-bottom:10px;
-  }
-  .chart-live{
-    display:flex;
-    align-items:center;
-    gap:6px;
-    font-size:10px;
-    letter-spacing:0.1em;
-    color:var(--muted);
-    text-transform:uppercase;
-  }
-  .chart-live .pulse{
-    width:6px;height:6px;
-    border-radius:50%;
-    background:var(--blue);
-    box-shadow:0 0 6px var(--blue);
-  }
-  .chart-high{
-    font-size:10px;
-    color:var(--muted);
-    text-align:right;
-  }
-  .chart-high b{ color:var(--text); font-size:12px; }
-  #chartCanvas{
-    width:100%;
-    height:140px;
-    display:block;
-  }
-  .tf-row{
-    display:flex;
-    gap:6px;
-    margin-top:10px;
-  }
-  .tf-btn{
-    flex:1;
-    background:#060a10;
-    border:1px solid var(--panel-edge);
-    color:var(--muted);
-    font-family:Arial,sans-serif;
-    font-size:10px;
-    font-weight:800;
-    letter-spacing:0.05em;
-    padding:6px 0;
-    border-radius:6px;
-    cursor:pointer;
-  }
-  .tf-btn.active{
-    background:var(--blue);
-    color:#00131f;
-    border-color:var(--blue);
-  }
-  .swap-row{
-    padding:14px 16px;
-    border-bottom:1px solid var(--panel-edge);
-  }
-  .swap-row:last-child{ border-bottom:none; }
-  .swap-label{
-    font-size:9px;
-    letter-spacing:0.15em;
-    color:var(--muted);
-    text-transform:uppercase;
-    margin-bottom:6px;
-  }
-  .swap-input-row{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-  }
-  .swap-amount{
-    font-size:22px;
-    font-weight:700;
-    color:var(--text);
-    background:none;
-    border:none;
-    outline:none;
-    width:60%;
-    font-family:Arial,sans-serif;
-  }
-  .swap-amount::placeholder{ color:var(--muted); }
-  .swap-amount[readonly]{ color:var(--muted); }
-  .token-pill{
-    display:flex;
-    align-items:center;
-    gap:6px;
-    background:#060a10;
-    border:1px solid var(--panel-edge);
-    border-radius:20px;
-    padding:6px 12px;
-    font-size:13px;
-    font-weight:800;
-    white-space:nowrap;
-  }
-  .token-pill .dot{
-    width:16px;height:16px;
-    border-radius:50%;
-    background:var(--blue);
-    flex-shrink:0;
-  }
-
-  .connect-btn{
-    width:100%;
-    background:linear-gradient(90deg, var(--blue), var(--blue-deep));
-    color:#00131f;
-    border:none;
-    padding:14px;
-    font-family:Arial,sans-serif;
-    font-size:13px;
-    font-weight:800;
-    letter-spacing:0.08em;
-    text-transform:uppercase;
-    border-radius:8px;
-    cursor:pointer;
-    font-style:italic;
-    margin-top:4px;
-  }
-  .connect-btn:active{ opacity:0.85; }
-  .connect-btn.disabled{
-    background:var(--panel-edge);
-    color:var(--muted);
-    cursor:not-allowed;
-  }
-
-  .swap-status{
-    font-size:11px;
-    text-align:center;
-    padding:10px 16px 0;
-    line-height:1.5;
-  }
-  .swap-status.pending{ color:var(--blue-glow); }
-  .swap-status.success{ color:var(--green); }
-  .swap-status.error{ color:var(--red); }
-
-  .balance-amounts{
-    display:none;
-    gap:16px;
-    margin-bottom:12px;
-  }
-  .balance-amounts.visible{ display:flex; }
-  .balance-amounts .amt{
-    flex:1;
-  }
-  .balance-amounts .amt .sym{
-    font-size:9px;
-    color:var(--muted);
-    letter-spacing:0.1em;
-    text-transform:uppercase;
-  }
-  .balance-amounts .amt .num{
-    font-size:16px;
-    font-weight:800;
-    color:var(--text);
-    margin-top:2px;
-  }
-  .balance-skeleton{ display:none; }
-
-  .note{
-    font-size:10px;
-    color:var(--muted);
-    text-align:center;
-    margin-top:10px;
-    line-height:1.5;
-  }
-
-  .loading, .error-state{
-    text-align:center;
-    color:var(--muted);
-    font-size:12px;
-    padding:30px 0;
-  }
-  .error-state{ color:var(--red); }
-
-  .tabbar{
-    display:flex;
-    border-top:1px solid var(--panel-edge);
-    background:var(--panel);
-    flex-shrink:0;
-    padding-bottom:env(safe-area-inset-bottom, 0);
-  }
-  .tab{
-    flex:1;
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    gap:3px;
-    padding:10px 0 8px;
-    color:var(--muted);
-    font-size:10px;
-    letter-spacing:0.05em;
-    text-transform:uppercase;
-    font-weight:700;
-    cursor:pointer;
-    text-decoration:none;
-  }
-  .tab.active{ color:var(--blue-glow); }
-  .tab .icon{ font-size:18px; line-height:1; }
+body { margin:0; font-family:Arial; background:#0b0f14; color:#fff; }
+.container { padding:16px; }
+.card { border:1px solid #1f2a37; border-radius:12px; padding:16px; margin-bottom:12px; }
+.row { display:flex; justify-content:space-between; }
+.small { font-size:12px; color:#aaa; }
+.input { background:none; border:none; color:#fff; font-size:20px; width:60%; }
+button { width:100%; padding:12px; border-radius:10px; border:none; background:#2b8cff; color:#fff; }
+.percent-buttons { display:flex; gap:6px; margin-top:8px; }
+.percent-buttons button { background:none; border:1px solid #333; font-size:12px; }
 </style>
 </head>
+
 <body>
-<div id="app">
 
-  <div class="ticker">
-    <div class="ticker-inner" id="tickerText"></div>
+<div class="container">
+
+<div class="card">
+  <div class="small">You Pay</div>
+  <div class="row">
+    <input id="payAmount" class="input" value="1">
+    <span>TON</span>
   </div>
 
-  <div class="content">
-    <div class="brand-row">
-      <div class="brand"><em>GRAMX</em>6900<small>FINANCIAL RESISTANCE</small></div>
-    </div>
-
-    <div id="statsArea">
-      <div class="loading">Loading GRAM stats…</div>
-    </div>
-
-    <div class="card chart-card">
-      <div class="chart-header">
-        <div class="chart-live"><span class="pulse"></span>Live Price</div>
-        <div class="chart-high">24h High<br><b id="chartHigh">—</b></div>
-      </div>
-      <canvas id="chartCanvas"></canvas>
-      <div class="tf-row" id="tfRow">
-        <button class="tf-btn" data-tf="1H">1H</button>
-        <button class="tf-btn" data-tf="24H">24H</button>
-        <button class="tf-btn" data-tf="7D">7D</button>
-        <button class="tf-btn active" data-tf="30D">30D</button>
-        <button class="tf-btn" data-tf="ALL">ALL</button>
-      </div>
-    </div>
-
-    <div class="balance-card" id="balanceCard">
-      <div class="balance-row">
-        <div class="balance-label">Your Balance</div>
-        <div class="wallet-pill" id="walletPill"><span class="dot-ring"></span>No wallet</div>
-      </div>
-
-      <div class="balance-amounts" id="balanceAmounts">
-        <div class="amt"><div class="sym">GRAM</div><div class="num" id="tonBalanceVal">—</div></div>
-        <div class="amt"><div class="sym">GRX6900</div><div class="num" id="gramBalanceVal">—</div></div>
-      </div>
-
-      <div class="balance-note" id="balanceNote">Connect a TON wallet to see your balance, play and claim prizes.</div>
-      <div class="balance-actions">
-        <button class="connect-btn" id="connectBtn">Connect Wallet</button>
-      </div>
-    </div>
-
-    <div class="card swap-card">
-      <div class="swap-row">
-        <div class="swap-label">You Pay</div>
-        <div class="swap-input-row">
-          <input class="swap-amount" id="payAmount" type="number" inputmode="decimal" placeholder="0.0" min="1" step="0.1">
-          <div class="token-pill"><span class="dot"></span>GRAM</div>
-        </div>
-      </div>
-      <div class="swap-row">
-        <div class="swap-label">You Receive · Estimated</div>
-        <div class="swap-input-row">
-          <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
-          <button class="token-pill" id="tokenPickerBtn" style="border:1px solid var(--panel-edge);cursor:pointer;font-family:inherit;">
-            <span class="dot" id="tokenPickerDot"></span><span id="tokenPickerLabel">GRX6900</span> ▾
-          </button>
-        </div>
-      </div>
-      <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
-        <button class="connect-btn disabled" id="swapBtn" disabled>Connect Wallet To Swap</button>
-        <div class="swap-status" id="swapStatus"></div>
-        <div class="note" style="margin-top:8px;">Minimum 1 GRAM per swap. Still experimental — the last real test bounced (exit code 9), and this doesn't fully fix that. Funds bounce back automatically if it fails (minus a small network fee).</div>
-      </div>
-    </div>
-
-    <div id="tokenPickerOverlay" style="display:none;position:fixed;inset:0;background:rgba(5,7,10,0.92);z-index:50;padding:16px;">
-      <div class="card" style="max-width:420px;margin:40px auto 0;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <div class="swap-label" style="margin:0;">Select Token</div>
-          <button id="tokenPickerClose" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;">✕</button>
-        </div>
-        <input id="tokenSearchInput" type="text" placeholder="Search ticker or paste address…"
-          style="width:100%;background:#060a10;border:1px solid var(--panel-edge);border-radius:8px;padding:12px;color:var(--text);font-size:14px;font-family:inherit;box-sizing:border-box;">
-        <div id="tokenSearchResults" style="margin-top:10px;max-height:340px;overflow-y:auto;"></div>
-      </div>
-    </div>
-
-    <div class="note" id="footerNote">Stats above are live from the scanner.</div>
+  <div class="percent-buttons">
+    <button onclick="setPercent(0.25)">25%</button>
+    <button onclick="setPercent(0.5)">50%</button>
+    <button onclick="setPercent(0.75)">75%</button>
+    <button onclick="setMax()">MAX</button>
   </div>
 
-  <div class="tabbar">
-    <div class="tab active">
-      <div class="icon">⌂</div>
-      <div>Home</div>
-    </div>
-    <a class="tab" href="/games/snake">
-      <div class="icon">🎮</div>
-      <div>Games</div>
-    </a>
+  <div class="small" style="margin-top:6px;">
+    Total: ~<span id="totalSend">1.3</span> TON
   </div>
 </div>
 
-<script>
-const tg = window.Telegram ? window.Telegram.WebApp : null;
+<div class="card">
+  <div class="small">You Receive (Estimated)</div>
+  <div class="row">
+    <span id="receiveAmount">...</span>
+    <span>GRX</span>
+  </div>
+</div>
 
-// In fullscreen mode Telegram floats its native header over the page
-// instead of pushing content down, so we read the real safe-area inset
-// straight from Telegram and pad the top of the app to clear it.
-function syncSafeArea(){
-  try {
-    const top = (tg && tg.contentSafeAreaInset && tg.contentSafeAreaInset.top)
-      || (tg && tg.safeAreaInset && tg.safeAreaInset.top)
-      || 0;
-    document.documentElement.style.setProperty('--tg-safe-top', top + 'px');
-  } catch (err) {
-    console.warn('Safe area sync failed:', err);
-  }
-}
+<button onclick="doSwap()">Swap</button>
 
-if (tg) {
-  try {
-    tg.ready();
-    tg.expand();
-    if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen();
-    if (typeof tg.onEvent === 'function') {
-      tg.onEvent('safeAreaChanged', syncSafeArea);
-      tg.onEvent('contentSafeAreaChanged', syncSafeArea);
-    }
-  } catch (err) {
-    console.warn('Telegram WebApp init partial failure:', err);
-  }
-  syncSafeArea();
-  setTimeout(syncSafeArea, 100);
-  setTimeout(syncSafeArea, 400);
-}
+<div id="status" class="small" style="text-align:center;margin-top:10px;">
+Ready
+</div>
 
-const tickerItems = [
-  ['GRAMX6900', 'LIVE', 'up'],
-  ['FINANCIAL RESISTANCE', '▲', 'up'],
-  ['PERMISSIONLESS', '∞', 'up'],
-];
-function buildTicker(){
-  const one = tickerItems.map(([label,val,dir]) => `${label} <span class="${dir}">${val}</span>`).join(' &nbsp;|&nbsp; ');
-  document.getElementById('tickerText').innerHTML = one + ' &nbsp;|&nbsp; ' + one;
-}
-buildTicker();
-
-function fmtUsd(n){
-  n = Number(n);
-  if (n === null || n === undefined || Number.isNaN(n)) return '—';
-  if (n < 0.01) {
-    // Subscript notation for leading zeros, matching "$0.0₅577" style —
-    // shows how many zeros follow the decimal before real digits start.
-    const str = n.toFixed(12).replace(/0+$/, '');
-    const match = str.match(/^0\.0*(\d)/);
-    if (match) {
-      const zeroCount = str.match(/^0\.(0*)/)[1].length;
-      if (zeroCount >= 2) {
-        const sigDigits = str.slice(str.indexOf(match[1]));
-        const trimmed = sigDigits.slice(0, 4);
-        return `$0.0<sub>${zeroCount}</sub>${trimmed}`;
-      }
-    }
-    return '$' + str;
-  }
-  return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-function fmtUsdPlain(n){
-  // Same value, no HTML — for places subscript markup would break (e.g. the chart high stat).
-  n = Number(n);
-  if (n === null || n === undefined || Number.isNaN(n)) return '—';
-  if (n < 0.01) return '$' + n.toFixed(8).replace(/0+$/, '');
-  return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-function fmtCompact(n){
-  n = Number(n);
-  if (n === null || n === undefined || Number.isNaN(n)) return '—';
-  if (n >= 1e9) return '$' + (n/1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return '$' + (n/1e6).toFixed(2) + 'M';
-  if (n >= 1e3) return '$' + (n/1e3).toFixed(1) + 'K';
-  return '$' + n.toFixed(2);
-}
-
-async function loadStats(){
-  const area = document.getElementById('statsArea');
-  try {
-    const res = await fetch('/api/gram/stats');
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'unknown');
-
-    const change = data.price_change_24h;
-    const changeClass = (change || 0) >= 0 ? 'up' : 'down';
-    const changeSign = (change || 0) >= 0 ? '▲' : '▼';
-
-    area.innerHTML = `
-      <div class="card">
-        <div class="price-row">
-          <div>
-            <div class="price-label">${data.symbol} Price</div>
-            <div class="price-val">${fmtUsd(data.price_usd)}</div>
-          </div>
-          ${change !== null && change !== undefined ? `<div class="price-change ${changeClass}">${changeSign} ${Math.abs(change).toFixed(2)}%</div>` : ''}
-        </div>
-        <div class="stats-grid">
-          <div class="stat-box"><div class="label">Mkt Cap</div><div class="val">${fmtCompact(data.market_cap)}</div></div>
-          <div class="stat-box"><div class="label">24h Vol</div><div class="val">${fmtCompact(data.volume_24h)}</div></div>
-          <div class="stat-box"><div class="label">Holders</div><div class="val">${data.holders ?? '—'}</div></div>
-        </div>
-      </div>
-    `;
-
-    document.getElementById('chartHigh').textContent = fmtUsdPlain(data.high_24h);
-  } catch (err) {
-    area.innerHTML = `<div class="error-state">Couldn't load live stats.<br><span style="font-size:10px;opacity:0.7;">${(err && err.message) ? err.message : 'unknown error'}</span></div>`;
-    console.warn('GRAM stats load failed:', err);
-  }
-}
-
-// ── Price chart ────────────────────────────────────────────────────────
-let currentTf = '30D';
-
-function drawChart(points){
-  const canvas = document.getElementById('chartCanvas');
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-
-  if (!points || points.length < 2) {
-    ctx.fillStyle = '#5f7488';
-    ctx.font = '11px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Not enough chart data yet', w / 2, h / 2);
-    return;
-  }
-
-  const closes = points.map(p => p.close);
-  const min = Math.min(...closes), max = Math.max(...closes);
-  const range = (max - min) || 1;
-  const pad = 6;
-
-  const toXY = (i, v) => {
-    const x = pad + (i / (points.length - 1)) * (w - pad * 2);
-    const y = h - pad - ((v - min) / range) * (h - pad * 2);
-    return [x, y];
-  };
-
-  // filled area under the line
-  ctx.beginPath();
-  points.forEach((p, i) => {
-    const [x, y] = toXY(i, p.close);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  const [lastX] = toXY(points.length - 1, points[points.length - 1].close);
-  ctx.lineTo(lastX, h);
-  ctx.lineTo(pad, h);
-  ctx.closePath();
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, 'rgba(46,166,255,0.25)');
-  grad.addColorStop(1, 'rgba(46,166,255,0)');
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // line itself
-  ctx.beginPath();
-  points.forEach((p, i) => {
-    const [x, y] = toXY(i, p.close);
-    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = '#2ea6ff';
-  ctx.lineWidth = 2;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-}
-
-async function loadChart(tf){
-  currentTf = tf;
-  document.querySelectorAll('.tf-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.tf === tf);
-  });
-  try {
-    const res = await fetch('/api/gram/chart?tf=' + encodeURIComponent(tf));
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'unknown');
-    drawChart(data.points);
-  } catch (err) {
-    console.warn('GRAM chart load failed:', err);
-    drawChart(null);
-  }
-}
-
-document.getElementById('tfRow').addEventListener('click', (e) => {
-  const btn = e.target.closest('.tf-btn');
-  if (!btn) return;
-  loadChart(btn.dataset.tf);
-});
-
-window.addEventListener('resize', () => loadChart(currentTf));
-
-loadStats();
-loadChart(currentTf);
-setInterval(loadStats, 20000); // keep it fresh without hammering the endpoint
-setInterval(() => loadChart(currentTf), 60000);
-</script>
+</div>
 
 <script>
-// ── Wallet connect (TonConnect) ───────────────────────────────────────────
-// Kept in its own plain script, deliberately with zero external module
-// imports, so a CDN hiccup loading the DeDust SDK (used only for the swap,
-// below) can never take wallet connect down with it.
-
 const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
-  manifestUrl: window.location.origin + '/tonconnect-manifest.json',
+  manifestUrl: 'https://your-domain.com/tonconnect-manifest.json'
 });
 
-let connectedWallet = null;
+// ⚠️ YOU MUST SET THIS
+const DEDUST_VAULT = "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3";
 
-function shortAddr(a){
-  if (!a) return '';
-  return a.slice(0, 4) + '…' + a.slice(-4);
-}
+// ⚠️ YOU MUST SET THIS
+const GRX_JETTON = "EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3";
 
-async function loadBalance(address){
-  const amounts = document.getElementById('balanceAmounts');
-  const note = document.getElementById('balanceNote');
+let lastQuote = null;
+
+// ---------- QUOTE ----------
+async function fetchQuote() {
+  const amount = parseFloat(document.getElementById('payAmount').value);
+  if (!amount || amount <= 0) return;
+
   try {
-    const res = await fetch('/api/wallet/balance?address=' + encodeURIComponent(address));
+    const nano = Math.floor(amount * 1e9);
+
+    const res = await fetch(`https://api.dedust.io/v2/router/quote?amount=${nano}&from=ton&to=${GRX_JETTON}`);
     const data = await res.json();
-    console.log('Wallet balance response:', data); // remove once confirmed working
-    if (!data.ok) throw new Error(data.error || 'unknown');
-    document.getElementById('tonBalanceVal').textContent =
-      data.ton_balance !== null && data.ton_balance !== undefined ? data.ton_balance.toFixed(3) : '—';
-    document.getElementById('gramBalanceVal').textContent =
-      data.gram_balance !== null && data.gram_balance !== undefined ? data.gram_balance.toLocaleString(undefined, {maximumFractionDigits: 2}) : '—';
-    amounts.classList.add('visible');
-  } catch (err) {
-    console.warn('Balance load failed:', err);
-    note.textContent = 'Balance failed to load: ' + (err && err.message ? err.message : 'unknown error');
+
+    if (!data || !data.amountOut) return;
+
+    lastQuote = data;
+
+    const receive = (data.amountOut / 1e9).toLocaleString();
+    document.getElementById('receiveAmount').innerText = receive;
+
+  } catch (e) {
+    console.error(e);
   }
 }
 
-function updateWalletUI(){
-  const pill = document.getElementById('walletPill');
-  const connectBtn = document.getElementById('connectBtn');
-  const note = document.getElementById('balanceNote');
-  const amounts = document.getElementById('balanceAmounts');
-  const swapBtn = document.getElementById('swapBtn');
+// ---------- SWAP ----------
+async function doSwap() {
+  const amt = document.getElementById('payAmount').value;
 
-  if (connectedWallet) {
-    const addr = connectedWallet.account.address;
-    pill.innerHTML = `<span class="dot-ring" style="background:#3ee67f;border-color:#3ee67f;"></span>${shortAddr(addr)}`;
-    connectBtn.textContent = 'Disconnect';
-    connectBtn.classList.remove('disabled');
-    connectBtn.disabled = false;
-    note.textContent = 'Wallet connected. Balances refresh automatically.';
-    loadBalance(addr);
-    if (swapBtn) {
-      swapBtn.textContent = 'Swap';
-      swapBtn.classList.remove('disabled');
-      swapBtn.disabled = false;
-    }
-  } else {
-    pill.innerHTML = `<span class="dot-ring"></span>No wallet`;
-    connectBtn.textContent = 'Connect Wallet';
-    connectBtn.classList.remove('disabled');
-    connectBtn.disabled = false;
-    note.textContent = 'Connect a TON wallet to see your balance and swap.';
-    amounts.classList.remove('visible');
-    if (swapBtn) {
-      swapBtn.textContent = 'Connect Wallet To Swap';
-      swapBtn.classList.add('disabled');
-      swapBtn.disabled = true;
-    }
+  if (!amt || parseFloat(amt) <= 0) {
+    return setStatus("Enter amount");
   }
-}
 
-if (typeof TON_CONNECT_UI === 'undefined') {
-  console.error('TonConnect UI failed to load from CDN.');
-  const connectBtn = document.getElementById('connectBtn');
-  connectBtn.textContent = 'Wallet unavailable — retry';
-  connectBtn.addEventListener('click', () => location.reload());
-} else {
-  tonConnectUI.onStatusChange((wallet) => {
-    connectedWallet = wallet;
-    updateWalletUI();
-  });
-
-  document.getElementById('connectBtn').addEventListener('click', () => {
-    if (connectedWallet) {
-      tonConnectUI.disconnect();
-    } else {
-      tonConnectUI.openModal();
-    }
-  });
-
-  // Restore wallet state on reload if TonConnect already has a session.
-  tonConnectUI.connectionRestored.then(() => {
-    connectedWallet = tonConnectUI.wallet;
-    updateWalletUI();
-  });
-}
-</script>
-
-<script>
-// ── Swap execution (DeDust CPMM v2 — attempt #2, still unverified) ─────────
-// Base structure (opcode + query_id + amount) was decoded from a real,
-// successful transaction — verified byte-for-byte. That exact structure
-// bounced with exit code 9 (cell underflow) when tested at a different
-// amount, meaning a field is missing. A trailing `limit:Coins` field
-// (0 = no minimum output) has been added as an educated guess based on
-// DeDust's documented swap-step parameters — NOT confirmed against a real
-// transaction. If this still bounces, the guess was wrong; a second real
-// transaction is needed to pin down the actual format. Minimum 1 GRAM per
-// swap. Funds bounce back automatically on failure, minus a small network fee.
-
-function setSwapStatus(msg, kind){
-  const el = document.getElementById('swapStatus');
-  if (!el) return;
-  el.textContent = msg || '';
-  el.className = 'swap-status' + (kind ? ' ' + kind : '');
-}
-
-async function executeSwap(){
-  if (!connectedWallet) {
-    tonConnectUI.openModal();
-    return;
-  }
-  const amountStr = document.getElementById('payAmount').value;
-  const amount = parseFloat(amountStr);
-  if (!amount || amount < 1) {
-    setSwapStatus('Minimum swap is 1 GRAM.', 'error');
+  if (!tonConnectUI.connected) {
+    await tonConnectUI.openModal();
     return;
   }
 
-  const swapBtn = document.getElementById('swapBtn');
-  swapBtn.disabled = true;
-  setSwapStatus('Building swap transaction…', 'pending');
+  if (!lastQuote) {
+    return setStatus("Waiting for quote...");
+  }
 
   try {
-    const buildRes = await fetch('/api/swap/build?amount=' + encodeURIComponent(amountStr));
-    const built = await buildRes.json();
-    console.log('Swap build response:', built); // remove once confirmed working
-    if (!built.ok) {
-      throw new Error(built.message || built.error || 'Server could not build the swap.');
-    }
+    setStatus("Preparing swap...");
 
-    setSwapStatus('Check your wallet to confirm…', 'pending');
+    const userAmount = parseFloat(amt);
+
+    const EXECUTION_BUFFER = 0.3;
+    const total = userAmount + EXECUTION_BUFFER;
+
+    const minReceive = Math.floor(lastQuote.amountOut * 0.9); // 10% slippage
+
+    const payload = await buildPayload(minReceive);
+
+    setStatus("Opening wallet...");
+
     await tonConnectUI.sendTransaction({
-      validUntil: Math.floor(Date.now() / 1000) + 300,
-      messages: [{
-        address: built.to,
-        amount: built.amount_nano,
-        payload: built.payload_boc_base64,
-      }],
+      validUntil: Math.floor(Date.now() / 1000) + 60,
+      messages: [
+        {
+          address: DEDUST_VAULT,
+          amount: TonWeb.utils.toNano(total.toString()),
+          payload: payload
+        }
+      ]
     });
 
-    setSwapStatus('Sent — check Tonscan/your wallet to see if it went through or bounced.', 'success');
-    setTimeout(() => loadBalance(connectedWallet.account.address), 5000);
-  } catch (err) {
-    console.error('Swap failed:', err);
-    setSwapStatus('Swap failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
-  } finally {
-    swapBtn.disabled = false;
+    setStatus("Swap sent");
+
+  } catch (e) {
+    console.error(e);
+    setStatus("Transaction cancelled");
   }
 }
 
-document.getElementById('swapBtn').addEventListener('click', executeSwap);
+// ---------- PAYLOAD ----------
+async function buildPayload(minReceive) {
+  const cell = new TonWeb.boc.Cell();
 
-// ── Live "You Receive" estimate ─────────────────────────────────────────────
-// Uses DexScreener's priceNative (GRX6900's price directly in GRAM/TON) —
-// a straight-line estimate, not accounting for price impact on larger trades,
-// same caveat as most simple swap UIs show before you see the real quote in
-// your wallet.
-let _grxPerGram = null;
+  cell.bits.writeUint(0x5fcc3d14, 32); // DeDust swap
+  cell.bits.writeUint(0, 64);
+  cell.bits.writeCoins(minReceive);
 
-async function refreshSwapRate(){
-  try {
-    const res = await fetch('/api/gram/stats');
-    const data = await res.json();
-    if (data.ok && data.price_native) {
-      _grxPerGram = 1 / data.price_native; // price_native = GRAM per GRX6900, so invert
-    }
-  } catch (err) {
-    console.warn('Swap rate refresh failed:', err);
-  }
-  updateReceiveEstimate();
+  const addr = new TonWeb.utils.Address(tonConnectUI.account.address);
+  cell.bits.writeAddress(addr);
+
+  return TonWeb.utils.bytesToBase64(await cell.toBoc());
 }
 
-function updateReceiveEstimate(){
-  const payInput = document.getElementById('payAmount');
-  const receiveInput = document.getElementById('receiveAmount');
-  const amount = parseFloat(payInput.value);
-  if (!amount || amount <= 0 || !_grxPerGram) {
-    receiveInput.value = '—';
-    return;
-  }
-  const estimate = amount * _grxPerGram;
-  receiveInput.value = estimate.toLocaleString(undefined, { maximumFractionDigits: estimate < 1 ? 6 : 2 });
+// ---------- UI HELPERS ----------
+function setStatus(msg) {
+  document.getElementById('status').innerText = msg;
 }
 
-document.getElementById('payAmount').addEventListener('input', updateReceiveEstimate);
-refreshSwapRate();
-setInterval(refreshSwapRate, 20000);
+function updateTotal() {
+  const val = parseFloat(document.getElementById('payAmount').value || 0);
+  document.getElementById('totalSend').innerText = (val + 0.3).toFixed(3);
+}
+
+function setPercent(p) {
+  const bal = 3.0; // replace with real
+  document.getElementById('payAmount').value = (bal * p).toFixed(2);
+  updateTotal();
+  fetchQuote();
+}
+
+function setMax() {
+  const bal = 3.0;
+  document.getElementById('payAmount').value = bal;
+  updateTotal();
+  fetchQuote();
+}
+
+document.getElementById('payAmount').addEventListener('input', () => {
+  updateTotal();
+  fetchQuote();
+});
+
+updateTotal();
+fetchQuote();
 </script>
+
 </body>
 </html>
