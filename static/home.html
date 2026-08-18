@@ -339,12 +339,14 @@ function buildTicker(){
 buildTicker();
 
 function fmtUsd(n){
-  if (n === null || n === undefined) return '—';
+  n = Number(n);
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
   if (n < 0.01) return '$' + n.toFixed(8).replace(/0+$/, '');
   return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 function fmtCompact(n){
-  if (n === null || n === undefined) return '—';
+  n = Number(n);
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
   if (n >= 1e9) return '$' + (n/1e9).toFixed(2) + 'B';
   if (n >= 1e6) return '$' + (n/1e6).toFixed(2) + 'M';
   if (n >= 1e3) return '$' + (n/1e3).toFixed(1) + 'K';
@@ -379,7 +381,7 @@ async function loadStats(){
       </div>
     `;
   } catch (err) {
-    area.innerHTML = `<div class="error-state">Couldn't load live stats. Pull to refresh.</div>`;
+    area.innerHTML = `<div class="error-state">Couldn't load live stats.<br><span style="font-size:10px;opacity:0.7;">${(err && err.message) ? err.message : 'unknown error'}</span></div>`;
     console.warn('GRAM stats load failed:', err);
   }
 }
