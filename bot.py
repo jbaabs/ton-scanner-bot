@@ -612,6 +612,121 @@ import hmac as _hmac
 import json as _json
 from urllib.parse import parse_qsl as _parse_qsl
 
+# DeDust swap payload construction — guarded, so a missing dependency (until
+# `pip install dedust pytoniq` is added to requirements.txt) disables just
+# this one feature instead of crashing the whole bot at startup.
+try:
+    from dedust import Asset as _DedustAsset, SwapParams as _DedustSwapParams, VaultNative as _DedustVaultNative
+    _DEDUST_SDK_AVAILABLE = True
+except ImportError:
+    _DEDUST_SDK_AVAILABLE = False
+    logger.warning("`dedust`/`pytoniq` not installed — swap quote endpoint will return an error until added to requirements.txt")
+
+# Fixed, documented mainnet address for DeDust's native (TON) Vault — the
+# contract you send TON to in order to trigger a TON->jetton swap. Sourced
+# directly from the official Python SDK's own usage example.
+DEDUST_NATIVE_VAULT = os.getenv("DEDUST_NATIVE_VAULT", "EQDa4VOnTYlLvDJ0gZjNYm5PXfSmmtL6Vs6A_CZEtXCNICq_")
+
+_DEDUST_POOL_CACHE = {"address": None, "ts": 0}
+_DEDUST_POOL_CACHE_TTL = 3600  # pool addresses don't change — cache long
+
+
+async def _find_dedust_pool_address(session: aiohttp.ClientSession) -> str | None:
+    """Looks up the TON/GRX6900 volatile pool address via DeDust's public
+    REST API (https://api.dedust.io/v2/pools) — plain HTTP, same pattern as
+    every other data fetch in this file. No wallet/browser SDK involved."""
+    now = time.time()
+    if _DEDUST_POOL_CACHE["address"] and (now - _DEDUST_POOL_CACHE["ts"]) < _DEDUST_POOL_CACHE_TTL:
+        return _DEDUST_POOL_CACHE["address"]
+
+    async with session.get(
+        "https://api.dedust.io/v2/pools",
+        timeout=aiohttp.ClientTimeout(total=20),
+    ) as resp:
+        if resp.status != 200:
+            logger.warning("DeDust /v2/pools returned %s", resp.status)
+            return None
+        pools = await resp.json()
+
+    for pool in pools:
+        if pool.get("type") != "volatile":
+            continue
+        assets = pool.get("assets") or []
+        if len(assets) != 2:
+            continue
+        has_native = any(a.get("type") == "native" for a in assets)
+        has_grx = any(
+            a.get("type") == "jetton" and a.get("address") == GRAM_TOKEN_ADDRESS
+            for a in assets
+        )
+        if has_native and has_grx:
+            address = pool.get("address")
+            _DEDUST_POOL_CACHE["address"] = address
+            _DEDUST_POOL_CACHE["ts"] = now
+            return address
+
+    return None
+
+
+async def _get_swap_quote(request: web.Request):
+    if not _DEDUST_SDK_AVAILABLE:
+        return web.json_response(
+            {"ok": False, "error": "swap_engine_not_installed",
+             "message": "Server is missing the `dedust`/`pytoniq` packages — add them to requirements.txt and redeploy."},
+            status=503,
+        )
+
+    try:
+        amount = float(request.query.get("amount") or 0)
+        payer_address = (request.query.get("payer") or "").strip()
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+
+    if amount <= 0:
+        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
+    if not payer_address:
+        return web.json_response({"ok": False, "error": "missing_payer"}, status=400)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            pool_address = await _find_dedust_pool_address(session)
+    except Exception:
+        logger.exception("DeDust pool lookup failed")
+        return web.json_response({"ok": False, "error": "pool_lookup_failed"}, status=502)
+
+    if not pool_address:
+        return web.json_response(
+            {"ok": False, "error": "pool_not_found",
+             "message": "No TON/GRX6900 volatile pool found on DeDust."},
+            status=404,
+        )
+
+    try:
+        amount_nano = int(amount * 1e9)
+        gas_nano = int(0.25 * 1e9)
+
+        swap_params = _DedustSwapParams(
+            deadline=int(time.time()) + 300,
+            recipient_address=payer_address,
+        )
+        payload_cell = _DedustVaultNative.create_swap_payload(
+            amount=amount_nano,
+            pool_address=pool_address,
+            swap_params=swap_params,
+        )
+        payload_boc_b64 = base64.b64encode(payload_cell.to_boc()).decode("ascii")
+    except Exception:
+        logger.exception("DeDust swap payload construction failed")
+        return web.json_response({"ok": False, "error": "payload_build_failed"}, status=500)
+
+    return web.json_response({
+        "ok": True,
+        "to": DEDUST_NATIVE_VAULT,
+        "amount_nano": str(amount_nano + gas_nano),
+        "payload_boc_base64": payload_boc_b64,
+        "pool_address": pool_address,
+    })
+
 
 def save_game_score(user_id: int, username: str, score: int):
     with sqlite3.connect(DB_PATH) as conn:
@@ -922,6 +1037,7 @@ async def _start_web_server():
     app.router.add_get("/home", _serve_home_app)
     app.router.add_get("/api/gram/stats", _get_gram_stats)
     app.router.add_get("/api/gram/chart", _get_gram_chart)
+    app.router.add_get("/api/swap/quote", _get_swap_quote)
     app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
     app.router.add_get("/static/icon.png", _serve_static_icon)
     app.router.add_get("/api/wallet/balance", _get_wallet_balance)
