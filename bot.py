@@ -627,14 +627,28 @@ except ImportError:
 # directly from the official Python SDK's own usage example.
 DEDUST_NATIVE_VAULT = os.getenv("DEDUST_NATIVE_VAULT", "EQDa4VOnTYlLvDJ0gZjNYm5PXfSmmtL6Vs6A_CZEtXCNICq_")
 
+# Confirmed TON/GRX6900 pool address (found directly, since DeDust's public
+# /v2/pools index apparently doesn't reliably surface every pool — the full
+# 52k+ pool scan genuinely found no match despite the pool existing). Set
+# directly rather than relying on that scan; override via env var if the
+# pool is ever recreated at a new address.
+DEDUST_POOL_ADDRESS_OVERRIDE = os.getenv(
+    "DEDUST_POOL_ADDRESS_OVERRIDE", "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3"
+)
+
 _DEDUST_POOL_CACHE = {"address": None, "ts": 0}
 _DEDUST_POOL_CACHE_TTL = 3600  # pool addresses don't change — cache long
 
 
 async def _find_dedust_pool_address(session: aiohttp.ClientSession) -> str | None:
-    """Looks up the TON/GRX6900 volatile pool address via DeDust's public
-    REST API (https://api.dedust.io/v2/pools) — plain HTTP, same pattern as
-    every other data fetch in this file. No wallet/browser SDK involved."""
+    """Returns the confirmed TON/GRX6900 pool address if one is configured.
+    Falls back to scanning DeDust's public REST API (https://api.dedust.io/v2/pools)
+    only if no override is set — that full-index scan proved unreliable for
+    this pool (found no match among 52k+ listed pools despite it existing),
+    so the direct override is the primary, trusted path."""
+    if DEDUST_POOL_ADDRESS_OVERRIDE:
+        return DEDUST_POOL_ADDRESS_OVERRIDE
+
     now = time.time()
     if _DEDUST_POOL_CACHE["address"] and (now - _DEDUST_POOL_CACHE["ts"]) < _DEDUST_POOL_CACHE_TTL:
         return _DEDUST_POOL_CACHE["address"]
