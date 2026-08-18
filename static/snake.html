@@ -39,6 +39,7 @@
     max-width:440px;
     display:flex;
     flex-direction:column;
+    padding-top:var(--tg-safe-top, env(safe-area-inset-top, 0px));
   }
   #playArea{
     flex:1;
@@ -634,19 +635,6 @@ canvas.addEventListener('touchend', () => {
 window.addEventListener('resize', sizeCanvas);
 window.addEventListener('orientationchange', sizeCanvas);
 
-// Telegram's WebView doesn't always resolve CSS 100%/100dvh to the real
-// usable area, especially right after expand()/requestFullscreen() — the
-// container resizes asynchronously. So we pull the actual height straight
-// from Telegram's own API and apply it directly, then keep it in sync.
-function syncViewportHeight(){
-  if (tg && tg.viewportHeight) {
-    document.body.style.height = tg.viewportHeight + 'px';
-  } else {
-    document.body.style.height = window.innerHeight + 'px';
-  }
-  sizeCanvas();
-}
-
 if (tg) {
   try {
     tg.ready();
@@ -671,23 +659,32 @@ if (tg) {
       tg.enableClosingConfirmation();
     }
 
-    // Container resizes happen after these calls fire, sometimes with a
-    // short delay — listen for Telegram's own resize event and re-sync.
-    if (typeof tg.onEvent === 'function') {
-      tg.onEvent('viewportChanged', syncViewportHeight);
+    // In fullscreen mode Telegram floats its native header over the page
+    // instead of pushing content down — read the real inset and pad for it.
+    function syncSafeArea(){
+      const top = (tg.contentSafeAreaInset && tg.contentSafeAreaInset.top)
+        || (tg.safeAreaInset && tg.safeAreaInset.top)
+        || 0;
+      document.documentElement.style.setProperty('--tg-safe-top', top + 'px');
+      sizeCanvas();
     }
+
+    // Container resizes happen after these calls fire, sometimes with a
+    // short delay — re-measure the canvas once things settle, but never
+    // force body height ourselves (100dvh already handles it correctly,
+    // and forcing a stale tg.viewportHeight can crop the tab bar off-screen).
+    if (typeof tg.onEvent === 'function') {
+      tg.onEvent('viewportChanged', sizeCanvas);
+      tg.onEvent('safeAreaChanged', syncSafeArea);
+      tg.onEvent('contentSafeAreaChanged', syncSafeArea);
+    }
+    syncSafeArea();
+    setTimeout(syncSafeArea, 100);
+    setTimeout(syncSafeArea, 400);
   } catch (err) {
     // Never let a missing/unsupported Telegram API method break the game itself.
     console.warn('Telegram WebApp init partial failure:', err);
   }
-
-  syncViewportHeight();
-  // Catch the async resize even if the event fires late/not at all on some clients.
-  setTimeout(syncViewportHeight, 100);
-  setTimeout(syncViewportHeight, 400);
-} else {
-  window.addEventListener('resize', syncViewportHeight);
-  syncViewportHeight();
 }
 
 // Extra safety net in the page itself: block the touchmove-based swipe
