@@ -59,6 +59,11 @@ HOME_URL = os.getenv("HOME_URL", "https://your-app.up.railway.app/home")
 GAME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "snake.html")
 HOME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "home.html")
 
+# Derived once from HOME_URL so the TonConnect manifest always matches whatever
+# domain is actually configured, instead of being hardcoded separately.
+APP_ORIGIN = HOME_URL.rsplit("/home", 1)[0] if HOME_URL.endswith("/home") else HOME_URL
+GRAMX_ICON_URL = os.getenv("GRAMX_ICON_URL", f"{APP_ORIGIN}/static/icon.png")
+
 # Lightweight abuse protection. Legitimate users should rarely notice these.
 _RATE_LIMITS = {
     "scan": 0.0,        # per user — disabled: two people in a group can scan at once
@@ -738,10 +743,147 @@ async def _get_gram_stats(request: web.Request):
         "volume_24h": _num(dex.get("volume_24h")),
         "holders": jetton.get("holders_count"),
         "address": GRAM_TOKEN_ADDRESS,
+        "pair_address": dex.get("pair_address"),
     }
+
+    # 24h high — computed from real hourly candles, not something DexScreener
+    # exposes directly on the pair object.
+    if dex.get("pair_address"):
+        try:
+            async with aiohttp.ClientSession() as session:
+                candles = await get_ohlcv(session, dex["pair_address"], "1h")
+            if candles:
+                last_24 = candles[-24:]
+                data["high_24h"] = max((_num(c[2]) or 0) for c in last_24)
+        except Exception:
+            logger.exception("GRAM 24h high fetch failed")
+            data["high_24h"] = None
+    else:
+        data["high_24h"] = None
+
     _GRAM_STATS_CACHE["data"] = data
     _GRAM_STATS_CACHE["ts"] = now
     return web.json_response(data)
+
+
+# Maps the mini app's simple timeframe buttons to your existing chart-timeframe
+# keys/candle aggregates, so the same GeckoTerminal pipeline your scan reports
+# use also powers the Home tab's price chart.
+_CHART_TF_MAP = {
+    "1H": "1m",
+    "24H": "1h",
+    "7D": "4h",
+    "30D": "1d",
+    "ALL": "4d",
+}
+_GRAM_CHART_CACHE: dict = {}
+_GRAM_CHART_CACHE_TTL = 60  # seconds
+
+
+async def _get_gram_chart(request: web.Request):
+    tf = (request.query.get("tf") or "30D").upper()
+    tf_key = _CHART_TF_MAP.get(tf, "1d")
+
+    cached = _GRAM_CHART_CACHE.get(tf)
+    if cached and (time.time() - cached["ts"]) < _GRAM_CHART_CACHE_TTL:
+        return web.json_response(cached["data"])
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            report = await scan_token(session, GRAM_TOKEN_ADDRESS)
+            dex = report.get("dex_data") or {}
+            pair_address = dex.get("pair_address")
+            if not pair_address:
+                return web.json_response({"ok": False, "error": "no_pair"}, status=404)
+            candles = await get_ohlcv(session, pair_address, tf_key)
+    except Exception:
+        logger.exception("GRAM chart fetch failed")
+        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
+
+    if not candles:
+        return web.json_response({"ok": False, "error": "no_candles"}, status=404)
+
+    points = []
+    for c in candles:
+        try:
+            points.append({"t": int(c[0]), "close": float(c[4])})
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    data = {"ok": True, "tf": tf, "points": points}
+    _GRAM_CHART_CACHE[tf] = {"data": data, "ts": time.time()}
+    return web.json_response(data)
+
+
+# ── TonConnect manifest ────────────────────────────────────────────────────
+async def _serve_tonconnect_manifest(request: web.Request):
+    manifest = {
+        "url": APP_ORIGIN,
+        "name": "GRAMX6900",
+        "iconUrl": GRAMX_ICON_URL,
+    }
+    return web.json_response(manifest)
+
+
+async def _serve_static_icon(request: web.Request):
+    icon_path = os.path.join(os.path.dirname(__file__), "static", "icon.png")
+    if not os.path.exists(icon_path):
+        return web.Response(status=404)
+    return web.FileResponse(icon_path)
+
+
+# ── Wallet balance: TON + GRAM, read-only, no signing involved ────────────
+async def _get_wallet_balance(request: web.Request):
+    address = (request.query.get("address") or "").strip()
+    if not address:
+        return web.json_response({"ok": False, "error": "missing_address"}, status=400)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{TONAPI_BASE}/accounts/{address}",
+                headers=_tonapi_headers(),
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                account = await resp.json() if resp.status == 200 else {}
+
+            async with session.get(
+                f"{TONAPI_BASE}/accounts/{address}/jettons",
+                headers=_tonapi_headers(),
+                params={"currencies": "usd"},
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                jettons_resp = await resp.json() if resp.status == 200 else {}
+    except Exception:
+        logger.exception("Wallet balance fetch failed for %s", address)
+        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
+
+    ton_balance = None
+    if account.get("balance") is not None:
+        try:
+            ton_balance = float(account["balance"]) / 1e9
+        except (TypeError, ValueError):
+            ton_balance = None
+
+    gram_balance = None
+    for item in jettons_resp.get("balances", []) or []:
+        jetton_meta = (item.get("jetton") or {})
+        jetton_addr = jetton_meta.get("address", "")
+        # TonAPI can return either raw or friendly form here — compare loosely.
+        if GRAM_TOKEN_ADDRESS in (jetton_addr, jetton_meta.get("address", "")) or \
+           jetton_addr.lower() == GRAM_TOKEN_ADDRESS.lower():
+            try:
+                decimals = int(jetton_meta.get("decimals", 9))
+                gram_balance = float(item.get("balance", 0)) / (10 ** decimals)
+            except (TypeError, ValueError):
+                gram_balance = None
+            break
+
+    return web.json_response({
+        "ok": True,
+        "ton_balance": ton_balance,
+        "gram_balance": gram_balance,
+    })
 
 
 async def _start_web_server():
@@ -752,6 +894,10 @@ async def _start_web_server():
     app.router.add_post("/api/snake/score", _submit_snake_score)
     app.router.add_get("/home", _serve_home_app)
     app.router.add_get("/api/gram/stats", _get_gram_stats)
+    app.router.add_get("/api/gram/chart", _get_gram_chart)
+    app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
+    app.router.add_get("/static/icon.png", _serve_static_icon)
+    app.router.add_get("/api/wallet/balance", _get_wallet_balance)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
