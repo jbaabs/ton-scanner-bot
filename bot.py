@@ -46,11 +46,17 @@ GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXTrending").strip()
 BOT_USERNAME = ""
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "5580192046") or 0)
 
+# GRAMX6900's own jetton address — used by the mini app Home tab for live stats.
+GRAM_TOKEN_ADDRESS = os.getenv(
+    "GRAM_TOKEN_ADDRESS", "EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3"
+)
+
 # Snake mini app — Railway assigns PORT automatically, GAME_URL is your
 # public Railway domain (Settings -> Networking -> Generate Domain).
 PORT = int(os.getenv("PORT", "8080"))
 GAME_URL = os.getenv("GAME_URL", "https://your-app.up.railway.app/games/snake")
 GAME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "snake.html")
+HOME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "home.html")
 
 # Lightweight abuse protection. Legitimate users should rarely notice these.
 _RATE_LIMITS = {
@@ -679,12 +685,60 @@ async def _submit_snake_score(request: web.Request):
     return web.json_response({"ok": True, "best": best})
 
 
+# ── GRAM stats: powers the mini app Home tab ──────────────────────────────
+_GRAM_STATS_CACHE = {"data": None, "ts": 0}
+_GRAM_STATS_CACHE_TTL = 20  # seconds — avoids hammering DexScreener/TonAPI on every tab open
+
+
+async def _serve_home_app(request: web.Request):
+    if not os.path.exists(HOME_HTML_PATH):
+        return web.Response(text="Home app file not found on server.", status=404)
+    return web.FileResponse(HOME_HTML_PATH)
+
+
+async def _get_gram_stats(request: web.Request):
+    now = time.time()
+    if _GRAM_STATS_CACHE["data"] and (now - _GRAM_STATS_CACHE["ts"]) < _GRAM_STATS_CACHE_TTL:
+        return web.json_response(_GRAM_STATS_CACHE["data"])
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            report = await scan_token(session, GRAM_TOKEN_ADDRESS)
+    except Exception:
+        logger.exception("GRAM stats fetch failed")
+        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
+
+    if not report.get("found"):
+        return web.json_response({"ok": False, "error": "token_not_found"}, status=404)
+
+    jetton = report.get("jetton_info") or {}
+    dex = report.get("dex_data") or {}
+
+    data = {
+        "ok": True,
+        "name": jetton.get("name") or "GRAMX6900",
+        "symbol": jetton.get("symbol") or "GRAM",
+        "image": jetton.get("image"),
+        "price_usd": dex.get("price_usd"),
+        "price_change_24h": dex.get("price_change_24h") or dex.get("priceChange24h"),
+        "market_cap": dex.get("market_cap"),
+        "volume_24h": dex.get("volume_24h"),
+        "holders": jetton.get("holders_count"),
+        "address": GRAM_TOKEN_ADDRESS,
+    }
+    _GRAM_STATS_CACHE["data"] = data
+    _GRAM_STATS_CACHE["ts"] = now
+    return web.json_response(data)
+
+
 async def _start_web_server():
     """Runs alongside polling so Railway has an HTTP port to expose,
     serving the Snake mini app and its score endpoint."""
     app = web.Application()
     app.router.add_get("/games/snake", _serve_snake_game)
     app.router.add_post("/api/snake/score", _submit_snake_score)
+    app.router.add_get("/home", _serve_home_app)
+    app.router.add_get("/api/gram/stats", _get_gram_stats)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
