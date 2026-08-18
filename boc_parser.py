@@ -253,16 +253,31 @@ def build_single_cell_boc(bit_writer: BitWriter) -> bytes:
     return boc
 
 
-def build_swap_v2_payload(query_id: int, amount_nano: int) -> str:
-    """Builds the verified swap#a5a7cbf8 message body for DeDust CPMM v2 pools:
-    swap#a5a7cbf8 query_id:uint64 amount:Coins = InternalMsgBody;
-    Decoded directly from a real, successful on-chain swap transaction — not
-    guessed from documentation. Returns a base64-encoded BOC ready to hand to
-    TonConnect as the message payload."""
+def build_swap_v2_payload(query_id: int, amount_nano: int, limit_nano: int = 0) -> str:
+    """Builds the swap#a5a7cbf8 message body for DeDust CPMM v2 pools.
+
+    The base structure — opcode + query_id + amount — was decoded directly
+    from a real, successful on-chain swap transaction (verified byte-for-byte,
+    not guessed). That exact structure bounced with exit code 9 (cell
+    underflow) when tested at a different amount, meaning the real format has
+    at least one more field than what was captured.
+
+    UNVERIFIED ADDITION: a trailing `limit:Coins` field (minimum acceptable
+    output, 0 = no minimum) has been added as an educated guess — DeDust's
+    documented swap-step parameters for their other pool type explicitly
+    include a `limit` field for slippage protection, and it's plausible
+    CPMM v2 kept a minimal version of the same idea. This has NOT been
+    confirmed against a real transaction. If it still bounces, this guess
+    was wrong and a second real transaction is needed to pin down the actual
+    format rather than continuing to guess.
+
+    swap#a5a7cbf8 query_id:uint64 amount:Coins limit:Coins = InternalMsgBody;  (unverified)
+    """
     import base64
     w = BitWriter()
     w.write_uint(0xa5a7cbf8, 32)
     w.write_uint(query_id, 64)
     w.write_coins(amount_nano)
+    w.write_coins(limit_nano)
     boc = build_single_cell_boc(w)
     return base64.b64encode(boc).decode("ascii")
