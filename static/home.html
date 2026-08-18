@@ -735,9 +735,11 @@ function setSwapStatus(msg, kind){
 
 async function loadBalance(address){
   const amounts = document.getElementById('balanceAmounts');
+  const note = document.getElementById('balanceNote');
   try {
     const res = await fetch('/api/wallet/balance?address=' + encodeURIComponent(address));
     const data = await res.json();
+    console.log('Wallet balance response:', data); // remove once confirmed working
     if (!data.ok) throw new Error(data.error || 'unknown');
     document.getElementById('tonBalanceVal').textContent =
       data.ton_balance !== null && data.ton_balance !== undefined ? data.ton_balance.toFixed(3) : '—';
@@ -746,6 +748,7 @@ async function loadBalance(address){
     amounts.classList.add('visible');
   } catch (err) {
     console.warn('Balance load failed:', err);
+    note.textContent = 'Balance failed to load: ' + (err && err.message ? err.message : 'unknown error');
   }
 }
 
@@ -865,9 +868,20 @@ async function executeSwap(){
 
   const swapBtn = document.getElementById('swapBtn');
   swapBtn.disabled = true;
-  setSwapStatus('Loading swap engine…', 'pending');
+  setSwapStatus('Checking liquidity venue…', 'pending');
 
   try {
+    const statsRes = await fetch('/api/gram/stats');
+    const stats = await statsRes.json();
+    console.log('Pre-swap stats check:', stats); // remove once confirmed working
+    if (!stats.ok) {
+      throw new Error('Could not verify GRX6900 liquidity before swapping.');
+    }
+    if (stats.dex_id && stats.dex_id !== 'dedust') {
+      throw new Error(`GRX6900 liquidity is on ${stats.dex_id}, not DeDust — this swap button only supports DeDust right now.`);
+    }
+
+    setSwapStatus('Loading swap engine…', 'pending');
     const { Factory, MAINNET_FACTORY_ADDR, Asset, PoolType, TonClient4, Address, toNano } = await loadDedustSdk();
 
     setSwapStatus('Preparing swap — check your wallet to confirm…', 'pending');
