@@ -793,6 +793,7 @@ async def _get_gram_stats(request: web.Request):
         "symbol": jetton.get("symbol") or "GRAM",
         "image": jetton.get("image"),
         "price_usd": _num(dex.get("price_usd")),
+        "price_native": _num(dex.get("price_native")),  # GRX6900 price in GRAM/TON — used for swap estimates
         "price_change_24h": _num(dex.get("price_change_24h")),
         "market_cap": _num(dex.get("market_cap")),
         "volume_24h": _num(dex.get("volume_24h")),
@@ -5107,6 +5108,7 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
 
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
+            "price_native": best.get("priceNative"),  # price in terms of the paired asset (TON) — used for swap estimates
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
             "volume_24h": total_vol,
             "volume_1h": (best.get("volume") or {}).get("h1"),
