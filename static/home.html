@@ -480,13 +480,27 @@
         <div class="swap-label">You Receive · Estimated</div>
         <div class="swap-input-row">
           <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
-          <div class="token-pill"><span class="dot"></span>GRX6900</div>
+          <button class="token-pill" id="tokenPickerBtn" style="border:1px solid var(--panel-edge);cursor:pointer;font-family:inherit;">
+            <span class="dot" id="tokenPickerDot"></span><span id="tokenPickerLabel">GRX6900</span> ▾
+          </button>
         </div>
       </div>
       <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
-        <button class="connect-btn disabled" id="swapBtn" disabled>Connect Wallet To Swap</button>
+        <button class="connect-btn disabled" id="swapBtn" disabled>Swap Paused</button>
         <div class="swap-status" id="swapStatus"></div>
-        <div class="note" style="margin-top:8px;">No on-chain slippage protection on this pool — double-check the amount shown in your wallet before confirming.</div>
+        <div class="note" style="margin-top:8px;color:var(--red);">Swap execution is temporarily paused — a real test transaction bounced (exit code 9, cell underflow), meaning the message format is missing a field we haven't confirmed yet. Nothing was lost (funds bounce back automatically), but we're holding off on further attempts until we have better data.</div>
+      </div>
+    </div>
+
+    <div id="tokenPickerOverlay" style="display:none;position:fixed;inset:0;background:rgba(5,7,10,0.92);z-index:50;padding:16px;">
+      <div class="card" style="max-width:420px;margin:40px auto 0;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div class="swap-label" style="margin:0;">Select Token</div>
+          <button id="tokenPickerClose" style="background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;">✕</button>
+        </div>
+        <input id="tokenSearchInput" type="text" placeholder="Search ticker or paste address…"
+          style="width:100%;background:#060a10;border:1px solid var(--panel-edge);border-radius:8px;padding:12px;color:var(--text);font-size:14px;font-family:inherit;box-sizing:border-box;">
+        <div id="tokenSearchResults" style="margin-top:10px;max-height:340px;overflow-y:auto;"></div>
       </div>
     </div>
 
@@ -762,11 +776,9 @@ function updateWalletUI(){
     connectBtn.disabled = false;
     note.textContent = 'Wallet connected. Balances refresh automatically.';
     loadBalance(addr);
-    if (swapBtn) {
-      swapBtn.textContent = 'Swap';
-      swapBtn.classList.remove('disabled');
-      swapBtn.disabled = false;
-    }
+    // Swap execution is intentionally paused — see the red note under the
+    // swap button. Do NOT re-enable this on wallet connect until a verified
+    // fix for the exit-code-9 (cell underflow) failure is confirmed.
   } else {
     pill.innerHTML = `<span class="dot-ring"></span>No wallet`;
     connectBtn.textContent = 'Connect Wallet';
