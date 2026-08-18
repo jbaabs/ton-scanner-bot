@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>GRX Scanner // Home</title>
 <script src="https://telegram.org/js/telegram-web-app.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@tonconnect/ui@2/dist/tonconnect-ui.min.js" crossorigin="anonymous"></script>
 <style>
   :root{
     --void:#05070a;
@@ -37,6 +38,7 @@
     height:100%;
     max-width:460px;
     margin:0 auto;
+    padding-top:var(--tg-safe-top, env(safe-area-inset-top, 0px));
   }
   .ticker{
     overflow:hidden;
@@ -123,6 +125,10 @@
     color:var(--blue-glow);
     margin-top:4px;
   }
+  .price-val sub{
+    font-size:0.55em;
+    color:var(--blue);
+  }
   .price-change{
     font-size:12px;
     font-weight:700;
@@ -160,6 +166,125 @@
   }
 
   .swap-card{ padding:0; overflow:hidden; }
+
+  .balance-card{
+    background:var(--panel);
+    border:1px dashed var(--panel-edge);
+    border-radius:10px;
+    padding:16px;
+    margin-bottom:14px;
+  }
+  .balance-row{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:12px;
+  }
+  .balance-label{
+    font-size:9px;
+    letter-spacing:0.15em;
+    color:var(--muted);
+    text-transform:uppercase;
+  }
+  .wallet-pill{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    background:#060a10;
+    border:1px solid var(--panel-edge);
+    border-radius:20px;
+    padding:5px 12px;
+    font-size:11px;
+    font-weight:700;
+    color:var(--muted);
+  }
+  .wallet-pill .dot-ring{
+    width:8px;height:8px;
+    border-radius:50%;
+    border:1.5px solid var(--muted);
+  }
+  .balance-note{
+    font-size:11px;
+    color:var(--muted);
+    line-height:1.5;
+    margin-bottom:12px;
+  }
+  .balance-actions{
+    display:flex;
+    gap:8px;
+  }
+  .balance-actions .connect-btn{
+    margin-top:0;
+    flex:2;
+  }
+  .chart-jump-btn{
+    flex:1;
+    background:#060a10;
+    border:1px solid var(--panel-edge);
+    color:var(--text);
+    font-family:Arial,sans-serif;
+    font-size:13px;
+    font-weight:800;
+    border-radius:8px;
+    cursor:pointer;
+  }
+
+  .chart-card{ padding-bottom:8px; }
+  .chart-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:10px;
+  }
+  .chart-live{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-size:10px;
+    letter-spacing:0.1em;
+    color:var(--muted);
+    text-transform:uppercase;
+  }
+  .chart-live .pulse{
+    width:6px;height:6px;
+    border-radius:50%;
+    background:var(--blue);
+    box-shadow:0 0 6px var(--blue);
+  }
+  .chart-high{
+    font-size:10px;
+    color:var(--muted);
+    text-align:right;
+  }
+  .chart-high b{ color:var(--text); font-size:12px; }
+  #chartCanvas{
+    width:100%;
+    height:140px;
+    display:block;
+  }
+  .tf-row{
+    display:flex;
+    gap:6px;
+    margin-top:10px;
+  }
+  .tf-btn{
+    flex:1;
+    background:#060a10;
+    border:1px solid var(--panel-edge);
+    color:var(--muted);
+    font-family:Arial,sans-serif;
+    font-size:10px;
+    font-weight:800;
+    letter-spacing:0.05em;
+    padding:6px 0;
+    border-radius:6px;
+    cursor:pointer;
+  }
+  .tf-btn.active{
+    background:var(--blue);
+    color:#00131f;
+    border-color:var(--blue);
+  }
   .swap-row{
     padding:14px 16px;
     border-bottom:1px solid var(--panel-edge);
@@ -180,8 +305,15 @@
   .swap-amount{
     font-size:22px;
     font-weight:700;
-    color:var(--muted);
+    color:var(--text);
+    background:none;
+    border:none;
+    outline:none;
+    width:60%;
+    font-family:Arial,sans-serif;
   }
+  .swap-amount::placeholder{ color:var(--muted); }
+  .swap-amount[readonly]{ color:var(--muted); }
   .token-pill{
     display:flex;
     align-items:center;
@@ -223,6 +355,39 @@
     color:var(--muted);
     cursor:not-allowed;
   }
+
+  .swap-status{
+    font-size:11px;
+    text-align:center;
+    padding:10px 16px 0;
+    line-height:1.5;
+  }
+  .swap-status.pending{ color:var(--blue-glow); }
+  .swap-status.success{ color:var(--green); }
+  .swap-status.error{ color:var(--red); }
+
+  .balance-amounts{
+    display:none;
+    gap:16px;
+    margin-bottom:12px;
+  }
+  .balance-amounts.visible{ display:flex; }
+  .balance-amounts .amt{
+    flex:1;
+  }
+  .balance-amounts .amt .sym{
+    font-size:9px;
+    color:var(--muted);
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+  }
+  .balance-amounts .amt .num{
+    font-size:16px;
+    font-weight:800;
+    color:var(--text);
+    margin-top:2px;
+  }
+  .balance-skeleton{ display:none; }
 
   .note{
     font-size:10px;
@@ -282,25 +447,61 @@
       <div class="loading">Loading GRAM stats…</div>
     </div>
 
+    <div class="card chart-card">
+      <div class="chart-header">
+        <div class="chart-live"><span class="pulse"></span>Live Price</div>
+        <div class="chart-high">24h High<br><b id="chartHigh">—</b></div>
+      </div>
+      <canvas id="chartCanvas"></canvas>
+      <div class="tf-row" id="tfRow">
+        <button class="tf-btn" data-tf="1H">1H</button>
+        <button class="tf-btn" data-tf="24H">24H</button>
+        <button class="tf-btn" data-tf="7D">7D</button>
+        <button class="tf-btn active" data-tf="30D">30D</button>
+        <button class="tf-btn" data-tf="ALL">ALL</button>
+      </div>
+    </div>
+
+    <div class="balance-card" id="balanceCard">
+      <div class="balance-row">
+        <div class="balance-label">Your Balance</div>
+        <div class="wallet-pill" id="walletPill"><span class="dot-ring"></span>No wallet</div>
+      </div>
+
+      <div class="balance-amounts" id="balanceAmounts">
+        <div class="amt"><div class="sym">TON</div><div class="num" id="tonBalanceVal">—</div></div>
+        <div class="amt"><div class="sym">GRAM</div><div class="num" id="gramBalanceVal">—</div></div>
+      </div>
+
+      <div class="balance-note" id="balanceNote">Connect a TON wallet to see your balance, play and claim prizes.</div>
+      <div class="balance-actions">
+        <button class="connect-btn" id="connectBtn">Connect Wallet</button>
+        <button class="chart-jump-btn" id="chartJumpBtn">Chart</button>
+      </div>
+    </div>
+
     <div class="card swap-card">
       <div class="swap-row">
         <div class="swap-label">You Pay</div>
         <div class="swap-input-row">
-          <div class="swap-amount">0.0</div>
+          <input class="swap-amount" id="payAmount" type="number" inputmode="decimal" placeholder="0.0" min="0" step="0.01">
           <div class="token-pill"><span class="dot"></span>TON</div>
         </div>
       </div>
       <div class="swap-row">
         <div class="swap-label">You Receive · Estimated</div>
         <div class="swap-input-row">
-          <div class="swap-amount">0.0</div>
+          <input class="swap-amount" id="receiveAmount" type="text" value="—" readonly>
           <div class="token-pill"><span class="dot"></span>GRAM</div>
         </div>
       </div>
+      <div class="swap-row" style="border-bottom:none;padding-top:6px;padding-bottom:16px;">
+        <button class="connect-btn disabled" id="swapBtn" disabled>Connect Wallet To Swap</button>
+        <div class="swap-status" id="swapStatus"></div>
+      </div>
     </div>
 
-    <button class="connect-btn disabled" disabled>Connect Wallet</button>
-    <div class="note">Wallet connect + live swap coming soon.<br>Stats above are live from the scanner.</div>
+    <div class="note" id="footerNote">Swap routed through DeDust, an external DEX on TON.<br>Stats above are live from the scanner.</div>
   </div>
 
   <div class="tabbar">
@@ -317,14 +518,36 @@
 
 <script>
 const tg = window.Telegram ? window.Telegram.WebApp : null;
+
+// In fullscreen mode Telegram floats its native header over the page
+// instead of pushing content down, so we read the real safe-area inset
+// straight from Telegram and pad the top of the app to clear it.
+function syncSafeArea(){
+  try {
+    const top = (tg && tg.contentSafeAreaInset && tg.contentSafeAreaInset.top)
+      || (tg && tg.safeAreaInset && tg.safeAreaInset.top)
+      || 0;
+    document.documentElement.style.setProperty('--tg-safe-top', top + 'px');
+  } catch (err) {
+    console.warn('Safe area sync failed:', err);
+  }
+}
+
 if (tg) {
   try {
     tg.ready();
     tg.expand();
     if (typeof tg.requestFullscreen === 'function') tg.requestFullscreen();
+    if (typeof tg.onEvent === 'function') {
+      tg.onEvent('safeAreaChanged', syncSafeArea);
+      tg.onEvent('contentSafeAreaChanged', syncSafeArea);
+    }
   } catch (err) {
     console.warn('Telegram WebApp init partial failure:', err);
   }
+  syncSafeArea();
+  setTimeout(syncSafeArea, 100);
+  setTimeout(syncSafeArea, 400);
 }
 
 const tickerItems = [
@@ -339,6 +562,27 @@ function buildTicker(){
 buildTicker();
 
 function fmtUsd(n){
+  n = Number(n);
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (n < 0.01) {
+    // Subscript notation for leading zeros, matching "$0.0₅577" style —
+    // shows how many zeros follow the decimal before real digits start.
+    const str = n.toFixed(12).replace(/0+$/, '');
+    const match = str.match(/^0\.0*(\d)/);
+    if (match) {
+      const zeroCount = str.match(/^0\.(0*)/)[1].length;
+      if (zeroCount >= 2) {
+        const sigDigits = str.slice(str.indexOf(match[1]));
+        const trimmed = sigDigits.slice(0, 4);
+        return `$0.0<sub>${zeroCount}</sub>${trimmed}`;
+      }
+    }
+    return '$' + str;
+  }
+  return '$' + n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+function fmtUsdPlain(n){
+  // Same value, no HTML — for places subscript markup would break (e.g. the chart high stat).
   n = Number(n);
   if (n === null || n === undefined || Number.isNaN(n)) return '—';
   if (n < 0.01) return '$' + n.toFixed(8).replace(/0+$/, '');
@@ -380,14 +624,271 @@ async function loadStats(){
         </div>
       </div>
     `;
+
+    document.getElementById('chartHigh').textContent = fmtUsdPlain(data.high_24h);
   } catch (err) {
     area.innerHTML = `<div class="error-state">Couldn't load live stats.<br><span style="font-size:10px;opacity:0.7;">${(err && err.message) ? err.message : 'unknown error'}</span></div>`;
     console.warn('GRAM stats load failed:', err);
   }
 }
 
+// ── Price chart ────────────────────────────────────────────────────────
+let currentTf = '30D';
+
+function drawChart(points){
+  const canvas = document.getElementById('chartCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  if (!points || points.length < 2) {
+    ctx.fillStyle = '#5f7488';
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Not enough chart data yet', w / 2, h / 2);
+    return;
+  }
+
+  const closes = points.map(p => p.close);
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const range = (max - min) || 1;
+  const pad = 6;
+
+  const toXY = (i, v) => {
+    const x = pad + (i / (points.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return [x, y];
+  };
+
+  // filled area under the line
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const [x, y] = toXY(i, p.close);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  const [lastX] = toXY(points.length - 1, points[points.length - 1].close);
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(pad, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'rgba(46,166,255,0.25)');
+  grad.addColorStop(1, 'rgba(46,166,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // line itself
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const [x, y] = toXY(i, p.close);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = '#2ea6ff';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+async function loadChart(tf){
+  currentTf = tf;
+  document.querySelectorAll('.tf-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tf === tf);
+  });
+  try {
+    const res = await fetch('/api/gram/chart?tf=' + encodeURIComponent(tf));
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'unknown');
+    drawChart(data.points);
+  } catch (err) {
+    console.warn('GRAM chart load failed:', err);
+    drawChart(null);
+  }
+}
+
+document.getElementById('tfRow').addEventListener('click', (e) => {
+  const btn = e.target.closest('.tf-btn');
+  if (!btn) return;
+  loadChart(btn.dataset.tf);
+});
+
+document.getElementById('chartJumpBtn').addEventListener('click', () => {
+  document.querySelector('.chart-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+window.addEventListener('resize', () => loadChart(currentTf));
+
 loadStats();
+loadChart(currentTf);
 setInterval(loadStats, 20000); // keep it fresh without hammering the endpoint
+setInterval(() => loadChart(currentTf), 60000);
+</script>
+
+<script type="module">
+// ── Wallet connect (TonConnect) + swap execution (DeDust SDK) ────────────
+// Uses the official DeDust SDK's high-level sendSwap() rather than hand-built
+// cell payloads — the SDK handles the exact on-chain encoding. This has NOT
+// been tested against a live wallet from this environment; test with a small
+// real amount before trusting it at scale. Currently supports TON -> GRAM
+// only (matches the swap card's fixed direction); GRAM -> TON is a fast
+// follow-up once this direction is confirmed working.
+
+import { Factory, MAINNET_FACTORY_ADDR, Asset, PoolType } from 'https://esm.sh/@dedust/sdk@1?bundle';
+import { TonClient4, Address, toNano } from 'https://esm.sh/@ton/ton@15?bundle';
+
+const GRAM_TOKEN_ADDRESS = 'EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3';
+
+const tonConnectUI = new TON_CONNECT_UI.TonConnectUI({
+  manifestUrl: window.location.origin + '/tonconnect-manifest.json',
+});
+
+let connectedWallet = null;
+
+function shortAddr(a){
+  if (!a) return '';
+  return a.slice(0, 4) + '…' + a.slice(-4);
+}
+
+function setSwapStatus(msg, kind){
+  const el = document.getElementById('swapStatus');
+  el.textContent = msg || '';
+  el.className = 'swap-status' + (kind ? ' ' + kind : '');
+}
+
+async function loadBalance(address){
+  const amounts = document.getElementById('balanceAmounts');
+  try {
+    const res = await fetch('/api/wallet/balance?address=' + encodeURIComponent(address));
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'unknown');
+    document.getElementById('tonBalanceVal').textContent =
+      data.ton_balance !== null && data.ton_balance !== undefined ? data.ton_balance.toFixed(3) : '—';
+    document.getElementById('gramBalanceVal').textContent =
+      data.gram_balance !== null && data.gram_balance !== undefined ? data.gram_balance.toLocaleString(undefined, {maximumFractionDigits: 2}) : '—';
+    amounts.classList.add('visible');
+  } catch (err) {
+    console.warn('Balance load failed:', err);
+  }
+}
+
+function updateWalletUI(){
+  const pill = document.getElementById('walletPill');
+  const connectBtn = document.getElementById('connectBtn');
+  const swapBtn = document.getElementById('swapBtn');
+  const note = document.getElementById('balanceNote');
+  const amounts = document.getElementById('balanceAmounts');
+
+  if (connectedWallet) {
+    const addr = connectedWallet.account.address;
+    pill.innerHTML = `<span class="dot-ring" style="background:#3ee67f;border-color:#3ee67f;"></span>${shortAddr(addr)}`;
+    connectBtn.textContent = 'Disconnect';
+    connectBtn.classList.remove('disabled');
+    connectBtn.disabled = false;
+    note.textContent = 'Wallet connected. Balances refresh automatically.';
+    swapBtn.textContent = 'Swap';
+    swapBtn.classList.remove('disabled');
+    swapBtn.disabled = false;
+    loadBalance(addr);
+  } else {
+    pill.innerHTML = `<span class="dot-ring"></span>No wallet`;
+    connectBtn.textContent = 'Connect Wallet';
+    connectBtn.classList.remove('disabled');
+    connectBtn.disabled = false;
+    note.textContent = 'Connect a TON wallet to see your balance and swap.';
+    amounts.classList.remove('visible');
+    swapBtn.textContent = 'Connect Wallet To Swap';
+    swapBtn.classList.add('disabled');
+    swapBtn.disabled = true;
+  }
+}
+
+tonConnectUI.onStatusChange((wallet) => {
+  connectedWallet = wallet;
+  updateWalletUI();
+});
+
+document.getElementById('connectBtn').addEventListener('click', () => {
+  if (connectedWallet) {
+    tonConnectUI.disconnect();
+  } else {
+    tonConnectUI.openModal();
+  }
+});
+
+document.getElementById('chartJumpBtn').addEventListener('click', () => {
+  document.querySelector('.chart-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+
+// Adapts TonConnect's sendTransaction into the { address, send } Sender
+// shape the DeDust SDK's vault methods expect.
+function makeTonConnectSender(){
+  return {
+    address: Address.parse(connectedWallet.account.address),
+    send: async (args) => {
+      await tonConnectUI.sendTransaction({
+        validUntil: Math.floor(Date.now() / 1000) + 300,
+        messages: [{
+          address: args.to.toString(),
+          amount: args.value.toString(),
+          payload: args.body ? args.body.toBoc().toString('base64') : undefined,
+        }],
+      });
+    },
+  };
+}
+
+async function executeSwap(){
+  if (!connectedWallet) {
+    tonConnectUI.openModal();
+    return;
+  }
+  const amountStr = document.getElementById('payAmount').value;
+  const amount = parseFloat(amountStr);
+  if (!amount || amount <= 0) {
+    setSwapStatus('Enter an amount above 0.', 'error');
+    return;
+  }
+
+  const swapBtn = document.getElementById('swapBtn');
+  swapBtn.disabled = true;
+  setSwapStatus('Preparing swap — check your wallet to confirm…', 'pending');
+
+  try {
+    const tonClient = new TonClient4({ endpoint: 'https://mainnet-v4.tonhubapi.com' });
+    const factory = tonClient.open(Factory.createFromAddress(MAINNET_FACTORY_ADDR));
+    const TON = Asset.native();
+    const GRAM = Asset.jetton(Address.parse(GRAM_TOKEN_ADDRESS));
+
+    const pool = tonClient.open(await factory.getPool(PoolType.VOLATILE, [TON, GRAM]));
+    const tonVault = tonClient.open(await factory.getNativeVault());
+
+    const sender = makeTonConnectSender();
+
+    await tonVault.sendSwap(sender, {
+      poolAddress: pool.address,
+      amount: toNano(amountStr),
+      gasAmount: toNano('0.25'),
+    });
+
+    setSwapStatus('Swap sent — confirm in your wallet, then check your balance shortly.', 'success');
+    setTimeout(() => loadBalance(connectedWallet.account.address), 5000);
+  } catch (err) {
+    console.error('Swap failed:', err);
+    setSwapStatus('Swap failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+  } finally {
+    swapBtn.disabled = false;
+  }
+}
+
+document.getElementById('swapBtn').addEventListener('click', executeSwap);
+
+// Restore wallet state on reload if TonConnect already has a session.
+tonConnectUI.connectionRestored.then(() => {
+  connectedWallet = tonConnectUI.wallet;
+  updateWalletUI();
+});
 </script>
 </body>
 </html>
