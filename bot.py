@@ -945,9 +945,11 @@ _GRAM_STATS_CACHE_TTL = 20  # seconds — avoids hammering DexScreener/TonAPI on
 
 
 async def _serve_home_app(request: web.Request):
-    if not os.path.exists(HOME_HTML_PATH):
-        return web.Response(text="Home app file not found on server.", status=404)
-    return web.FileResponse(HOME_HTML_PATH)
+    # Home is offline while the swap feature gets rethought — redirect at the
+    # ROUTE level (not just removing links to it) so it's unreachable no
+    # matter how someone gets here: old bookmark, BotFather menu button not
+    # yet updated, shared link, etc. The file/underlying code is untouched.
+    raise web.HTTPFound("/games/snake")
 
 
 async def _get_gram_stats(request: web.Request):
