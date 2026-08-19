@@ -18,7 +18,6 @@ import sys
 import sqlite3
 
 import aiohttp
-from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
@@ -31,7 +30,6 @@ from aiogram.types import (
     BufferedInputFile,
     InputMediaPhoto,
     ReplyParameters,
-    WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -45,24 +43,6 @@ DB_PATH = os.getenv("SCAN_DB_PATH", "scan_history.db")
 GRX_TRENDING_CHANNEL = os.getenv("GRX_TRENDING_CHANNEL", "@GRXTrending").strip()
 BOT_USERNAME = ""
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "5580192046") or 0)
-
-# GRAMX6900's own jetton address — used by the mini app Home tab for live stats.
-GRAM_TOKEN_ADDRESS = os.getenv(
-    "GRAM_TOKEN_ADDRESS", "EQA6oZqfngpjbXn7SJdBjIYEoOxt_NusP4ULYCVAuQyG65G3"
-)
-
-# Snake mini app — Railway assigns PORT automatically, GAME_URL is your
-# public Railway domain (Settings -> Networking -> Generate Domain).
-PORT = int(os.getenv("PORT", "8080"))
-GAME_URL = os.getenv("GAME_URL", "https://your-app.up.railway.app/games/snake")
-HOME_URL = os.getenv("HOME_URL", "https://your-app.up.railway.app/home")
-GAME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "snake.html")
-HOME_HTML_PATH = os.path.join(os.path.dirname(__file__), "static", "home.html")
-
-# Derived once from HOME_URL so the TonConnect manifest always matches whatever
-# domain is actually configured, instead of being hardcoded separately.
-APP_ORIGIN = HOME_URL.rsplit("/home", 1)[0] if HOME_URL.endswith("/home") else HOME_URL
-GRAMX_ICON_URL = os.getenv("GRAMX_ICON_URL", f"{APP_ORIGIN}/static/icon.png")
 
 # Lightweight abuse protection. Legitimate users should rarely notice these.
 _RATE_LIMITS = {
@@ -587,611 +567,9 @@ def init_db():
         )
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS game_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            score INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_game_scores_user ON game_scores(user_id)"
-    )
     conn.commit()
     conn.close()
 
-
-
-# ── SNAKE GAME: scores + Telegram WebApp verification ────────────────────
-import hashlib
-import hmac as _hmac
-import json as _json
-from urllib.parse import parse_qsl as _parse_qsl
-
-# Confirmed GRX6900/GRAM pool on DeDust's newer "CPMM v2" architecture.
-# The swap message format below was reverse-engineered from a real, successful
-# on-chain transaction (not guessed from docs — verified byte-for-byte against
-# the exact destination address and TON amount of a confirmed swap):
-#   swap#a5a7cbf8 query_id:uint64 amount:Coins = InternalMsgBody;
-# Sent directly to the pool address itself (no separate Vault contract, unlike
-# the older DeDust architecture). See boc_parser.py for the cell builder.
-#
-# IMPORTANT: this message format has no on-chain slippage/minimum-output
-# protection field — a swap can execute at a worse price if the market moves
-# between submission and confirmation. Flag this to users in the UI.
-DEDUST_POOL_ADDRESS = os.getenv(
-    "DEDUST_POOL_ADDRESS", "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3"
-)
-# Raw form (workchain:hex), decoded and verified earlier against this exact
-# friendly address — used for low-level message construction.
-DEDUST_POOL_ADDRESS_RAW = "0:707fbdd7136d8016f19541e69e875b562ef281016fdba2532933fcf65fac2a07"
-DEDUST_POOL_URL = f"https://dedust.io/pools/{DEDUST_POOL_ADDRESS}"
-DEDUST_SWAP_GAS_TON = 0.2  # matches the gas margin observed in the real captured transaction
-
-try:
-    from boc_parser import build_swap_v2_payload
-    _SWAP_BUILDER_AVAILABLE = True
-except ImportError:
-    _SWAP_BUILDER_AVAILABLE = False
-    logger.warning("boc_parser.py not found — swap build endpoint will return an error until it's added alongside bot.py")
-
-
-async def _diagnose_swap(request: web.Request):
-    """FREE dry-run testing via TonAPI's message emulation — no wallet signing,
-    no gas spent. Builds a candidate swap message for the (hardcoded, single
-    test) wallet and asks TonAPI what would happen if it were actually sent.
-    Query params: amount (TON), refs=none|stiletto_verbatim (which candidate
-    structure to test)."""
-    if not _SWAP_BUILDER_AVAILABLE:
-        return web.json_response({"ok": False, "error": "swap_builder_missing"}, status=503)
-    if not TONAPI_KEY:
-        return web.json_response({"ok": False, "error": "no_tonapi_key"}, status=503)
-
-    try:
-        amount = float(request.query.get("amount") or 1)
-    except (TypeError, ValueError):
-        amount = 1.0
-    refs_mode = request.query.get("refs", "none")
-
-    test_wallet_raw = "0:cf67b5683f70292f54536fafd4636ce44da873697379349b7649cc76eea98305"
-    test_wallet_friendly = "UQDPZ7VoP3ApL1RTb6_UY2zkTahzaXN5NJt2Scx27qmDBYs0"
-
-    try:
-        from boc_parser import build_external_wallet_v4_message
-
-        amount_nano = int(round(amount * 1e9))
-        gas_nano = int(DEDUST_SWAP_GAS_TON * 1e9)
-        query_id = int(time.time() * 1000) % (2**64)
-
-        if refs_mode == "with_refs":
-            from boc_parser import build_swap_v2_payload_with_refs
-            # Real ref cells captured from your actual successful GRX6900
-            # transaction — testing whether attaching them (even though
-            # query_id/amount now differ) resolves the exit-9 bounce.
-            ref0_grx = ("c442500f70369464f5469a7006a80ed181", 135)
-            ref1_wallet = ("8019ecf6ad07ee0525ea8a6df5fa8c6d9c89b50e6d2e6f26936ec9398eddd53060a0400cf67b5683f70292f54536fafd4636ce44da873697379349b7649cc76eea98305020067b3dab41fb81497aa29b7d7ea31b67226d439b4b9bc9a4dbb24e63b7754c182c", 813)
-            swap_payload = build_swap_v2_payload_with_refs(
-                query_id=query_id, amount_nano=amount_nano, ref_hex_bits=[ref0_grx, ref1_wallet]
-            )
-        else:
-            swap_payload = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano)
-
-        async with aiohttp.ClientSession() as session:
-            headers = {"Authorization": f"Bearer {TONAPI_KEY}"}
-            # Fetch REAL current seqno — emulation checks against live state
-            async with session.get(
-                f"https://tonapi.io/v2/wallet/{test_wallet_friendly}/seqno",
-                headers=headers, timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                seqno_data = await resp.json()
-                if resp.status != 200:
-                    return web.json_response({"ok": False, "error": "seqno_fetch_failed", "detail": seqno_data}, status=502)
-            seqno = seqno_data.get("seqno")
-
-            ext_msg_b64 = build_external_wallet_v4_message(
-                subwallet_id=698983191,
-                seqno=seqno,
-                dest_address_raw=DEDUST_POOL_ADDRESS_RAW,
-                value_nano=amount_nano + gas_nano,
-                body_boc_b64=swap_payload,
-            )
-
-            async with session.post(
-                "https://tonapi.io/v2/traces/emulate",
-                headers=headers,
-                params={"ignore_signature_check": "true"},
-                json={"boc": ext_msg_b64},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                emulate_result = await resp.json()
-                status = resp.status
-
-        return web.json_response({
-            "ok": status == 200,
-            "http_status": status,
-            "refs_mode_tested": refs_mode,
-            "seqno_used": seqno,
-            "amount_tested": amount,
-            "external_message_boc": ext_msg_b64,
-            "tonapi_response": emulate_result,
-        })
-    except Exception as e:
-        logger.exception("Swap diagnosis failed")
-        return web.json_response({"ok": False, "error": "diagnose_failed", "detail": str(e)}, status=500)
-
-
-async def _build_swap(request: web.Request):
-    if not _SWAP_BUILDER_AVAILABLE:
-        return web.json_response(
-            {"ok": False, "error": "swap_builder_missing",
-             "message": "boc_parser.py is missing from the deployment."},
-            status=503,
-        )
-    try:
-        amount = float(request.query.get("amount") or 0)
-    except (TypeError, ValueError):
-        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
-    if amount <= 0:
-        return web.json_response({"ok": False, "error": "bad_amount"}, status=400)
-
-    token_address = (request.query.get("token") or "").strip()
-
-    if token_address:
-        # Resolve the target token's pool dynamically via the same
-        # scan_token()/DexScreener pipeline your /scan command already uses.
-        # DeDust's own /v2/pools listing turned out to only cover the older
-        # pool type — it never listed GRX6900's real (CPMM v2) pool at all —
-        # so DexScreener's indexed pair data is the more reliable source here.
-        try:
-            async with aiohttp.ClientSession() as session:
-                report = await scan_token(session, token_address)
-        except Exception:
-            logger.exception("Swap token lookup failed for %s", token_address)
-            return web.json_response({"ok": False, "error": "token_lookup_failed"}, status=502)
-
-        dex = (report or {}).get("dex_data") or {}
-        dex_id = str(dex.get("dex_id") or "").lower()
-        pool_address = dex.get("pair_address")
-
-        if not pool_address:
-            return web.json_response(
-                {"ok": False, "error": "no_pool_found",
-                 "message": "Could not find a TON pool for this token."},
-                status=404,
-            )
-        if "dedust" not in dex_id:
-            return web.json_response(
-                {"ok": False, "error": "not_on_dedust",
-                 "message": f"This token's liquidity is on {dex_id or 'an unknown DEX'}, not DeDust — in-app swap isn't supported for it yet."},
-                status=400,
-            )
-        pool_address_used = pool_address
-    else:
-        pool_address_used = DEDUST_POOL_ADDRESS
-
-    try:
-        amount_nano = int(round(amount * 1e9))
-        gas_nano = int(DEDUST_SWAP_GAS_TON * 1e9)
-        query_id = int(time.time() * 1000) % (2**64)
-        payload_b64 = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano, limit_nano=0)
-    except Exception:
-        logger.exception("Swap payload build failed")
-        return web.json_response({"ok": False, "error": "build_failed"}, status=500)
-
-    return web.json_response({
-        "ok": True,
-        "to": pool_address_used,
-        "amount_nano": str(amount_nano + gas_nano),
-        "payload_boc_base64": payload_b64,
-    })
-
-
-# ── Token search + lookup for the swap picker ─────────────────────────────
-async def _search_tokens(request: web.Request):
-    query = (request.query.get("q") or "").strip()
-    if len(query) < 2:
-        return web.json_response({"ok": True, "results": []})
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.dexscreener.com/latest/dex/search",
-                params={"q": query},
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as resp:
-                if resp.status != 200:
-                    return web.json_response({"ok": True, "results": []})
-                data = await resp.json()
-    except Exception:
-        logger.exception("Token search failed for query=%s", query)
-        return web.json_response({"ok": True, "results": []})
-
-    seen = set()
-    results = []
-    for pair in (data.get("pairs") or []):
-        if str(pair.get("chainId", "")).lower() != "ton":
-            continue
-        base = pair.get("baseToken") or {}
-        addr = base.get("address")
-        if not addr or addr in seen:
-            continue
-        seen.add(addr)
-        results.append({
-            "address": addr,
-            "symbol": base.get("symbol"),
-            "name": base.get("name"),
-            "price_usd": pair.get("priceUsd"),
-            "dex_id": pair.get("dexId"),
-        })
-        if len(results) >= 12:
-            break
-
-    return web.json_response({"ok": True, "results": results})
-
-
-async def _lookup_token(request: web.Request):
-    ca = (request.query.get("ca") or "").strip()
-    if not ca:
-        return web.json_response({"ok": False, "error": "missing_address"}, status=400)
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            report = await scan_token(session, ca)
-    except Exception:
-        logger.exception("Token lookup failed for %s", ca)
-        return web.json_response({"ok": False, "error": "lookup_failed"}, status=502)
-
-    if not report.get("found"):
-        return web.json_response({"ok": False, "error": "not_found"}, status=404)
-
-    jetton = report.get("jetton_info") or {}
-    dex = report.get("dex_data") or {}
-    return web.json_response({
-        "ok": True,
-        "address": ca,
-        "symbol": jetton.get("symbol"),
-        "name": jetton.get("name"),
-        "image": jetton.get("image"),
-        "price_usd": dex.get("price_usd"),
-        "dex_id": dex.get("dex_id"),
-    })
-
-
-def save_game_score(user_id: int, username: str, score: int):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO game_scores (user_id, username, score, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, username, score, int(time.time())),
-        )
-
-
-def get_user_best_score(user_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT MAX(score) FROM game_scores WHERE user_id=?", (user_id,)
-        ).fetchone()
-    return row[0] if row and row[0] is not None else 0
-
-
-def get_top_scores(limit: int = 10):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT user_id, username, MAX(score) AS best
-            FROM game_scores GROUP BY user_id ORDER BY best DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _verify_webapp_init_data(init_data: str) -> dict | None:
-    """Validates Telegram's WebApp initData signature so scores can't be
-    spoofed by POSTing to the endpoint directly with a fake user id."""
-    try:
-        parsed = dict(_parse_qsl(init_data, strict_parsing=True))
-    except ValueError:
-        return None
-    received_hash = parsed.pop("hash", None)
-    if not received_hash:
-        return None
-    check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-    secret_key = _hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
-    computed = _hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-    if not _hmac.compare_digest(computed, received_hash):
-        return None
-    user_raw = parsed.get("user")
-    if not user_raw:
-        return None
-    return _json.loads(user_raw)
-
-
-async def _serve_snake_game(request: web.Request):
-    if not os.path.exists(GAME_HTML_PATH):
-        return web.Response(text="Game file not found on server.", status=404)
-    return web.FileResponse(GAME_HTML_PATH)
-
-
-async def _submit_snake_score(request: web.Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "bad_json"}, status=400)
-
-    init_data = body.get("initData")
-    score = body.get("score")
-    if not init_data or not isinstance(score, int) or score < 0 or score > 100000:
-        return web.json_response({"ok": False, "error": "bad_payload"}, status=400)
-
-    user = _verify_webapp_init_data(init_data)
-    if not user:
-        return web.json_response({"ok": False, "error": "invalid_signature"}, status=401)
-
-    user_id = user["id"]
-    username = user.get("username") or user.get("first_name", "player")
-    await asyncio.to_thread(save_game_score, user_id, username, score)
-    best = await asyncio.to_thread(get_user_best_score, user_id)
-    return web.json_response({"ok": True, "best": best})
-
-
-# ── GRAM stats: powers the mini app Home tab ──────────────────────────────
-_GRAM_STATS_CACHE = {"data": None, "ts": 0}
-_GRAM_STATS_CACHE_TTL = 20  # seconds — avoids hammering DexScreener/TonAPI on every tab open
-
-
-async def _serve_home_app(request: web.Request):
-    # Home is offline while the swap feature gets rethought — redirect at the
-    # ROUTE level (not just removing links to it) so it's unreachable no
-    # matter how someone gets here: old bookmark, BotFather menu button not
-    # yet updated, shared link, etc. The file/underlying code is untouched.
-    raise web.HTTPFound("/games/snake")
-
-
-async def _get_gram_stats(request: web.Request):
-    now = time.time()
-    if _GRAM_STATS_CACHE["data"] and (now - _GRAM_STATS_CACHE["ts"]) < _GRAM_STATS_CACHE_TTL:
-        return web.json_response(_GRAM_STATS_CACHE["data"])
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            report = await scan_token(session, GRAM_TOKEN_ADDRESS)
-    except Exception:
-        logger.exception("GRAM stats fetch failed")
-        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
-
-    if not report.get("found"):
-        return web.json_response({"ok": False, "error": "token_not_found"}, status=404)
-
-    jetton = report.get("jetton_info") or {}
-    dex = report.get("dex_data") or {}
-
-    def _num(v):
-        # DexScreener returns some numeric fields (like priceUsd) as strings.
-        # Coerce everything to a real float here so the frontend never has to
-        # guess types — a bad/missing value becomes None instead of crashing
-        # the whole stats card downstream.
-        if v is None:
-            return None
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    data = {
-        "ok": True,
-        "name": jetton.get("name") or "GRAMX6900",
-        "symbol": jetton.get("symbol") or "GRAM",
-        "image": jetton.get("image"),
-        "price_usd": _num(dex.get("price_usd")),
-        "price_native": _num(dex.get("price_native")),  # GRX6900 price in GRAM/TON — used for swap estimates
-        "price_change_24h": _num(dex.get("price_change_24h")),
-        "market_cap": _num(dex.get("market_cap")),
-        "volume_24h": _num(dex.get("volume_24h")),
-        "holders": jetton.get("holders_count"),
-        "address": GRAM_TOKEN_ADDRESS,
-        "pair_address": dex.get("pair_address"),
-        "dex_id": dex.get("dex_id"),
-    }
-
-    # 24h high — computed from real hourly candles, not something DexScreener
-    # exposes directly on the pair object.
-    if dex.get("pair_address"):
-        try:
-            async with aiohttp.ClientSession() as session:
-                candles = await get_ohlcv(session, dex["pair_address"], "1h")
-            if candles:
-                last_24 = candles[-24:]
-                data["high_24h"] = max((_num(c[2]) or 0) for c in last_24)
-        except Exception:
-            logger.exception("GRAM 24h high fetch failed")
-            data["high_24h"] = None
-    else:
-        data["high_24h"] = None
-
-    _GRAM_STATS_CACHE["data"] = data
-    _GRAM_STATS_CACHE["ts"] = now
-    return web.json_response(data)
-
-
-# Maps the mini app's simple timeframe buttons to your existing chart-timeframe
-# keys/candle aggregates, so the same GeckoTerminal pipeline your scan reports
-# use also powers the Home tab's price chart.
-_CHART_TF_MAP = {
-    "1H": "1m",
-    "24H": "1h",
-    "7D": "4h",
-    "30D": "1d",
-    "ALL": "4d",
-}
-_GRAM_CHART_CACHE: dict = {}
-_GRAM_CHART_CACHE_TTL = 60  # seconds
-
-
-async def _get_gram_chart(request: web.Request):
-    tf = (request.query.get("tf") or "30D").upper()
-    tf_key = _CHART_TF_MAP.get(tf, "1d")
-
-    cached = _GRAM_CHART_CACHE.get(tf)
-    if cached and (time.time() - cached["ts"]) < _GRAM_CHART_CACHE_TTL:
-        return web.json_response(cached["data"])
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            report = await scan_token(session, GRAM_TOKEN_ADDRESS)
-            dex = report.get("dex_data") or {}
-            pair_address = dex.get("pair_address")
-            if not pair_address:
-                return web.json_response({"ok": False, "error": "no_pair"}, status=404)
-            candles = await get_ohlcv(session, pair_address, tf_key)
-    except Exception:
-        logger.exception("GRAM chart fetch failed")
-        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
-
-    if not candles:
-        return web.json_response({"ok": False, "error": "no_candles"}, status=404)
-
-    points = []
-    for c in candles:
-        try:
-            points.append({"t": int(c[0]), "close": float(c[4])})
-        except (TypeError, ValueError, IndexError):
-            continue
-
-    data = {"ok": True, "tf": tf, "points": points}
-    _GRAM_CHART_CACHE[tf] = {"data": data, "ts": time.time()}
-    return web.json_response(data)
-
-
-# ── TonConnect manifest ────────────────────────────────────────────────────
-async def _serve_tonconnect_manifest(request: web.Request):
-    manifest = {
-        "url": APP_ORIGIN,
-        "name": "GRAMX6900",
-        "iconUrl": GRAMX_ICON_URL,
-    }
-    return web.json_response(manifest)
-
-
-async def _serve_static_icon(request: web.Request):
-    icon_path = os.path.join(os.path.dirname(__file__), "static", "icon.png")
-    if not os.path.exists(icon_path):
-        return web.Response(status=404)
-    return web.FileResponse(icon_path)
-
-
-# ── Wallet balance: TON + GRAM, read-only, no signing involved ────────────
-async def _get_wallet_balance(request: web.Request):
-    address = (request.query.get("address") or "").strip()
-    if not address:
-        return web.json_response({"ok": False, "error": "missing_address"}, status=400)
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"{TONAPI_BASE}/accounts/{address}",
-                headers=_tonapi_headers(),
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as resp:
-                account_status = resp.status
-                account = await resp.json() if resp.status == 200 else {}
-                if resp.status != 200:
-                    logger.warning(
-                        "TonAPI /accounts/%s returned %s: %s",
-                        address, resp.status, (await resp.text())[:300],
-                    )
-
-            async with session.get(
-                f"{TONAPI_BASE}/accounts/{address}/jettons",
-                headers=_tonapi_headers(),
-                params={"currencies": "usd"},
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-            ) as resp:
-                jettons_status = resp.status
-                jettons_resp = await resp.json() if resp.status == 200 else {}
-                if resp.status != 200:
-                    logger.warning(
-                        "TonAPI /accounts/%s/jettons returned %s: %s",
-                        address, resp.status, (await resp.text())[:300],
-                    )
-    except Exception:
-        logger.exception("Wallet balance fetch failed for %s", address)
-        return web.json_response({"ok": False, "error": "fetch_failed"}, status=502)
-
-    ton_balance = None
-    if account.get("balance") is not None:
-        try:
-            ton_balance = float(account["balance"]) / 1e9
-        except (TypeError, ValueError):
-            ton_balance = None
-
-    # Normalize once — TonAPI returns jetton master addresses in raw "0:hex"
-    # form on this endpoint, while GRAM_TOKEN_ADDRESS is stored in friendly
-    # "EQ..." form. Comparing them directly (as before) could never match.
-    gram_raw = _friendly_to_raw(GRAM_TOKEN_ADDRESS)
-
-    gram_balance = None
-    for item in jettons_resp.get("balances", []) or []:
-        jetton_meta = (item.get("jetton") or {})
-        jetton_addr = (jetton_meta.get("address") or "").strip()
-        matches = (
-            jetton_addr == GRAM_TOKEN_ADDRESS
-            or jetton_addr.lower() == GRAM_TOKEN_ADDRESS.lower()
-            or (gram_raw and jetton_addr.lower() == gram_raw.lower())
-        )
-        if matches:
-            try:
-                decimals = int(jetton_meta.get("decimals", 9))
-                gram_balance = float(item.get("balance", 0)) / (10 ** decimals)
-            except (TypeError, ValueError):
-                gram_balance = None
-            break
-
-    return web.json_response({
-        "ok": True,
-        "ton_balance": ton_balance,
-        "gram_balance": gram_balance,
-        "_debug": {
-            "account_status": account_status,
-            "jettons_status": jettons_status,
-            "jetton_count": len(jettons_resp.get("balances", []) or []),
-        },
-    })
-
-
-
-async def _start_web_server():
-    """Runs alongside polling so Railway has an HTTP port to expose,
-    serving the Snake mini app and its score endpoint."""
-    app = web.Application()
-    app.router.add_get("/games/snake", _serve_snake_game)
-    app.router.add_post("/api/snake/score", _submit_snake_score)
-    app.router.add_get("/home", _serve_home_app)
-    app.router.add_get("/api/gram/stats", _get_gram_stats)
-    app.router.add_get("/api/gram/chart", _get_gram_chart)
-    app.router.add_get("/api/swap/build", _build_swap)
-    app.router.add_get("/api/swap/diagnose", _diagnose_swap)
-    app.router.add_get("/api/tokens/search", _search_tokens)
-    app.router.add_get("/api/tokens/lookup", _lookup_token)
-    app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
-    app.router.add_get("/static/icon.png", _serve_static_icon)
-    app.router.add_get("/api/wallet/balance", _get_wallet_balance)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Snake game web server listening on :{PORT}")
-    return runner
-
-
-def _snake_play_keyboard():
-    b = InlineKeyboardBuilder()
-    b.button(text="🎮 Play Snake", web_app=WebAppInfo(url=GAME_URL))
-    return b.as_markup()
 
 
 def _parse_money_target(text: str) -> float | None:
@@ -2720,11 +2098,11 @@ def build_all_time_top_scans_message() -> str | None:
         times = int(row.get("scan_count") or 0)
         unique = int(row.get("unique_scanners") or 0)
         ranking_lines.append(
-            f"{rank} {ticker} » <b>{times}</b> scan{'s' if times != 1 else ''} "
-            f"· {unique} unique"
+            f"{rank} {ticker}\n"
+            f"     <b>{times}</b> scan{'s' if times != 1 else ''} · {unique} unique"
         )
 
-    lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
+    lines.append("<blockquote>" + "\n\n".join(ranking_lines) + "</blockquote>")
     return "\n".join(lines)
 
 
@@ -2788,9 +2166,8 @@ def _alltime_scan_counts_by_token() -> dict[str, int]:
 
 async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
     """Bot-wide leaderboard by multiple — not scoped to one chat like
-    /leaderboard. Deduped to one entry per token (its single best-performing
-    call, wherever that happened), with an all-time scan count attached to
-    each row so it reads as both 'how well' and 'how much attention.'
+    /leaderboard. Deduped to one entry per token: its single
+    best-performing call, wherever that happened.
     """
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
@@ -2823,10 +2200,6 @@ async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
         if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
             best_per_token[key] = row
 
-    scan_counts = _alltime_scan_counts_by_token()
-    for row in best_per_token.values():
-        row["scan_count"] = scan_counts.get(row["token_key"], 0)
-
     final = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
     return final[:limit]
 
@@ -2854,12 +2227,11 @@ async def build_best_scans_message() -> str | None:
             f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
             if scan_url else f"<b>${symbol}</b>"
         )
-        scans = int(row.get("scan_count") or 0)
         ranking_lines.append(
-            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b> "
-            f"· {scans} scan{'s' if scans != 1 else ''}"
+            f"{rank} {ticker} — <b>{_fmt_multiple(row['multiple'])}</b>\n"
+            f"     {_lb_caller_link(row)}"
         )
-    lines.append("<blockquote>" + "\n".join(ranking_lines) + "</blockquote>")
+    lines.append("<blockquote>" + "\n\n".join(ranking_lines) + "</blockquote>")
     return "\n".join(lines)
 
 
@@ -5306,7 +4678,6 @@ async def scan_token(session: aiohttp.ClientSession, address: str) -> dict:
 
         report["dex_data"] = {
             "price_usd": best.get("priceUsd"),
-            "price_native": best.get("priceNative"),  # price in terms of the paired asset (TON) — used for swap estimates
             "liquidity_usd": (best.get("liquidity") or {}).get("usd"),
             "volume_24h": total_vol,
             "volume_1h": (best.get("volume") or {}).get("h1"),
@@ -6283,38 +5654,6 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-
-
-@dp.message(Command("play", ignore_case=True))
-async def cmd_play(message: Message):
-    await message.answer(
-        "GRAMX6900 // SNAKE\nCollect the gem. Zero permission required.",
-        reply_markup=_snake_play_keyboard(),
-    )
-
-
-@dp.message(Command("home", ignore_case=True))
-async def cmd_home(message: Message):
-    # Home tab is temporarily offline while the swap feature gets rethought
-    # properly — the underlying code is still in place (untouched), just
-    # not linked from anywhere users can reach right now.
-    await message.answer(
-        "GRAMX6900 // HOME is temporarily offline. Try /play for Snake!",
-        reply_markup=_snake_play_keyboard(),
-    )
-
-
-@dp.message(Command("topsnake", ignore_case=True))
-async def cmd_topsnake(message: Message):
-    rows = await asyncio.to_thread(get_top_scores, 10)
-    if not rows:
-        await message.answer("No runs yet. Be the first — /play")
-        return
-    lines = ["🏆 <b>Top Snake Scores</b>\n"]
-    for i, r in enumerate(rows, 1):
-        name = html.escape(r["username"] or f"user_{r['user_id']}")
-        lines.append(f"{i}. @{name} — {r['best']}")
-    await message.answer("\n".join(lines))
 
 
 @dp.message(Command("start", "help"))
@@ -7533,14 +6872,12 @@ async def main():
     watcher = asyncio.create_task(alert_watcher())
     live_stream = asyncio.create_task(ton_live_stream_engine())
     recap_task = asyncio.create_task(recap_scheduler())
-    web_runner = await _start_web_server()
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
         live_stream.cancel()
         recap_task.cancel()
-        await web_runner.cleanup()
         try: await watcher
         except asyncio.CancelledError: pass
         try: await live_stream
