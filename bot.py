@@ -626,6 +626,9 @@ from urllib.parse import parse_qsl as _parse_qsl
 DEDUST_POOL_ADDRESS = os.getenv(
     "DEDUST_POOL_ADDRESS", "EQBwf73XE22AFvGVQeaeh1tWLvKBAW_bolMpM_z2X6wqB-M3"
 )
+# Raw form (workchain:hex), decoded and verified earlier against this exact
+# friendly address — used for low-level message construction.
+DEDUST_POOL_ADDRESS_RAW = "0:707fbdd7136d8016f19541e69e875b562ef281016fdba2532933fcf65fac2a07"
 DEDUST_POOL_URL = f"https://dedust.io/pools/{DEDUST_POOL_ADDRESS}"
 DEDUST_SWAP_GAS_TON = 0.2  # matches the gas margin observed in the real captured transaction
 
@@ -635,6 +638,90 @@ try:
 except ImportError:
     _SWAP_BUILDER_AVAILABLE = False
     logger.warning("boc_parser.py not found — swap build endpoint will return an error until it's added alongside bot.py")
+
+
+async def _diagnose_swap(request: web.Request):
+    """FREE dry-run testing via TonAPI's message emulation — no wallet signing,
+    no gas spent. Builds a candidate swap message for the (hardcoded, single
+    test) wallet and asks TonAPI what would happen if it were actually sent.
+    Query params: amount (TON), refs=none|stiletto_verbatim (which candidate
+    structure to test)."""
+    if not _SWAP_BUILDER_AVAILABLE:
+        return web.json_response({"ok": False, "error": "swap_builder_missing"}, status=503)
+    if not TONAPI_KEY:
+        return web.json_response({"ok": False, "error": "no_tonapi_key"}, status=503)
+
+    try:
+        amount = float(request.query.get("amount") or 1)
+    except (TypeError, ValueError):
+        amount = 1.0
+    refs_mode = request.query.get("refs", "none")
+
+    test_wallet_raw = "0:cf67b5683f70292f54536fafd4636ce44da873697379349b7649cc76eea98305"
+    test_wallet_friendly = "UQDPZ7VoP3ApL1RTb6_UY2zkTahzaXN5NJt2Scx27qmDBYs0"
+
+    try:
+        from boc_parser import build_external_wallet_v4_message
+
+        amount_nano = int(round(amount * 1e9))
+        gas_nano = int(DEDUST_SWAP_GAS_TON * 1e9)
+        query_id = int(time.time() * 1000) % (2**64)
+
+        if refs_mode == "with_refs":
+            from boc_parser import build_swap_v2_payload_with_refs
+            # Real ref cells captured from your actual successful GRX6900
+            # transaction — testing whether attaching them (even though
+            # query_id/amount now differ) resolves the exit-9 bounce.
+            ref0_grx = ("c442500f70369464f5469a7006a80ed181", 135)
+            ref1_wallet = ("8019ecf6ad07ee0525ea8a6df5fa8c6d9c89b50e6d2e6f26936ec9398eddd53060a0400cf67b5683f70292f54536fafd4636ce44da873697379349b7649cc76eea98305020067b3dab41fb81497aa29b7d7ea31b67226d439b4b9bc9a4dbb24e63b7754c182c", 813)
+            swap_payload = build_swap_v2_payload_with_refs(
+                query_id=query_id, amount_nano=amount_nano, ref_hex_bits=[ref0_grx, ref1_wallet]
+            )
+        else:
+            swap_payload = build_swap_v2_payload(query_id=query_id, amount_nano=amount_nano)
+
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {TONAPI_KEY}"}
+            # Fetch REAL current seqno — emulation checks against live state
+            async with session.get(
+                f"https://tonapi.io/v2/wallet/{test_wallet_friendly}/seqno",
+                headers=headers, timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                seqno_data = await resp.json()
+                if resp.status != 200:
+                    return web.json_response({"ok": False, "error": "seqno_fetch_failed", "detail": seqno_data}, status=502)
+            seqno = seqno_data.get("seqno")
+
+            ext_msg_b64 = build_external_wallet_v4_message(
+                subwallet_id=698983191,
+                seqno=seqno,
+                dest_address_raw=DEDUST_POOL_ADDRESS_RAW,
+                value_nano=amount_nano + gas_nano,
+                body_boc_b64=swap_payload,
+            )
+
+            async with session.post(
+                "https://tonapi.io/v2/traces/emulate",
+                headers=headers,
+                params={"ignore_signature_check": "true"},
+                json={"boc": ext_msg_b64},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                emulate_result = await resp.json()
+                status = resp.status
+
+        return web.json_response({
+            "ok": status == 200,
+            "http_status": status,
+            "refs_mode_tested": refs_mode,
+            "seqno_used": seqno,
+            "amount_tested": amount,
+            "external_message_boc": ext_msg_b64,
+            "tonapi_response": emulate_result,
+        })
+    except Exception as e:
+        logger.exception("Swap diagnosis failed")
+        return web.json_response({"ok": False, "error": "diagnose_failed", "detail": str(e)}, status=500)
 
 
 async def _build_swap(request: web.Request):
@@ -1085,6 +1172,7 @@ async def _start_web_server():
     app.router.add_get("/api/gram/stats", _get_gram_stats)
     app.router.add_get("/api/gram/chart", _get_gram_chart)
     app.router.add_get("/api/swap/build", _build_swap)
+    app.router.add_get("/api/swap/diagnose", _diagnose_swap)
     app.router.add_get("/api/tokens/search", _search_tokens)
     app.router.add_get("/api/tokens/lookup", _lookup_token)
     app.router.add_get("/tonconnect-manifest.json", _serve_tonconnect_manifest)
@@ -6205,11 +6293,12 @@ async def cmd_play(message: Message):
 
 @dp.message(Command("home", ignore_case=True))
 async def cmd_home(message: Message):
-    b = InlineKeyboardBuilder()
-    b.button(text="🏠 Open GRX Home", web_app=WebAppInfo(url=HOME_URL))
+    # Home tab is temporarily offline while the swap feature gets rethought
+    # properly — the underlying code is still in place (untouched), just
+    # not linked from anywhere users can reach right now.
     await message.answer(
-        "GRAMX6900 // HOME\nLive stats, straight from the scanner.",
-        reply_markup=b.as_markup(),
+        "GRAMX6900 // HOME is temporarily offline. Try /play for Snake!",
+        reply_markup=_snake_play_keyboard(),
     )
 
 
