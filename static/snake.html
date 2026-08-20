@@ -18,6 +18,7 @@
     --muted:#5f7488;
     --red:#ff4d4d;
     --green:#3ee67f;
+    --amber:#e6b83e;
   }
   *{box-sizing:border-box;}
   html,body{
@@ -271,6 +272,94 @@
   }
   .tab.active{ color:var(--blue-glow); }
   .tab .icon{ font-size:18px; line-height:1; }
+
+  .mode-list{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    width:100%;
+    max-width:230px;
+  }
+  .mode-btn{
+    background:var(--ink);
+    border:1px solid var(--panel-edge);
+    border-radius:5px;
+    padding:11px 14px;
+    text-align:left;
+    cursor:pointer;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+  }
+  .mode-btn:active{ background:#0d1620; }
+  .mode-btn .mode-name{
+    font-family:Arial,sans-serif;
+    font-size:13px;
+    font-weight:800;
+    font-style:italic;
+    letter-spacing:0.04em;
+    text-transform:uppercase;
+  }
+  .mode-btn .mode-desc{
+    font-family:'Courier New',monospace;
+    font-size:9px;
+    color:var(--muted);
+    letter-spacing:0.04em;
+  }
+  .mode-btn.normal .mode-name{ color:var(--blue-glow); }
+  .mode-btn.normal{ border-color:var(--blue-deep); }
+  .mode-btn.hard .mode-name{ color:#ff9f4d; }
+  .mode-btn.hard{ border-color:#a35a1e; }
+  .mode-btn.fastt .mode-name{ color:var(--red); }
+  .mode-btn.fastt{ border-color:#8c1f1f; }
+
+  .level-badge{
+    display:none;
+    align-items:center;
+    gap:5px;
+    background:var(--red);
+    color:#1a0000;
+    font-family:Arial,sans-serif;
+    font-weight:800;
+    font-style:italic;
+    font-size:12px;
+    letter-spacing:0.03em;
+    padding:3px 9px;
+    border-radius:20px;
+    margin-top:4px;
+  }
+  .level-badge.active{ display:inline-flex; }
+
+  .levelup-flash{
+    position:absolute;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    pointer-events:none;
+    opacity:0;
+    z-index:5;
+  }
+  .levelup-flash.show{
+    animation: flashPop 0.9s ease-out forwards;
+  }
+  .levelup-flash span{
+    font-family:Arial,sans-serif;
+    font-weight:800;
+    font-style:italic;
+    font-size:26px;
+    letter-spacing:0.05em;
+    color:var(--red);
+    text-shadow: 0 0 16px rgba(255,77,77,0.8), 0 0 4px #000;
+    text-transform:uppercase;
+  }
+  @keyframes flashPop{
+    0%{ opacity:0; transform:scale(0.7); }
+    20%{ opacity:1; transform:scale(1.08); }
+    35%{ opacity:1; transform:scale(1); }
+    75%{ opacity:1; }
+    100%{ opacity:0; }
+  }
 </style>
 </head>
 <body>
@@ -286,7 +375,7 @@
       <div class="brandwrap">
         <div class="brand"><em>GRAMX</em>6900<small>FINANCIAL RESISTANCE</small></div>
       </div>
-      <div class="score">SCORE<b id="scoreVal">0</b><span class="multiplier-badge" id="multiplierBadge">⚡ ×2</span></div>
+      <div class="score">SCORE<b id="scoreVal">0</b><span class="multiplier-badge" id="multiplierBadge">⚡ ×2</span><span class="level-badge" id="levelBadge">LV 1</span></div>
     </div>
 
     <div class="canvas-wrap" id="canvasWrap">
@@ -295,16 +384,31 @@
       <div class="overlay" id="startOverlay">
         <div class="tag">// DISPATCH · SNAKE PROTOCOL</div>
         <h1>Infinite Conviction</h1>
-        <p>Collect the gem. Zero permission required. Swipe or use arrow keys — avoid the walls and yourself.</p>
-        <button id="startBtn">Start Run</button>
+        <p>Collect the gem. Swipe or use arrow keys — avoid the walls and yourself.</p>
+        <div class="mode-list">
+          <div class="mode-btn normal" data-mode="normal">
+            <span class="mode-name">Normal</span>
+            <span class="mode-desc">Steady pace, eases up faster over time</span>
+          </div>
+          <div class="mode-btn hard" data-mode="hard">
+            <span class="mode-name">Hard</span>
+            <span class="mode-desc">Faster from the start, less mercy per gem</span>
+          </div>
+          <div class="mode-btn fastt" data-mode="fastt">
+            <span class="mode-name">FASTTT</span>
+            <span class="mode-desc">Speed jumps hard every 5 gems — good luck</span>
+          </div>
+        </div>
       </div>
       <div class="overlay hidden" id="overOverlay">
         <div class="tag">// RUN TERMINATED</div>
         <h1>Resistance Ended</h1>
         <div class="big" id="finalScore">0</div>
-        <p>Best this session: <span id="bestScore">0</span></p>
+        <p id="overModeLine">Best this session: <span id="bestScore">0</span></p>
         <button id="retryBtn">Retry</button>
+        <button id="menuBtn" style="background:transparent;color:var(--muted);border:1px solid var(--panel-edge);box-shadow:none;">Change Mode</button>
       </div>
+      <div class="levelup-flash" id="levelupFlash"><span id="levelupText">LEVEL 2</span></div>
     </div>
 
     <div class="hint">Arrow keys / swipe — preview build</div>
@@ -388,8 +492,23 @@ function drawGrid(size){
   canvas.style.backgroundSize = `${size}px ${size}px`;
 }
 
-let snake, dir, dirQueue, food, score, best = 0, running = false, speed = 130;
+let snake, dir, dirQueue, food, score, running = false, speed = 130;
 let loopTimer = null;
+let currentMode = 'normal';
+let level = 1;
+let gemsThisLevel = 0;
+const best = { normal: 0, hard: 0, fastt: 0 };
+
+// Each mode's own feel, not just a flat speed multiplier:
+// - Normal: gentle, gradual ramp — matches the original game's pace
+// - Hard: starts faster and ramps quicker, but still smooth (no level jumps)
+// - FASTTT: starts at Normal's pace but jumps HARD every 5 gems, with a
+//   visible "LEVEL UP" moment — the escalation is the whole point of the mode
+const MODES = {
+  normal: { start: 130, perGem: 3,  floor: 70,  levelUp: null },
+  hard:   { start: 100, perGem: 5,  floor: 45,  levelUp: null },
+  fastt:  { start: 130, perGem: 0,  floor: 30,  levelUp: { every: 5, drop: 16 } },
+};
 
 // Multiplier power-up: every 8 gems eaten, a random multiplier kicks in for 5 seconds.
 const MULTIPLIER_EVERY = 8;
@@ -415,17 +534,27 @@ function triggerMultiplier(){
 }
 
 function resetGame(){
+  const cfg = MODES[currentMode];
   snake = [{x:9,y:9},{x:8,y:9},{x:7,y:9}];
   dir = {x:1,y:0};
   dirQueue = [];
   score = 0;
-  speed = 130;
+  speed = cfg.start;
+  level = 1;
+  gemsThisLevel = 0;
   multiplier = 1;
   gemsSinceMultiplier = 0;
   clearTimeout(multiplierTimeout);
   document.getElementById('multiplierBadge').classList.remove('active');
   document.getElementById('gameFrame').classList.remove('boosted');
   document.getElementById('scoreVal').textContent = score;
+  const levelBadge = document.getElementById('levelBadge');
+  if (cfg.levelUp) {
+    levelBadge.textContent = `LV ${level}`;
+    levelBadge.classList.add('active');
+  } else {
+    levelBadge.classList.remove('active');
+  }
   placeFood();
 }
 
@@ -537,13 +666,34 @@ function tick(){
     }
 
     placeFood();
-    speed = Math.max(70, speed - 3);
+
+    const cfg = MODES[currentMode];
+    if (cfg.levelUp) {
+      gemsThisLevel++;
+      if (gemsThisLevel >= cfg.levelUp.every) {
+        gemsThisLevel = 0;
+        level++;
+        speed = Math.max(cfg.floor, speed - cfg.levelUp.drop);
+        showLevelUp(level);
+        document.getElementById('levelBadge').textContent = `LV ${level}`;
+      }
+    } else {
+      speed = Math.max(cfg.floor, speed - cfg.perGem);
+    }
     restartLoop();
   } else {
     snake.pop();
   }
 
   draw();
+}
+
+function showLevelUp(n){
+  const el = document.getElementById('levelupFlash');
+  document.getElementById('levelupText').textContent = `LEVEL ${n}`;
+  el.classList.remove('show');
+  void el.offsetWidth; // force reflow so the animation restarts if triggered again quickly
+  el.classList.add('show');
 }
 
 function restartLoop(){
@@ -554,19 +704,23 @@ function restartLoop(){
 async function gameOver(){
   running = false;
   clearInterval(loopTimer);
-  best = Math.max(best, score);
+  best[currentMode] = Math.max(best[currentMode], score);
   document.getElementById('finalScore').textContent = score;
-  document.getElementById('bestScore').textContent = best;
+  const modeLabel = { normal: 'Normal', hard: 'Hard', fastt: 'FASTTT' }[currentMode];
+  document.getElementById('overModeLine').innerHTML =
+    `${modeLabel} best this session: <span id="bestScore">${best[currentMode]}</span>`;
   document.getElementById('overOverlay').classList.remove('hidden');
 
   const result = await submitScore(score);
   if (result && result.ok) {
-    best = Math.max(best, result.best);
-    document.getElementById('bestScore').textContent = best;
+    best[currentMode] = Math.max(best[currentMode], result.best);
+    document.getElementById('overModeLine').innerHTML =
+      `${modeLabel} best this session: <span id="bestScore">${best[currentMode]}</span>`;
   }
 }
 
-function startGame(){
+function startGame(mode){
+  if (mode) currentMode = mode;
   document.getElementById('startOverlay').classList.add('hidden');
   document.getElementById('overOverlay').classList.add('hidden');
   resetGame();
@@ -575,8 +729,14 @@ function startGame(){
   restartLoop();
 }
 
-document.getElementById('startBtn').addEventListener('click', startGame);
-document.getElementById('retryBtn').addEventListener('click', startGame);
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => startGame(btn.dataset.mode));
+});
+document.getElementById('retryBtn').addEventListener('click', () => startGame());
+document.getElementById('menuBtn').addEventListener('click', () => {
+  document.getElementById('overOverlay').classList.add('hidden');
+  document.getElementById('startOverlay').classList.remove('hidden');
+});
 
 window.addEventListener('keydown', e => {
   if(!running) return;
