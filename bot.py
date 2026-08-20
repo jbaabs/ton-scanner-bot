@@ -594,12 +594,22 @@ def init_db():
             user_id INTEGER NOT NULL,
             username TEXT,
             score INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'normal'
         )
         """
     )
+    # Migration for existing deployments: game_scores predates the mode
+    # column, so ADD COLUMN is needed for any DB created before this change.
+    # SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(game_scores)")}
+    if "mode" not in existing_cols:
+        conn.execute("ALTER TABLE game_scores ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_game_scores_user ON game_scores(user_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_game_scores_mode ON game_scores(mode)"
     )
     conn.commit()
     conn.close()
@@ -861,32 +871,50 @@ async def _lookup_token(request: web.Request):
     })
 
 
-def save_game_score(user_id: int, username: str, score: int):
+VALID_SNAKE_MODES = {"normal", "hard", "fastt"}
+
+
+def save_game_score(user_id: int, username: str, score: int, mode: str = "normal"):
+    if mode not in VALID_SNAKE_MODES:
+        mode = "normal"
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO game_scores (user_id, username, score, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, username, score, int(time.time())),
+            "INSERT INTO game_scores (user_id, username, score, created_at, mode) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, score, int(time.time()), mode),
         )
 
 
-def get_user_best_score(user_id: int) -> int:
+def get_user_best_score(user_id: int, mode: str = "normal") -> int:
+    if mode not in VALID_SNAKE_MODES:
+        mode = "normal"
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT MAX(score) FROM game_scores WHERE user_id=?", (user_id,)
+            "SELECT MAX(score) FROM game_scores WHERE user_id=? AND mode=?", (user_id, mode)
         ).fetchone()
     return row[0] if row and row[0] is not None else 0
 
 
-def get_top_scores(limit: int = 10):
+def get_top_scores(limit: int = 10, mode: str = None):
+    """mode=None returns the all-modes-combined leaderboard (existing /topsnake
+    behavior, unchanged). Pass a specific mode for a per-mode leaderboard."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT user_id, username, MAX(score) AS best
-            FROM game_scores GROUP BY user_id ORDER BY best DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if mode and mode in VALID_SNAKE_MODES:
+            rows = conn.execute(
+                """
+                SELECT user_id, username, MAX(score) AS best
+                FROM game_scores WHERE mode=? GROUP BY user_id ORDER BY best DESC LIMIT ?
+                """,
+                (mode, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT user_id, username, MAX(score) AS best
+                FROM game_scores GROUP BY user_id ORDER BY best DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -925,6 +953,9 @@ async def _submit_snake_score(request: web.Request):
 
     init_data = body.get("initData")
     score = body.get("score")
+    mode = body.get("mode") or "normal"
+    if mode not in VALID_SNAKE_MODES:
+        mode = "normal"
     if not init_data or not isinstance(score, int) or score < 0 or score > 100000:
         return web.json_response({"ok": False, "error": "bad_payload"}, status=400)
 
@@ -934,9 +965,21 @@ async def _submit_snake_score(request: web.Request):
 
     user_id = user["id"]
     username = user.get("username") or user.get("first_name", "player")
-    await asyncio.to_thread(save_game_score, user_id, username, score)
-    best = await asyncio.to_thread(get_user_best_score, user_id)
-    return web.json_response({"ok": True, "best": best})
+    await asyncio.to_thread(save_game_score, user_id, username, score, mode)
+    best = await asyncio.to_thread(get_user_best_score, user_id, mode)
+    return web.json_response({"ok": True, "best": best, "mode": mode})
+
+
+async def _get_snake_leaderboard(request: web.Request):
+    """Returns all three modes' top-10 lists in one call — the swipeable
+    leaderboard deck fetches this once rather than making 3 requests."""
+    limit = 10
+    normal, hard, fastt = await asyncio.gather(
+        asyncio.to_thread(get_top_scores, limit, "normal"),
+        asyncio.to_thread(get_top_scores, limit, "hard"),
+        asyncio.to_thread(get_top_scores, limit, "fastt"),
+    )
+    return web.json_response({"ok": True, "normal": normal, "hard": hard, "fastt": fastt})
 
 
 # ── GRAM stats: powers the mini app Home tab ──────────────────────────────
@@ -1170,6 +1213,7 @@ async def _start_web_server():
     app = web.Application()
     app.router.add_get("/games/snake", _serve_snake_game)
     app.router.add_post("/api/snake/score", _submit_snake_score)
+    app.router.add_get("/api/snake/leaderboard", _get_snake_leaderboard)
     app.router.add_get("/home", _serve_home_app)
     app.router.add_get("/api/gram/stats", _get_gram_stats)
     app.router.add_get("/api/gram/chart", _get_gram_chart)
