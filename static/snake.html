@@ -19,6 +19,12 @@
     --red:#ff4d4d;
     --green:#3ee67f;
     --amber:#e6b83e;
+    --hard:#ff9f4d;
+    --hard-deep:#a35a1e;
+    --fastt-deep:#8c1f1f;
+    --gold:#e6c65c;
+    --silver:#b8c4d0;
+    --bronze:#cd8347;
   }
   *{box-sizing:border-box;}
   html,body{
@@ -308,10 +314,10 @@
   }
   .mode-btn.normal .mode-name{ color:var(--blue-glow); }
   .mode-btn.normal{ border-color:var(--blue-deep); }
-  .mode-btn.hard .mode-name{ color:#ff9f4d; }
-  .mode-btn.hard{ border-color:#a35a1e; }
+  .mode-btn.hard .mode-name{ color:var(--hard); }
+  .mode-btn.hard{ border-color:var(--hard-deep); }
   .mode-btn.fastt .mode-name{ color:var(--red); }
-  .mode-btn.fastt{ border-color:#8c1f1f; }
+  .mode-btn.fastt{ border-color:var(--fastt-deep); }
 
   .level-badge{
     display:none;
@@ -360,6 +366,132 @@
     75%{ opacity:1; }
     100%{ opacity:0; }
   }
+
+  /* ============ Leaderboard (swipe deck) ============ */
+  .lb-overlay{
+    position:fixed;
+    inset:0;
+    z-index:100;
+    background:var(--void);
+    display:flex;
+    flex-direction:column;
+  }
+  .lb-overlay.hidden{ display:none; }
+
+  .lb-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:calc(var(--tg-safe-top, env(safe-area-inset-top, 0px)) + 14px) 16px 10px;
+    border-bottom:1px solid var(--panel-edge);
+    flex-shrink:0;
+  }
+  .lb-close{
+    background:none;
+    border:1px solid var(--panel-edge);
+    color:var(--muted);
+    width:30px; height:30px;
+    border-radius:50%;
+    font-size:14px;
+    padding:0;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+  }
+  .lb-close:active{ background:var(--panel); }
+
+  .lb-scroller{
+    flex:1;
+    min-height:0;
+    display:flex;
+    overflow-x:auto;
+    scroll-snap-type:x mandatory;
+    -webkit-overflow-scrolling:touch;
+  }
+  .lb-scroller::-webkit-scrollbar{ display:none; }
+
+  .lb-card{
+    min-width:100%;
+    scroll-snap-align:center;
+    padding:18px 16px;
+    display:flex;
+    flex-direction:column;
+    min-height:0;
+    overflow-y:auto;
+  }
+  .lb-card-inner{
+    border-radius:8px;
+    border:1px solid var(--panel-edge);
+    padding:18px 16px;
+    position:relative;
+    overflow:hidden;
+    flex:1;
+  }
+  .lb-card-inner::before{
+    content:"";
+    position:absolute; top:-1px; left:14px; right:14px; height:2px;
+    opacity:.9;
+  }
+  .lb-card.normal .lb-card-inner{ background:linear-gradient(180deg,#081522,var(--panel)); }
+  .lb-card.normal .lb-card-inner::before{ background:linear-gradient(90deg,transparent,var(--blue),transparent); }
+  .lb-card.hard .lb-card-inner{ background:linear-gradient(180deg,#1a1108,var(--panel)); }
+  .lb-card.hard .lb-card-inner::before{ background:linear-gradient(90deg,transparent,var(--hard),transparent); }
+  .lb-card.fastt .lb-card-inner{ background:linear-gradient(180deg,#1a0808,var(--panel)); }
+  .lb-card.fastt .lb-card-inner::before{ background:linear-gradient(90deg,transparent,var(--red),transparent); }
+
+  .lb-mode-title{
+    font-family:Arial,sans-serif; font-weight:800; font-style:italic;
+    font-size:19px; letter-spacing:0.03em; text-transform:uppercase;
+    margin:0 0 2px;
+  }
+  .lb-card.normal .lb-mode-title{ color:var(--blue-glow); }
+  .lb-card.hard .lb-mode-title{ color:var(--hard); }
+  .lb-card.fastt .lb-mode-title{ color:var(--red); }
+  .lb-mode-sub{
+    font-family:'Courier New',monospace; font-size:9px; color:var(--muted);
+    letter-spacing:0.1em; text-transform:uppercase; margin-bottom:16px;
+  }
+
+  .lb-row{
+    display:flex; align-items:center; gap:10px;
+    padding:8px 0;
+    border-bottom:1px solid rgba(21,34,51,0.6);
+  }
+  .lb-rank{
+    width:22px; height:22px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-family:Arial,sans-serif; font-weight:800; font-size:10px;
+    background:var(--ink); color:var(--muted); flex-shrink:0;
+  }
+  .lb-row.r1 .lb-rank{ background:var(--gold); color:#1a1500; }
+  .lb-row.r2 .lb-rank{ background:var(--silver); color:#0d1114; }
+  .lb-row.r3 .lb-rank{ background:var(--bronze); color:#160d05; }
+  .lb-row-name{ flex:1; font-size:12px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .lb-row-score{ font-family:'Courier New',monospace; font-size:12px; flex-shrink:0; }
+  .lb-card.normal .lb-row-score{ color:var(--blue-glow); }
+  .lb-card.hard .lb-row-score{ color:var(--hard); }
+  .lb-card.fastt .lb-row-score{ color:#ff8080; }
+
+  .lb-empty{
+    font-family:'Courier New',monospace; font-size:11px; color:var(--muted);
+    text-align:center; padding:30px 10px; letter-spacing:0.05em;
+  }
+  .lb-loading{
+    font-family:'Courier New',monospace; font-size:11px; color:var(--muted);
+    text-align:center; padding:30px 10px; letter-spacing:0.05em;
+  }
+
+  .lb-swipe-hint{
+    text-align:center; font-family:'Courier New',monospace; font-size:9px;
+    color:var(--muted); letter-spacing:0.1em; text-transform:uppercase;
+    padding-top:2px; flex-shrink:0;
+  }
+  .lb-dots{
+    display:flex; justify-content:center; gap:6px;
+    padding:6px 0 calc(env(safe-area-inset-bottom, 0px) + 14px);
+    flex-shrink:0;
+  }
+  .lb-dot{ width:6px; height:6px; border-radius:50%; background:var(--panel-edge); }
+  .lb-dot.on{ background:var(--blue); }
 </style>
 </head>
 <body>
@@ -399,6 +531,7 @@
             <span class="mode-desc">Speed jumps hard every 5 gems — good luck</span>
           </div>
         </div>
+        <button id="openLeaderboardBtn" style="background:transparent;color:var(--muted);border:1px solid var(--panel-edge);box-shadow:none;margin-top:2px;">🏆 Leaderboard</button>
       </div>
       <div class="overlay hidden" id="overOverlay">
         <div class="tag">// RUN TERMINATED</div>
@@ -414,6 +547,20 @@
     <div class="hint">Arrow keys / swipe — preview build</div>
   </div>
 
+  </div>
+
+  <div class="lb-overlay hidden" id="leaderboardOverlay">
+    <div class="lb-header">
+      <div class="brand"><em>GRAMX</em>6900<small>LEADERBOARD</small></div>
+      <button id="closeLeaderboardBtn" class="lb-close">✕</button>
+    </div>
+    <div class="lb-scroller" id="lbScroller"></div>
+    <div class="lb-swipe-hint">‹ swipe ›</div>
+    <div class="lb-dots" id="lbDots">
+      <div class="lb-dot on" data-i="0"></div>
+      <div class="lb-dot" data-i="1"></div>
+      <div class="lb-dot" data-i="2"></div>
+    </div>
   </div>
 
   <div class="tabbar">
@@ -432,16 +579,16 @@ const tg = window.Telegram ? window.Telegram.WebApp : null;
 
 
 
-async function submitScore(finalScore){
+async function submitScore(finalScore, mode){
   if (!tg || !tg.initData) return null; // not opened inside Telegram — skip silently
   try {
     const res = await fetch(SCORE_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData: tg.initData, score: finalScore }),
+      body: JSON.stringify({ initData: tg.initData, score: finalScore, mode: mode }),
     });
     if (!res.ok) return null;
-    return await res.json(); // { ok: true, best: <int> }
+    return await res.json(); // { ok: true, best: <int>, mode: <str> }
   } catch (e) {
     return null; // fail quietly — don't block the game-over screen on network issues
   }
@@ -711,7 +858,7 @@ async function gameOver(){
     `${modeLabel} best this session: <span id="bestScore">${best[currentMode]}</span>`;
   document.getElementById('overOverlay').classList.remove('hidden');
 
-  const result = await submitScore(score);
+  const result = await submitScore(score, currentMode);
   if (result && result.ok) {
     best[currentMode] = Math.max(best[currentMode], result.best);
     document.getElementById('overModeLine').innerHTML =
@@ -736,6 +883,73 @@ document.getElementById('retryBtn').addEventListener('click', () => startGame())
 document.getElementById('menuBtn').addEventListener('click', () => {
   document.getElementById('overOverlay').classList.add('hidden');
   document.getElementById('startOverlay').classList.remove('hidden');
+});
+
+// ── Leaderboard (swipe deck) ────────────────────────────────────────────────
+const LEADERBOARD_ENDPOINT = '/api/snake/leaderboard';
+const LB_MODE_META = {
+  normal: { label: 'Normal', sub: '// Steady pace' },
+  hard:   { label: 'Hard',   sub: '// Less mercy per gem' },
+  fastt:  { label: 'FASTTT', sub: '// Good luck' },
+};
+
+function renderLeaderboardRows(rows){
+  if (!rows || !rows.length) {
+    return '<div class="lb-empty">No runs yet — be the first!</div>';
+  }
+  return rows.map((r, i) => {
+    const rankClass = i === 0 ? 'r1' : i === 1 ? 'r2' : i === 2 ? 'r3' : '';
+    const name = (r.username || `user_${r.user_id}`).replace(/[<>&]/g, '');
+    return `<div class="lb-row ${rankClass}">
+      <div class="lb-rank">${i + 1}</div>
+      <div class="lb-row-name">@${name}</div>
+      <div class="lb-row-score">${r.best}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderLeaderboardCard(mode, rows){
+  const meta = LB_MODE_META[mode];
+  return `<div class="lb-card ${mode}">
+    <div class="lb-card-inner">
+      <div class="lb-mode-title">${meta.label}</div>
+      <div class="lb-mode-sub">${meta.sub}</div>
+      ${renderLeaderboardRows(rows)}
+    </div>
+  </div>`;
+}
+
+async function openLeaderboard(){
+  const overlay = document.getElementById('leaderboardOverlay');
+  const scroller = document.getElementById('lbScroller');
+  overlay.classList.remove('hidden');
+  scroller.innerHTML = '<div class="lb-loading">Loading…</div>';
+
+  try {
+    const res = await fetch(LEADERBOARD_ENDPOINT);
+    const data = await res.json();
+    if (!data.ok) throw new Error('bad response');
+    scroller.innerHTML =
+      renderLeaderboardCard('normal', data.normal) +
+      renderLeaderboardCard('hard', data.hard) +
+      renderLeaderboardCard('fastt', data.fastt);
+    scroller.scrollLeft = 0;
+    document.querySelectorAll('.lb-dot').forEach((d, i) => d.classList.toggle('on', i === 0));
+  } catch (e) {
+    scroller.innerHTML = '<div class="lb-loading">Couldn\'t load the leaderboard — try again shortly.</div>';
+  }
+}
+
+function closeLeaderboard(){
+  document.getElementById('leaderboardOverlay').classList.add('hidden');
+}
+
+document.getElementById('openLeaderboardBtn').addEventListener('click', openLeaderboard);
+document.getElementById('closeLeaderboardBtn').addEventListener('click', closeLeaderboard);
+
+document.getElementById('lbScroller').addEventListener('scroll', function(){
+  const i = Math.round(this.scrollLeft / this.clientWidth);
+  document.querySelectorAll('.lb-dot').forEach((d, idx) => d.classList.toggle('on', idx === i));
 });
 
 window.addEventListener('keydown', e => {
