@@ -6757,7 +6757,7 @@ async def show_watchlist(message: Message):
 
         lines = ["⭐ <b>Your GRX Watchlist</b>", ""]
         entry_lines = []
-        for r in watches:
+        for i, r in enumerate(watches, 1):
             symbol = html.escape(str(r.get("token_symbol") or "TOKEN").lstrip("$"))
             address = str(r.get("token_address") or "").strip()
             scan_url = _deep_scan_url(address) if address else None
@@ -6767,13 +6767,13 @@ async def show_watchlist(message: Message):
             )
             current_mcap = r.get("current_mcap")
             baseline = _as_float(r.get("baseline_mcap"))
-            mcap_line = f"{ticker} — {_fmt_usd(current_mcap) if current_mcap else 'N/A'}"
+            mcap_line = f"<b>{i}.</b> {ticker} — {_fmt_usd(current_mcap) if current_mcap else 'N/A'}"
             if current_mcap and baseline and baseline > 0:
                 pct = ((current_mcap - baseline) / baseline) * 100
-                entry_lines.append(f"{mcap_line}\n{_fmt_pct(pct)} since watched")
+                entry_lines.append(f"{mcap_line}\n     {_fmt_pct(pct)} since watched")
             else:
                 entry_lines.append(mcap_line)
-        lines.append("\n\n".join(entry_lines))
+        lines.append("<blockquote>" + "\n\n".join(entry_lines) + "</blockquote>")
         await status.edit_text("\n".join(lines), disable_web_page_preview=True)
     except Exception:
         logger.exception("/wl failed")
@@ -6828,7 +6828,7 @@ async def show_alert_list(message: Message):
 
         lines = ["🔔 <b>Your GRX Alerts</b>", ""]
         entry_lines = []
-        for r in alerts:
+        for i, r in enumerate(alerts, 1):
             symbol = html.escape(str(r.get("token_symbol") or "TOKEN").lstrip("$"))
             address = str(r.get("token_address") or "").strip()
             scan_url = _deep_scan_url(address) if address else None
@@ -6852,11 +6852,12 @@ async def show_alert_list(message: Message):
                 current_fmt = _fmt_usd(r.get("current_mcap")) if r.get("current_mcap") else "N/A"
                 target_fmt = None
 
+            head = f"<b>{i}.</b> {ticker} — {label}"
             if target_fmt:
-                entry_lines.append(f"{ticker} — {label}\nNow: {current_fmt}  »  Target: {target_fmt}")
+                entry_lines.append(f"{head}\n     Now: {current_fmt}  »  Target: {target_fmt}")
             else:
-                entry_lines.append(f"{ticker} — {label}\nNow: {current_fmt}")
-        lines.append("\n\n".join(entry_lines))
+                entry_lines.append(f"{head}\n     Now: {current_fmt}")
+        lines.append("<blockquote>" + "\n\n".join(entry_lines) + "</blockquote>")
         await status.edit_text("\n".join(lines), disable_web_page_preview=True)
     except Exception:
         logger.exception("/al failed")
