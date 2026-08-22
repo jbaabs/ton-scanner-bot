@@ -17,7 +17,7 @@ import logging
 import sys
 import sqlite3
 import json as _json
-from urllib.parse import parse_qsl as _parse_qsl
+from urllib.parse import parse_qsl as _parse_qsl, quote
 
 import aiohttp
 from aiohttp import web
@@ -2375,6 +2375,86 @@ def _mark_recap_sent(kind: str) -> None:
         )
 
 
+async def _global_biggest_mover_rows(seconds: int, limit: int = 10) -> list[dict]:
+    """Bot-wide equivalent of _global_best_scans_rows, but scoped to a time
+    window — used for the daily "Biggest Mover" post to GRX Trending, so it
+    highlights today's best call rather than an all-time one."""
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM leaderboard_calls WHERE called_ts>=?", (cutoff,)
+        ).fetchall()]
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(10)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+    ) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+    if not ranked:
+        return []
+
+    best_per_token: dict[str, dict] = {}
+    for row in ranked:
+        key = row["token_key"]
+        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+            best_per_token[key] = row
+
+    final = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
+    return final[:limit]
+
+
+async def _send_daily_biggest_mover_global() -> None:
+    """Standalone daily post to GRX Trending — bot-wide, not per-chat like
+    the weekly version above. Highlights whichever single call anywhere put
+    up the best multiple over the last 24h. Skips silently if there's
+    nothing to report (e.g. a quiet day with no qualifying calls)."""
+    if not GRX_TRENDING_CHANNEL:
+        return
+    rows = await _global_biggest_mover_rows(86400, limit=1)
+    if not rows:
+        return
+    row = rows[0]
+    called_mc = _as_float(row.get("called_market_cap"))
+    multiple = row.get("multiple")
+    if not called_mc or not multiple or called_mc <= 0:
+        return
+    current_mc = called_mc * multiple
+
+    symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+    address = str(row.get("token_address") or "").strip()
+    scan_url = _deep_scan_url(address) if address else None
+    ticker = (
+        f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+        if scan_url else f"<b>${symbol}</b>"
+    )
+    caption = (
+        f'🚀 <b>BIGGEST MOVER OF THE DAY</b>\n\n'
+        f'{ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(multiple)}</b>'
+    )
+    try:
+        png = await _render_offloop(build_pnl_card, called_mc, current_mc)
+        await bot.send_photo(
+            GRX_TRENDING_CHANNEL,
+            BufferedInputFile(png, filename="grx_daily_mover.png"),
+            caption=caption,
+        )
+    except Exception:
+        logger.exception("Could not post daily Biggest Mover to GRX Trending")
+
+
 async def _send_weekly_biggest_mover(chat_id: int) -> None:
     """Its own standalone message — not folded into the weekly recap text —
     highlighting whichever single call in this chat put up the best multiple
@@ -2432,6 +2512,15 @@ async def recap_scheduler():
                             logger.exception("Daily recap failed for chat %s", chat_id)
                         await asyncio.sleep(0.3)
                     _mark_recap_sent("daily")
+
+                    # Standalone daily post to GRX Trending, separate from the
+                    # per-chat recaps above — bot-wide, not chat-scoped.
+                    if not _recap_already_sent_today("daily_mover"):
+                        try:
+                            await _send_daily_biggest_mover_global()
+                        except Exception:
+                            logger.exception("Daily global Biggest Mover post failed")
+                        _mark_recap_sent("daily_mover")
 
                 # Friday, UTC.
                 if now.tm_wday == 4 and not _recap_already_sent_today("weekly"):
@@ -5426,6 +5515,37 @@ def build_report_keyboard(
     entry = REPORT_CACHE.get(key) or {}
     report = entry.get("report") or {}
     token_ca = str(report.get("address") or "").strip()
+
+    # Share Scan — opens Telegram's native share sheet pre-filled with a
+    # deep link back into this exact scan. One tap turns any scan into free
+    # distribution: the recipient lands straight back in the bot, scanning
+    # the same token, via /start scan_<address>.
+    #
+    # NOTE: Telegram always shows its own generic bot-profile preview for a
+    # t.me deep link (name/description/icon) — there's no way for a bot to
+    # customize that preview per-link, so the actual value has to live in
+    # the plain text alongside it instead. Real stats here, not just a
+    # vague teaser, so the share is worth something even before a tap.
+    if token_ca:
+        symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
+        scan_url = _deep_scan_url(token_ca)
+        if scan_url:
+            dex = report.get("dex_data") or {}
+            price_txt = _fmt_price_compact(dex.get("price_usd"))
+            mcap_txt = _fmt_usd(dex.get("market_cap"))
+            change_val = _as_float(dex.get("price_change_24h"))
+            change_txt = _fmt_pct(change_val) if change_val is not None else None
+
+            stat_bits = [f"Price {price_txt}", f"MC {mcap_txt}"]
+            if change_txt:
+                stat_bits.append(f"24h {change_txt}")
+
+            share_text = f"${symbol} — {' • '.join(stat_bits)}\nScanned on GRX 👀"
+            share_url = (
+                "https://t.me/share/url?"
+                f"url={quote(scan_url, safe='')}&text={quote(share_text, safe='')}"
+            )
+            builder.row(InlineKeyboardButton(text="📤 Share Scan", url=share_url))
 
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
