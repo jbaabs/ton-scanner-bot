@@ -17,7 +17,7 @@ import logging
 import sys
 import sqlite3
 import json as _json
-from urllib.parse import parse_qsl as _parse_qsl, quote
+from urllib.parse import parse_qsl as _parse_qsl
 
 import aiohttp
 from aiohttp import web
@@ -5516,36 +5516,14 @@ def build_report_keyboard(
     report = entry.get("report") or {}
     token_ca = str(report.get("address") or "").strip()
 
-    # Share Scan — opens Telegram's native share sheet pre-filled with a
-    # deep link back into this exact scan. One tap turns any scan into free
-    # distribution: the recipient lands straight back in the bot, scanning
-    # the same token, via /start scan_<address>.
-    #
-    # NOTE: Telegram always shows its own generic bot-profile preview for a
-    # t.me deep link (name/description/icon) — there's no way for a bot to
-    # customize that preview per-link, so the actual value has to live in
-    # the plain text alongside it instead. Real stats here, not just a
-    # vague teaser, so the share is worth something even before a tap.
+    # Share Scan — sends a small standalone message with a real clickable
+    # hyperlink (not a raw URL) that the user then hits Forward on. This
+    # replaces the earlier t.me/share/url approach: that flow is plain-text
+    # only, so a real hyperlink was never possible through it — the raw
+    # scan link would always show as-is. Forwarding a bot-sent message
+    # keeps HTML formatting intact, so the link stays clean either way.
     if token_ca:
-        symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
-        scan_url = _deep_scan_url(token_ca)
-        if scan_url:
-            dex = report.get("dex_data") or {}
-            price_txt = _fmt_price_compact(dex.get("price_usd"))
-            mcap_txt = _fmt_usd(dex.get("market_cap"))
-            change_val = _as_float(dex.get("price_change_24h"))
-            change_txt = _fmt_pct(change_val) if change_val is not None else None
-
-            stat_bits = [f"Price {price_txt}", f"MC {mcap_txt}"]
-            if change_txt:
-                stat_bits.append(f"24h {change_txt}")
-
-            share_text = f"${symbol} — {' • '.join(stat_bits)}\nScanned on GRX 👀"
-            share_url = (
-                "https://t.me/share/url?"
-                f"url={quote(scan_url, safe='')}&text={quote(share_text, safe='')}"
-            )
-            builder.row(InlineKeyboardButton(text="📤 Share Scan", url=share_url))
+        builder.row(InlineKeyboardButton(text="📤 Share Scan", callback_data=f"tg:share:{key}"))
 
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
@@ -6740,6 +6718,37 @@ async def handle_toggle(callback: CallbackQuery):
             return
 
     entry["ts"] = time.time()
+
+    if section == "share":
+        report = entry["report"]
+        token_ca = str(report.get("address") or "").strip()
+        scan_url = _deep_scan_url(token_ca) if token_ca else None
+        if not scan_url:
+            await callback.answer("Couldn't build a share link for this token.", show_alert=True)
+            return
+
+        symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
+        dex = report.get("dex_data") or {}
+        price_txt = _fmt_price_compact(dex.get("price_usd"))
+        mcap_txt = _fmt_usd(dex.get("market_cap"))
+        change_val = _as_float(dex.get("price_change_24h"))
+        change_txt = _fmt_pct(change_val) if change_val is not None else None
+
+        stat_bits = [f"Price {price_txt}", f"MC {mcap_txt}"]
+        if change_txt:
+            stat_bits.append(f"24h {change_txt}")
+
+        share_message = (
+            f"<b>${html.escape(symbol)}</b> — {' • '.join(stat_bits)}\n"
+            f'👀 <a href="{html.escape(scan_url, quote=True)}">View live scan on GRX →</a>'
+        )
+        try:
+            await callback.message.answer(share_message, disable_web_page_preview=True)
+            await callback.answer("Sent below — hit Forward on it to share ↓")
+        except Exception:
+            logger.exception("Could not send Share Scan message")
+            await callback.answer("Couldn't send that right now.", show_alert=True)
+        return
 
     if section == "refresh":
         remaining = _rate_limited("refresh", callback.from_user.id if callback.from_user else None)
