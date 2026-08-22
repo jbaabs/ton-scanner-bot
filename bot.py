@@ -16,11 +16,8 @@ import struct
 import logging
 import sys
 import sqlite3
-import json as _json
-from urllib.parse import parse_qsl as _parse_qsl
 
 import aiohttp
-from aiohttp import web
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
@@ -33,7 +30,6 @@ from aiogram.types import (
     BufferedInputFile,
     InputMediaPhoto,
     ReplyParameters,
-    WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -442,6 +438,11 @@ def init_db():
         )
         """
     )
+    # Migration: market cap at the moment a token was watched, so /wl can
+    # show real movement since then instead of just a bare address list.
+    watch_cols = {row[1] for row in conn.execute("PRAGMA table_info(token_watches)").fetchall()}
+    if "baseline_mcap" not in watch_cols:
+        conn.execute("ALTER TABLE token_watches ADD COLUMN baseline_mcap REAL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS token_alerts (
@@ -571,31 +572,6 @@ def init_db():
         )
         """
     )
-    # Snake mini-game scores. NOTE: this table did not exist in this file
-    # before — the web server / Snake game was previously maintained in a
-    # separate, divergent copy of bot.py that had never been merged back
-    # into the real production scanner. This merge brings both together.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS game_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            score INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'normal'
-        )
-        """
-    )
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(game_scores)")}
-    if "mode" not in existing_cols:
-        conn.execute("ALTER TABLE game_scores ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_game_scores_user ON game_scores(user_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_game_scores_mode ON game_scores(mode)"
-    )
     conn.commit()
     conn.close()
 
@@ -613,12 +589,15 @@ def _watching(user_id: int, address: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         return conn.execute("SELECT 1 FROM token_watches WHERE user_id=? AND token_address=?", (user_id, address)).fetchone() is not None
 
-def _toggle_watch(user_id: int, address: str, symbol: str) -> bool:
+def _toggle_watch(user_id: int, address: str, symbol: str, baseline_mcap: float | None = None) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         exists = conn.execute("SELECT 1 FROM token_watches WHERE user_id=? AND token_address=?", (user_id, address)).fetchone()
         if exists:
             conn.execute("DELETE FROM token_watches WHERE user_id=? AND token_address=?", (user_id, address)); return False
-        conn.execute("INSERT OR REPLACE INTO token_watches(user_id,token_address,token_symbol,created_ts) VALUES(?,?,?,?)", (user_id,address,symbol,int(time.time()))); return True
+        conn.execute(
+            "INSERT OR REPLACE INTO token_watches(user_id,token_address,token_symbol,created_ts,baseline_mcap) VALUES(?,?,?,?,?)",
+            (user_id, address, symbol, int(time.time()), baseline_mcap),
+        ); return True
 
 def _create_alert(user_id: int, address: str, symbol: str, alert_type: str, threshold: float | None = None, baseline: float | None = None):
     with sqlite3.connect(DB_PATH) as conn:
@@ -5684,185 +5663,6 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# ── Snake mini-game + web server ────────────────────────────────────────────
-# This entire block was previously maintained in a separate, divergent copy
-# of bot.py that never got merged back into the real production scanner
-# (this file). That's the actual root cause of the outage: Railway was
-# running one or the other, never both. Merged here properly instead of
-# picking a side and losing the other's features.
-PORT = int(os.getenv("PORT", "8080"))
-GAME_URL = os.getenv("GAME_URL", "https://your-app.up.railway.app/games/snake")
-GAME_HTML_PATH = os.getenv("GAME_HTML_PATH", "static/snake.html")
-
-VALID_SNAKE_MODES = {"normal", "hard", "fastt"}
-
-
-def save_game_score(user_id: int, username: str, score: int, mode: str = "normal"):
-    if mode not in VALID_SNAKE_MODES:
-        mode = "normal"
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO game_scores (user_id, username, score, created_at, mode) VALUES (?, ?, ?, ?, ?)",
-            (user_id, username, score, int(time.time()), mode),
-        )
-
-
-def get_user_best_score(user_id: int, mode: str = "normal") -> int:
-    if mode not in VALID_SNAKE_MODES:
-        mode = "normal"
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT MAX(score) FROM game_scores WHERE user_id=? AND mode=?", (user_id, mode)
-        ).fetchone()
-    return row[0] if row and row[0] is not None else 0
-
-
-def get_top_scores(limit: int = 10, mode: str = None):
-    """mode=None returns the all-modes-combined leaderboard (used by
-    /topsnake, unchanged behavior). Pass a specific mode for a per-mode
-    leaderboard (used by the in-game swipeable leaderboard)."""
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        if mode and mode in VALID_SNAKE_MODES:
-            rows = conn.execute(
-                """
-                SELECT user_id, username, MAX(score) AS best
-                FROM game_scores WHERE mode=? GROUP BY user_id ORDER BY best DESC LIMIT ?
-                """,
-                (mode, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT user_id, username, MAX(score) AS best
-                FROM game_scores GROUP BY user_id ORDER BY best DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _verify_webapp_init_data(init_data: str) -> dict | None:
-    """Validates Telegram's WebApp initData signature so scores can't be
-    spoofed by POSTing to the endpoint directly with a fake user id."""
-    try:
-        parsed = dict(_parse_qsl(init_data, strict_parsing=True))
-    except ValueError:
-        return None
-    received_hash = parsed.pop("hash", None)
-    if not received_hash:
-        return None
-    check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-    secret_key = _hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
-    computed = _hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-    if not _hmac.compare_digest(computed, received_hash):
-        return None
-    user_raw = parsed.get("user")
-    if not user_raw:
-        return None
-    return _json.loads(user_raw)
-
-
-async def _serve_snake_game(request: web.Request):
-    if not os.path.exists(GAME_HTML_PATH):
-        return web.Response(text="Game file not found on server.", status=404)
-    return web.FileResponse(GAME_HTML_PATH)
-
-
-async def _submit_snake_score(request: web.Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "bad_json"}, status=400)
-
-    init_data = body.get("initData")
-    score = body.get("score")
-    mode = body.get("mode") or "normal"
-    if mode not in VALID_SNAKE_MODES:
-        mode = "normal"
-    if not init_data or not isinstance(score, int) or score < 0 or score > 100000:
-        return web.json_response({"ok": False, "error": "bad_payload"}, status=400)
-
-    user = _verify_webapp_init_data(init_data)
-    if not user:
-        return web.json_response({"ok": False, "error": "invalid_signature"}, status=401)
-
-    user_id = user["id"]
-    username = user.get("username") or user.get("first_name", "player")
-    await asyncio.to_thread(save_game_score, user_id, username, score, mode)
-    best = await asyncio.to_thread(get_user_best_score, user_id, mode)
-    return web.json_response({"ok": True, "best": best, "mode": mode})
-
-
-async def _get_snake_leaderboard(request: web.Request):
-    """All three modes' top-10 lists in one call — the swipeable
-    leaderboard deck fetches this once rather than making 3 requests."""
-    limit = 10
-    normal, hard, fastt = await asyncio.gather(
-        asyncio.to_thread(get_top_scores, limit, "normal"),
-        asyncio.to_thread(get_top_scores, limit, "hard"),
-        asyncio.to_thread(get_top_scores, limit, "fastt"),
-    )
-    return web.json_response({"ok": True, "normal": normal, "hard": hard, "fastt": fastt})
-
-
-async def _serve_home_app(request: web.Request):
-    # Home tab is intentionally offline (see conversation history) — redirect
-    # at the ROUTE level so it's unreachable no matter how someone gets here.
-    raise web.HTTPFound("/games/snake")
-
-
-async def _start_web_server():
-    app = web.Application()
-    app.router.add_get("/games/snake", _serve_snake_game)
-    app.router.add_post("/api/snake/score", _submit_snake_score)
-    app.router.add_get("/api/snake/leaderboard", _get_snake_leaderboard)
-    app.router.add_get("/home", _serve_home_app)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Snake game web server listening on :{PORT}")
-    return runner
-
-
-def _snake_play_keyboard():
-    b = InlineKeyboardBuilder()
-    b.button(text="🎮 Play Snake", web_app=WebAppInfo(url=GAME_URL))
-    return b.as_markup()
-
-
-@dp.message(Command("play", ignore_case=True))
-async def cmd_play(message: Message):
-    await message.answer(
-        "GRAMX6900 // SNAKE\nCollect the gem. Zero permission required.",
-        reply_markup=_snake_play_keyboard(),
-    )
-
-
-@dp.message(Command("home", ignore_case=True))
-async def cmd_home(message: Message):
-    # Home tab is temporarily offline while the swap feature gets rethought
-    # properly — the underlying code/route still exists, just redirects to
-    # Snake so nobody lands on a dead page.
-    await message.answer(
-        "GRAMX6900 // HOME is temporarily offline. Try /play for Snake!",
-        reply_markup=_snake_play_keyboard(),
-    )
-
-
-@dp.message(Command("topsnake", ignore_case=True))
-async def cmd_topsnake(message: Message):
-    rows = await asyncio.to_thread(get_top_scores, 10)
-    if not rows:
-        await message.answer("No runs yet. Be the first — /play")
-        return
-    lines = ["🏆 <b>Top Snake Scores</b>\n"]
-    for i, r in enumerate(rows, 1):
-        name = html.escape(r["username"] or f"user_{r['user_id']}")
-        lines.append(f"{i}. @{name} — {r['best']}")
-    await message.answer("\n".join(lines))
-
 
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
@@ -6140,7 +5940,17 @@ async def _build_myscans_message(caller_id: int) -> str | None:
     if not ranked:
         return None
 
-    ranked.sort(key=lambda r: r["multiple"], reverse=True)
+    # One entry per token — same rule /bestscans uses. If this person was
+    # first caller in several different chats for the same token, only
+    # their single best-performing entry counts; a later, lower-priced
+    # first-call in a different chat naturally outranks an earlier one here
+    # since it's a better multiple, not because it displaced anything.
+    best_per_token: dict[str, dict] = {}
+    for row in ranked:
+        key = row["token_key"]
+        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+            best_per_token[key] = row
+    ranked = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
 
     def _line(row):
         symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
@@ -6722,7 +6532,8 @@ async def handle_toggle(callback: CallbackQuery):
 
     if section == "watch":
         address=str(entry["report"].get("address") or "").strip(); symbol=str((entry["report"].get("jetton_info") or {}).get("symbol") or "Token")
-        added=_toggle_watch(callback.from_user.id,address,symbol)
+        baseline_mcap=_as_float((entry["report"].get("dex_data") or {}).get("market_cap"))
+        added=_toggle_watch(callback.from_user.id,address,symbol,baseline_mcap)
         await callback.answer(f"{'⭐ Added '+symbol+' to' if added else 'Removed '+symbol+' from'} your watchlist", show_alert=True)
         return
 
@@ -6930,34 +6741,73 @@ async def handle_leaderboard_timeframe(callback: CallbackQuery):
 async def show_watchlist(message: Message):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        watches = conn.execute(
+        watches = [dict(r) for r in conn.execute(
             "SELECT * FROM token_watches WHERE user_id=? ORDER BY created_ts DESC",
             (message.from_user.id,),
-        ).fetchall()
+        ).fetchall()]
 
-    lines = ["⭐ <b>Your GRX Watchlist</b>"]
-    if watches:
-        lines += [
-            f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · <code>{html.escape(r['token_address'])}</code>"
-            for r in watches
-        ]
-    else:
-        lines.append("No watched tokens yet.")
+    if not watches:
+        await message.answer("⭐ <b>Your GRX Watchlist</b>\n\nNo watched tokens yet.")
+        return
 
-    await message.answer("\n".join(lines))
+    status = await message.answer("Pulling your watchlist…")
+    try:
+        sem = asyncio.Semaphore(10)
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+        ) as session:
+            async def enrich(row):
+                async with sem:
+                    mc = await _lb_current_mcap(session, row["token_address"])
+                row["current_mcap"] = mc
+                return row
+
+            watches = await asyncio.gather(*(enrich(r) for r in watches))
+
+        lines = ["⭐ <b>Your GRX Watchlist</b>", ""]
+        entry_lines = []
+        for i, r in enumerate(watches, 1):
+            symbol = html.escape(str(r.get("token_symbol") or "TOKEN").lstrip("$"))
+            address = str(r.get("token_address") or "").strip()
+            scan_url = _deep_scan_url(address) if address else None
+            ticker = (
+                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+                if scan_url else f"<b>${symbol}</b>"
+            )
+            current_mcap = r.get("current_mcap")
+            baseline = _as_float(r.get("baseline_mcap"))
+            mcap_line = f"<b>{i}.</b> {ticker} — {_fmt_usd(current_mcap) if current_mcap else 'N/A'}"
+            if current_mcap and baseline and baseline > 0:
+                pct = ((current_mcap - baseline) / baseline) * 100
+                entry_lines.append(f"{mcap_line}\n     {_fmt_pct(pct)} since watched")
+            else:
+                entry_lines.append(mcap_line)
+        lines.append("<blockquote>" + "\n\n".join(entry_lines) + "</blockquote>")
+        await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+    except Exception:
+        logger.exception("/wl failed")
+        try:
+            await status.edit_text("❌ Couldn't pull your watchlist right now.")
+        except Exception:
+            pass
 
 
 @dp.message(Command("al", ignore_case=True))
 async def show_alert_list(message: Message):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        alerts = conn.execute(
+        alerts = [dict(r) for r in conn.execute(
             "SELECT * FROM token_alerts WHERE user_id=? AND active=1 ORDER BY created_ts DESC",
             (message.from_user.id,),
-        ).fetchall()
+        ).fetchall()]
 
-    lines = ["🔔 <b>Your GRX Alerts</b>"]
-    if alerts:
+    if not alerts:
+        await message.answer("🔔 <b>Your GRX Alerts</b>\n\nNo active alerts.")
+        return
+
+    status = await message.answer("Pulling your alerts…")
+    try:
         labels = {
             "price_above": "Price ↑",
             "price_below": "Price ↓",
@@ -6965,16 +6815,66 @@ async def show_alert_list(message: Message):
             "mcap_below": "MCap ↓",
             "new_ath": "New ATH",
         }
-        for r in alerts:
-            threshold = (" " + _money(r["threshold"])) if r["threshold"] else ""
-            lines.append(
-                f"• <b>{html.escape(r['token_symbol'] or 'Token')}</b> · "
-                f"{labels.get(r['alert_type'], r['alert_type'])}{threshold}"
-            )
-    else:
-        lines.append("No active alerts.")
+        sem = asyncio.Semaphore(10)
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+        ) as session:
+            async def enrich(row):
+                async with sem:
+                    pairs = await get_dex_data(session, row["token_address"])
+                if pairs:
+                    ton_pairs = [p for p in pairs if _is_ton_pair(p)] or pairs
+                    ton_pairs.sort(key=lambda p: _pair_liquidity(p), reverse=True)
+                    best = ton_pairs[0]
+                    row["current_price"] = _as_float(best.get("priceUsd"))
+                    row["current_mcap"] = _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
+                else:
+                    row["current_price"] = None
+                    row["current_mcap"] = None
+                return row
 
-    await message.answer("\n".join(lines))
+            alerts = await asyncio.gather(*(enrich(r) for r in alerts))
+
+        lines = ["🔔 <b>Your GRX Alerts</b>", ""]
+        entry_lines = []
+        for i, r in enumerate(alerts, 1):
+            symbol = html.escape(str(r.get("token_symbol") or "TOKEN").lstrip("$"))
+            address = str(r.get("token_address") or "").strip()
+            scan_url = _deep_scan_url(address) if address else None
+            ticker = (
+                f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+                if scan_url else f"<b>${symbol}</b>"
+            )
+            alert_type = r.get("alert_type")
+            label = labels.get(alert_type, alert_type)
+            threshold = _as_float(r.get("threshold"))
+
+            if alert_type in ("price_above", "price_below"):
+                current = r.get("current_price")
+                current_fmt = _chart_price_label(current) if current else "N/A"
+                target_fmt = _chart_price_label(threshold) if threshold else None
+            elif alert_type in ("mcap_above", "mcap_below"):
+                current = r.get("current_mcap")
+                current_fmt = _fmt_usd(current) if current else "N/A"
+                target_fmt = _fmt_usd(threshold) if threshold else None
+            else:
+                current_fmt = _fmt_usd(r.get("current_mcap")) if r.get("current_mcap") else "N/A"
+                target_fmt = None
+
+            head = f"<b>{i}.</b> {ticker} — {label}"
+            if target_fmt:
+                entry_lines.append(f"{head}\n     Now: {current_fmt}  »  Target: {target_fmt}")
+            else:
+                entry_lines.append(f"{head}\n     Now: {current_fmt}")
+        lines.append("<blockquote>" + "\n\n".join(entry_lines) + "</blockquote>")
+        await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+    except Exception:
+        logger.exception("/al failed")
+        try:
+            await status.edit_text("❌ Couldn't pull your alerts right now.")
+        except Exception:
+            pass
 
 @dp.callback_query(F.data.startswith("tf:"))
 async def handle_timeframe(callback: CallbackQuery):
@@ -7080,14 +6980,12 @@ async def main():
     watcher = asyncio.create_task(alert_watcher())
     live_stream = asyncio.create_task(ton_live_stream_engine())
     recap_task = asyncio.create_task(recap_scheduler())
-    web_runner = await _start_web_server()
     try:
         await dp.start_polling(bot)
     finally:
         watcher.cancel()
         live_stream.cancel()
         recap_task.cancel()
-        await web_runner.cleanup()
         try: await watcher
         except asyncio.CancelledError: pass
         try: await live_stream
