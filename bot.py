@@ -34,6 +34,9 @@ from aiogram.types import (
     InputMediaPhoto,
     ReplyParameters,
     WebAppInfo,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -1496,6 +1499,33 @@ def _deep_scan_url(address: str) -> str | None:
     if not BOT_USERNAME or not address:
         return None
     return f"https://t.me/{BOT_USERNAME}?start=scan_{address}"
+
+
+def _build_share_scan_message(report: dict) -> str | None:
+    """Same message shown by the Share Scan feature — real HTML hyperlink,
+    no raw URL. Used by the inline-mode handler below. Returns None if a
+    share link can't be built (no address / bot username not resolved yet)."""
+    address = str(report.get("address") or "").strip()
+    scan_url = _deep_scan_url(address) if address else None
+    if not scan_url:
+        return None
+
+    symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
+    dex = report.get("dex_data") or {}
+    price_txt = _fmt_price_compact(dex.get("price_usd"))
+    mcap_txt = _fmt_usd(dex.get("market_cap"))
+    change_val = _as_float(dex.get("price_change_24h"))
+    change_txt = _fmt_pct(change_val) if change_val is not None else None
+
+    stat_bits = [f"Price {price_txt}", f"MC {mcap_txt}"]
+    if change_txt:
+        stat_bits.append(f"24h {change_txt}")
+
+    return (
+        f"<b>${html.escape(symbol)}</b> — {' • '.join(stat_bits)}\n"
+        f'👀 <a href="{html.escape(scan_url, quote=True)}">View live scan on GRX →</a>'
+    )
+
 
 async def _get_trending_description(session: aiohttp.ClientSession, report: dict) -> str | None:
     """Best-effort public project description for a Trending alert.
@@ -5516,14 +5546,16 @@ def build_report_keyboard(
     report = entry.get("report") or {}
     token_ca = str(report.get("address") or "").strip()
 
-    # Share Scan — sends a small standalone message with a real clickable
-    # hyperlink (not a raw URL) that the user then hits Forward on. This
-    # replaces the earlier t.me/share/url approach: that flow is plain-text
-    # only, so a real hyperlink was never possible through it — the raw
-    # scan link would always show as-is. Forwarding a bot-sent message
-    # keeps HTML formatting intact, so the link stays clean either way.
+    # Share Scan — switch_inline_query opens Telegram's native "choose a
+    # chat" picker in one tap, then drops a real-hyperlink message straight
+    # into whichever chat is picked. Requires inline mode enabled for this
+    # bot via @BotFather (/setinline) — without that, this button does
+    # nothing when tapped. The token address is encoded directly into the
+    # query string so the inline handler (below) can look it up without
+    # depending on REPORT_CACHE, which may have expired by the time someone
+    # picks a chat.
     if token_ca:
-        builder.row(InlineKeyboardButton(text="📤 Share Scan", callback_data=f"tg:share:{key}"))
+        builder.row(InlineKeyboardButton(text="📤 Share Scan", switch_inline_query=f"scan:{token_ca}"))
 
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
@@ -6719,37 +6751,6 @@ async def handle_toggle(callback: CallbackQuery):
 
     entry["ts"] = time.time()
 
-    if section == "share":
-        report = entry["report"]
-        token_ca = str(report.get("address") or "").strip()
-        scan_url = _deep_scan_url(token_ca) if token_ca else None
-        if not scan_url:
-            await callback.answer("Couldn't build a share link for this token.", show_alert=True)
-            return
-
-        symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
-        dex = report.get("dex_data") or {}
-        price_txt = _fmt_price_compact(dex.get("price_usd"))
-        mcap_txt = _fmt_usd(dex.get("market_cap"))
-        change_val = _as_float(dex.get("price_change_24h"))
-        change_txt = _fmt_pct(change_val) if change_val is not None else None
-
-        stat_bits = [f"Price {price_txt}", f"MC {mcap_txt}"]
-        if change_txt:
-            stat_bits.append(f"24h {change_txt}")
-
-        share_message = (
-            f"<b>${html.escape(symbol)}</b> — {' • '.join(stat_bits)}\n"
-            f'👀 <a href="{html.escape(scan_url, quote=True)}">View live scan on GRX →</a>'
-        )
-        try:
-            await callback.message.answer(share_message, disable_web_page_preview=True)
-            await callback.answer("Sent below — hit Forward on it to share ↓")
-        except Exception:
-            logger.exception("Could not send Share Scan message")
-            await callback.answer("Couldn't send that right now.", show_alert=True)
-        return
-
     if section == "refresh":
         remaining = _rate_limited("refresh", callback.from_user.id if callback.from_user else None)
         if remaining > 0:
@@ -7301,6 +7302,60 @@ def append_updated_time(caption: str) -> str:
     from datetime import datetime, timezone
     updated_time = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     return caption + f"\n\n<i>Updated {updated_time}</i>"
+
+
+@dp.inline_query(F.query.startswith("scan:"))
+async def handle_share_scan_inline(inline_query: InlineQuery):
+    """Powers the Share Scan button's switch_inline_query flow. Requires
+    inline mode enabled for this bot via @BotFather (/setinline) — without
+    that toggle, Telegram never delivers inline queries here at all, so
+    this handler simply never fires (not an error, just inactive).
+
+    Looks up the token address encoded in the query fresh each time rather
+    than trusting REPORT_CACHE, since a meaningful amount of time can pass
+    between someone tapping Share Scan and actually picking a chat."""
+    address = inline_query.query[len("scan:"):].strip()
+    if not is_valid_ton_address(address):
+        await inline_query.answer([], cache_time=1)
+        return
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10),
+            connector=aiohttp.TCPConnector(limit=10, ttl_dns_cache=300),
+        ) as session:
+            report = await scan_token(session, address)
+    except Exception:
+        logger.exception("Inline share scan lookup failed for %s", address)
+        await inline_query.answer([], cache_time=1)
+        return
+
+    if not report.get("found"):
+        await inline_query.answer([], cache_time=1)
+        return
+
+    message_text = _build_share_scan_message(report)
+    if not message_text:
+        await inline_query.answer([], cache_time=1)
+        return
+
+    symbol = str((report.get("jetton_info") or {}).get("symbol") or "TOKEN").lstrip("$")
+    dex = report.get("dex_data") or {}
+    description = f"Price {_fmt_price_compact(dex.get('price_usd'))} · MC {_fmt_usd(dex.get('market_cap'))}"
+    thumb_url = _safe_image_url(report)
+
+    result = InlineQueryResultArticle(
+        id=f"scan_{address}"[:64],
+        title=f"Share ${symbol} scan",
+        description=description,
+        thumbnail_url=thumb_url,
+        input_message_content=InputTextMessageContent(
+            message_text=message_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        ),
+    )
+    await inline_query.answer([result], cache_time=5, is_personal=True)
 
 
 async def main():
