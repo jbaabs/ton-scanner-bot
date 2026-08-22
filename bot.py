@@ -17,7 +17,7 @@ import logging
 import sys
 import sqlite3
 import json as _json
-from urllib.parse import parse_qsl as _parse_qsl
+from urllib.parse import parse_qsl as _parse_qsl, quote
 
 import aiohttp
 from aiohttp import web
@@ -34,7 +34,6 @@ from aiogram.types import (
     InputMediaPhoto,
     ReplyParameters,
     WebAppInfo,
-    ChatMemberUpdated,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -1144,17 +1143,10 @@ def _check_pnl_milestone_sync(scope_key: str, token_key: str, chat_id: int, mult
 
 
 def _prepare_pnl_milestone_check(report: dict, scope_key: str, chat_id: int) -> None:
-    """Compares this anchor's PEAK multiple (called price vs. whichever is
-    higher of current price or the token's all-time high) against
-    2/5/10/20/50/100x and, if a new one was just crossed, stashes the info
-    on `report` so the async caller can render and send the PNL card.
-    Using peak rather than current-only means a genuine spike that already
-    dumped back down by the time anyone next scans/refreshes still gets
-    detected and credited — this only ever runs at scan/refresh time, so a
-    current-price-only check could otherwise miss a real milestone entirely
-    if price crossed it and fell back before the next look. Mutates report
-    in place; sends nothing itself — DB writes only, safe to call from a
-    background thread.
+    """Compares this anchor's current multiple against 2/5/10/20/50/100x and,
+    if a new one was just crossed, stashes the info on `report` so the async
+    caller can render and send the PNL card. Mutates report in place; sends
+    nothing itself — DB writes only, safe to call from a background thread.
     """
     anchor = report.get("_viewer_first_scan")
     if not anchor:
@@ -1163,23 +1155,16 @@ def _prepare_pnl_milestone_check(report: dict, scope_key: str, chat_id: int) -> 
     if not token_key:
         return
     dex = report.get("dex_data") or {}
-    called_mc = _usd_str_to_float(anchor.get("scan_market_cap"))
-    if not called_mc or called_mc <= 0:
-        return
-
     current_mc = _as_float(dex.get("market_cap"))
-    ath_mc = _as_float(dex.get("ath_market_cap"))
-    candidates = [v for v in (current_mc, ath_mc) if v]
-    if not candidates:
+    called_mc = _usd_str_to_float(anchor.get("scan_market_cap"))
+    if not current_mc or not called_mc or called_mc <= 0:
         return
-    peak_mc = max(candidates)
-
-    multiple = peak_mc / called_mc
+    multiple = current_mc / called_mc
     threshold = _check_pnl_milestone_sync(scope_key, token_key, chat_id, multiple)
     if threshold:
         report["_pnl_milestone_multiple"] = threshold
         report["_pnl_milestone_called_mc"] = called_mc
-        report["_pnl_milestone_current_mc"] = peak_mc
+        report["_pnl_milestone_current_mc"] = current_mc
 
 
 async def _maybe_announce_pnl_milestone(
@@ -1930,44 +1915,6 @@ async def _lb_current_mcap(session: aiohttp.ClientSession, address: str) -> floa
     best = ton_pairs[0]
     return _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
 
-async def _lb_current_and_peak_mcap(session: aiohttp.ClientSession, address: str) -> tuple[float | None, float | None]:
-    """Same pair-selection as _lb_current_mcap, but also returns 'peak' —
-    whichever is higher between current market cap and the market cap
-    implied by the token's all-time high price. Used anywhere a 'best call'
-    should reflect what was actually achieved at its peak, not just
-    wherever price happens to sit right now — /wl deliberately keeps using
-    the plain current-only version above instead, since a watchlist is
-    about what's worth attention right now, not a past high."""
-    pairs = await get_dex_data(session, address)
-    if not pairs:
-        return None, None
-    ton_pairs = [p for p in pairs if _is_ton_pair(p)] or pairs
-    ton_pairs.sort(key=lambda p: _pair_liquidity(p), reverse=True)
-    best = ton_pairs[0]
-    current_mcap = _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
-    current_price = _as_float(best.get("priceUsd"))
-    pool_address = best.get("pairAddress")
-
-    peak_mcap = current_mcap
-    if pool_address and current_price and current_price > 0 and current_mcap:
-        try:
-            ath_price = await _cached_ath(pool_address)
-            if ath_price and ath_price > current_price:
-                peak_mcap = current_mcap * (ath_price / current_price)
-        except Exception:
-            logger.exception("Could not derive peak mcap for %s", address)
-    return current_mcap, peak_mcap
-
-def _fmt_row_multiple(row: dict) -> str:
-    """Peak multiple, with a quiet '(now Xx)' addendum only when the peak
-    was meaningfully higher than where it sits right now — same
-    only-show-it-when-it-adds-value pattern as /pnl."""
-    peak_str = _fmt_multiple(row["multiple"])
-    current_multiple = row.get("current_multiple")
-    if current_multiple is not None and row["multiple"] > current_multiple * 1.05:
-        return f"{peak_str} (now {_fmt_multiple(current_multiple)})"
-    return peak_str
-
 async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     seconds, label = LB_WINDOWS.get(timeframe, LB_WINDOWS["1d"])
     cutoff = int(time.time()) - seconds
@@ -1992,12 +1939,11 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     ) as session:
         async def enrich(row):
             async with sem:
-                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
+                mc = await _lb_current_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not peak_mc or not called or called <= 0:
+            if not mc or not called or called <= 0:
                 return None
-            row["multiple"] = peak_mc / called
-            row["current_multiple"] = (current_mc / called) if current_mc else None
+            row["multiple"] = mc / called
             return row
 
         ranked_all = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -2029,7 +1975,7 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
             if grx_scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
-            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_row_multiple(row)}</b>"
+            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
         )
 
     # Telegram blockquote styling gives the Top 10 a clean visual rail without adding clutter.
@@ -2216,12 +2162,11 @@ async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> 
     ) as session:
         async def enrich(row):
             async with sem:
-                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
+                mc = await _lb_current_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not peak_mc or not called or called <= 0:
+            if not mc or not called or called <= 0:
                 return None
-            row["multiple"] = peak_mc / called
-            row["current_multiple"] = (current_mc / called) if current_mc else None
+            row["multiple"] = mc / called
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -2273,12 +2218,11 @@ async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
     ) as session:
         async def enrich(row):
             async with sem:
-                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
+                mc = await _lb_current_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not peak_mc or not called or called <= 0:
+            if not mc or not called or called <= 0:
                 return None
-            row["multiple"] = peak_mc / called
-            row["current_multiple"] = (current_mc / called) if current_mc else None
+            row["multiple"] = mc / called
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -2320,7 +2264,7 @@ async def build_best_scans_message() -> str | None:
             if scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
-            f"{rank} {ticker} — <b>{_fmt_row_multiple(row)}</b>\n"
+            f"{rank} {ticker} — <b>{_fmt_multiple(row['multiple'])}</b>\n"
             f"     {_lb_caller_link(row)}"
         )
     lines.append("<blockquote>" + "\n\n".join(ranking_lines) + "</blockquote>")
@@ -2383,7 +2327,7 @@ async def build_recap_message(chat_id: int, kind: str) -> str | None:
                 if scan_url else f"<b>${symbol}</b>"
             )
             top_lines.append(
-                f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_row_multiple(row)}</b>"
+                f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
             )
         lines.append("<blockquote>" + "\n".join(top_lines) + "</blockquote>")
     else:
@@ -2429,6 +2373,86 @@ def _mark_recap_sent(kind: str) -> None:
             "ON CONFLICT(kind) DO UPDATE SET last_sent_date=excluded.last_sent_date",
             (kind, today),
         )
+
+
+async def _global_biggest_mover_rows(seconds: int, limit: int = 10) -> list[dict]:
+    """Bot-wide equivalent of _global_best_scans_rows, but scoped to a time
+    window — used for the daily "Biggest Mover" post to GRX Trending, so it
+    highlights today's best call rather than an all-time one."""
+    cutoff = int(time.time()) - seconds
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM leaderboard_calls WHERE called_ts>=?", (cutoff,)
+        ).fetchall()]
+    if not rows:
+        return []
+
+    sem = asyncio.Semaphore(10)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=12),
+        connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
+    ) as session:
+        async def enrich(row):
+            async with sem:
+                mc = await _lb_current_mcap(session, row["token_address"])
+            called = _as_float(row.get("called_market_cap"))
+            if not mc or not called or called <= 0:
+                return None
+            row["multiple"] = mc / called
+            return row
+
+        ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
+    if not ranked:
+        return []
+
+    best_per_token: dict[str, dict] = {}
+    for row in ranked:
+        key = row["token_key"]
+        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+            best_per_token[key] = row
+
+    final = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
+    return final[:limit]
+
+
+async def _send_daily_biggest_mover_global() -> None:
+    """Standalone daily post to GRX Trending — bot-wide, not per-chat like
+    the weekly version above. Highlights whichever single call anywhere put
+    up the best multiple over the last 24h. Skips silently if there's
+    nothing to report (e.g. a quiet day with no qualifying calls)."""
+    if not GRX_TRENDING_CHANNEL:
+        return
+    rows = await _global_biggest_mover_rows(86400, limit=1)
+    if not rows:
+        return
+    row = rows[0]
+    called_mc = _as_float(row.get("called_market_cap"))
+    multiple = row.get("multiple")
+    if not called_mc or not multiple or called_mc <= 0:
+        return
+    current_mc = called_mc * multiple
+
+    symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
+    address = str(row.get("token_address") or "").strip()
+    scan_url = _deep_scan_url(address) if address else None
+    ticker = (
+        f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
+        if scan_url else f"<b>${symbol}</b>"
+    )
+    caption = (
+        f'🚀 <b>BIGGEST MOVER OF THE DAY</b>\n\n'
+        f'{ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(multiple)}</b>'
+    )
+    try:
+        png = await _render_offloop(build_pnl_card, called_mc, current_mc)
+        await bot.send_photo(
+            GRX_TRENDING_CHANNEL,
+            BufferedInputFile(png, filename="grx_daily_mover.png"),
+            caption=caption,
+        )
+    except Exception:
+        logger.exception("Could not post daily Biggest Mover to GRX Trending")
 
 
 async def _send_weekly_biggest_mover(chat_id: int) -> None:
@@ -2488,6 +2512,15 @@ async def recap_scheduler():
                             logger.exception("Daily recap failed for chat %s", chat_id)
                         await asyncio.sleep(0.3)
                     _mark_recap_sent("daily")
+
+                    # Standalone daily post to GRX Trending, separate from the
+                    # per-chat recaps above — bot-wide, not chat-scoped.
+                    if not _recap_already_sent_today("daily_mover"):
+                        try:
+                            await _send_daily_biggest_mover_global()
+                        except Exception:
+                            logger.exception("Daily global Biggest Mover post failed")
+                        _mark_recap_sent("daily_mover")
 
                 # Friday, UTC.
                 if now.tm_wday == 4 and not _recap_already_sent_today("weekly"):
@@ -3680,17 +3713,11 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             try:return float(t)*m
             except:return None
         now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
-        ath_mc=_as_float(dex.get("ath_market_cap"))
-        peak_perf=_pct_change(ath_mc,then) if (ath_mc and then) else None
-        if peak_perf is not None and perf is not None and peak_perf > perf + 15:
-            perf_display=f"{_fmt_pct(perf)} (pk {_fmt_pct(peak_perf)})"
-        else:
-            perf_display=_fmt_pct(perf) if perf is not None else "N/A"
         rows=[
             ("CALLED BY",caller,text),
             ("THEN",then_txt,text),
             ("NOW",_fmt_usd(now),text),
-            ("PERFORMANCE",perf_display,pc(perf)),
+            ("PERFORMANCE",_fmt_pct(perf) if perf is not None else "N/A",pc(perf)),
         ]
         for j,(lab,val,col) in enumerate(rows):
             y=.545-j*.0245
@@ -5489,6 +5516,21 @@ def build_report_keyboard(
     report = entry.get("report") or {}
     token_ca = str(report.get("address") or "").strip()
 
+    # Share Scan — opens Telegram's native share sheet pre-filled with a
+    # deep link back into this exact scan. One tap turns any scan into free
+    # distribution: the recipient lands straight back in the bot, scanning
+    # the same token, via /start scan_<address>.
+    if token_ca:
+        symbol = str((report.get("jetton_info") or {}).get("symbol") or "this token").lstrip("$")
+        scan_url = _deep_scan_url(token_ca)
+        if scan_url:
+            share_text = f"${symbol} — scanned on GRX 👀"
+            share_url = (
+                "https://t.me/share/url?"
+                f"url={quote(scan_url, safe='')}&text={quote(share_text, safe='')}"
+            )
+            builder.row(InlineKeyboardButton(text="📤 Share Scan", url=share_url))
+
     redotrade_url = REDOTRADE_URL
     dtrade_url = DTRADE_URL
     gbot_url = GBOT_URL
@@ -5932,27 +5974,6 @@ async def cmd_topsnake(message: Message):
     await message.answer("\n".join(lines))
 
 
-@dp.my_chat_member()
-async def on_bot_membership_changed(event: ChatMemberUpdated):
-    """Fires on any change to the bot's own status in a chat. Only acts on
-    the specific transition that means 'just got added to a group' — every
-    other status change (promoted to admin, removed, etc.) is ignored."""
-    if event.chat.type not in ("group", "supergroup"):
-        return
-    old_status = event.old_chat_member.status
-    new_status = event.new_chat_member.status
-    if old_status in ("left", "kicked") and new_status in ("member", "administrator"):
-        try:
-            await bot.send_message(
-                event.chat.id,
-                "GRX Scanner's live in this chat. 🧠\n\n"
-                "Every scan counts toward this group's own leaderboard — first good call gets bragging rights, go find one.\n\n"
-                "Trending here isn't for sale either — a token only shows up because real scan activity earned it a spot, ranked live, nothing bought.",
-            )
-        except Exception:
-            logger.exception("Could not send group welcome message")
-
-
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     parts = (message.text or "").split(maxsplit=1)
@@ -6029,19 +6050,7 @@ async def cmd_pnl(message: Message):
             called_mc = current_mc
 
         png = await _render_offloop(build_pnl_card, called_mc, current_mc)
-
-        # If the token peaked meaningfully higher than where it sits right
-        # now, say so — otherwise this stays exactly as before: image only,
-        # no caption, per the original request.
-        ath_mc = _as_float(dex.get("ath_market_cap"))
-        peak_mc = max(v for v in (current_mc, ath_mc) if v) if ath_mc else current_mc
-        caption = None
-        if peak_mc and peak_mc > current_mc * 1.05 and called_mc > 0:
-            peak_multiple = peak_mc / called_mc
-            now_multiple = current_mc / called_mc
-            caption = f"Peak: <b>{_fmt_multiple(peak_multiple)}</b> · Now: <b>{_fmt_multiple(now_multiple)}</b>"
-
-        await message.answer_photo(BufferedInputFile(png, filename="grx_pnl.png"), caption=caption)
+        await message.answer_photo(BufferedInputFile(png, filename="grx_pnl.png"))
     except Exception:
         logger.exception("/pnl failed")
         await message.answer("❌ Couldn't build that PNL card right now.")
@@ -6229,12 +6238,11 @@ async def _build_myscans_message(caller_id: int) -> str | None:
     ) as session:
         async def enrich(row):
             async with sem:
-                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
+                mc = await _lb_current_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not peak_mc or not called or called <= 0:
+            if not mc or not called or called <= 0:
                 return None
-            row["multiple"] = peak_mc / called
-            row["current_multiple"] = (current_mc / called) if current_mc else None
+            row["multiple"] = mc / called
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -6262,7 +6270,7 @@ async def _build_myscans_message(caller_id: int) -> str | None:
             f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
             if scan_url else f"<b>${symbol}</b>"
         )
-        return f"{ticker} » <b>{_fmt_row_multiple(row)}</b>"
+        return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
 
     best = ranked[0]
     rest = ranked[1:6]
