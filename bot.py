@@ -1306,6 +1306,27 @@ def get_ath_mcap_since(report: dict, since_ts: int | None) -> float | None:
     return max(vals) if vals else None
 
 
+def _ath_mcap_since_by_token_key(token_key: str, since_ts: int | None, current_mc: float | None = None) -> float | None:
+    """Same logic as get_ath_mcap_since, but for callers (like /myscans and
+    /bestscans) that only have a leaderboard_calls row — not a full scan
+    report — to work from. Used to compute each call's PEAK multiple, not
+    just its current one."""
+    if not token_key or not since_ts:
+        return current_mc
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        """
+        SELECT MAX(market_cap) FROM token_snapshots
+        WHERE token_key = ? AND snapshot_ts >= ? AND market_cap IS NOT NULL
+        """,
+        (token_key, int(since_ts)),
+    ).fetchone()
+    conn.close()
+    snap_max = _as_float(row[0]) if row else None
+    vals = [v for v in (snap_max, current_mc) if v is not None]
+    return max(vals) if vals else None
+
+
 def _live_trade_metrics(report: dict, seconds: int = 300) -> dict:
     """Use GRX-observed swaps only when side + usable notional are explicit.
     Never fabricate money-flow from transaction counts."""
@@ -2231,10 +2252,11 @@ def _alltime_scan_counts_by_token() -> dict[str, int]:
 
 
 async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
-    """Bot-wide leaderboard by multiple — not scoped to one chat like
-    /leaderboard. Deduped to one entry per token: its single
-    best-performing call, wherever that happened.
-    """
+    """Bot-wide leaderboard by PEAK multiple (highest market cap reached
+    since the call, not just wherever it happens to sit right now) — not
+    scoped to one chat like /leaderboard. Deduped to one entry per token:
+    its single best-performing call, wherever that happened. Still shows
+    the current multiple alongside the peak one, but ranking uses peak."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute("SELECT * FROM leaderboard_calls").fetchall()]
@@ -2253,20 +2275,24 @@ async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
             if not mc or not called or called <= 0:
                 return None
             row["multiple"] = mc / called
+            peak_mc = await asyncio.to_thread(
+                _ath_mcap_since_by_token_key, row["token_key"], row.get("called_ts"), mc
+            )
+            row["peak_multiple"] = (peak_mc / called) if peak_mc else row["multiple"]
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
     if not ranked:
         return []
 
-    # One entry per token — keep only its single best-performing call.
+    # One entry per token — keep only its single best-performing call, by peak.
     best_per_token: dict[str, dict] = {}
     for row in ranked:
         key = row["token_key"]
-        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+        if key not in best_per_token or row["peak_multiple"] > best_per_token[key]["peak_multiple"]:
             best_per_token[key] = row
 
-    final = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
+    final = sorted(best_per_token.values(), key=lambda r: r["peak_multiple"], reverse=True)
     return final[:limit]
 
 
@@ -2294,7 +2320,7 @@ async def build_best_scans_message() -> str | None:
             if scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
-            f"{rank} {ticker} — <b>{_fmt_multiple(row['multiple'])}</b>\n"
+            f"{rank} {ticker} — <b>{_fmt_multiple(row['peak_multiple'])} peak</b> · now {_fmt_multiple(row['multiple'])}\n"
             f"     {_lb_caller_link(row)}"
         )
     lines.append("<blockquote>" + "\n\n".join(ranking_lines) + "</blockquote>")
@@ -6245,8 +6271,10 @@ async def cmd_allscans(message: Message):
 
 async def _build_myscans_message(caller_id: int) -> str | None:
     """Shared by /myscans and its Refresh button — global across every chat
-    this person has ever called a token in. Returns None if they have no
-    qualifying calls yet, so callers can handle that distinctly from an error."""
+    this person has ever called a token in. Ranked by PEAK multiple (the
+    highest market cap reached since the call), with current multiple shown
+    alongside it. Returns None if they have no qualifying calls yet, so
+    callers can handle that distinctly from an error."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = [dict(r) for r in conn.execute(
@@ -6269,6 +6297,10 @@ async def _build_myscans_message(caller_id: int) -> str | None:
             if not mc or not called or called <= 0:
                 return None
             row["multiple"] = mc / called
+            peak_mc = await asyncio.to_thread(
+                _ath_mcap_since_by_token_key, row["token_key"], row.get("called_ts"), mc
+            )
+            row["peak_multiple"] = (peak_mc / called) if peak_mc else row["multiple"]
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -6278,15 +6310,15 @@ async def _build_myscans_message(caller_id: int) -> str | None:
 
     # One entry per token — same rule /bestscans uses. If this person was
     # first caller in several different chats for the same token, only
-    # their single best-performing entry counts; a later, lower-priced
-    # first-call in a different chat naturally outranks an earlier one here
-    # since it's a better multiple, not because it displaced anything.
+    # their single best-performing entry counts (by peak multiple); a later,
+    # lower-priced first-call in a different chat naturally outranks an
+    # earlier one here since it peaked higher, not because it displaced anything.
     best_per_token: dict[str, dict] = {}
     for row in ranked:
         key = row["token_key"]
-        if key not in best_per_token or row["multiple"] > best_per_token[key]["multiple"]:
+        if key not in best_per_token or row["peak_multiple"] > best_per_token[key]["peak_multiple"]:
             best_per_token[key] = row
-    ranked = sorted(best_per_token.values(), key=lambda r: r["multiple"], reverse=True)
+    ranked = sorted(best_per_token.values(), key=lambda r: r["peak_multiple"], reverse=True)
 
     def _line(row):
         symbol = html.escape(str(row.get("token_symbol") or "TOKEN").lstrip("$"))
@@ -6296,7 +6328,7 @@ async def _build_myscans_message(caller_id: int) -> str | None:
             f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
             if scan_url else f"<b>${symbol}</b>"
         )
-        return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
+        return f"{ticker} » <b>{_fmt_multiple(row['peak_multiple'])} peak</b> · now {_fmt_multiple(row['multiple'])}"
 
     best = ranked[0]
     rest = ranked[1:6]
