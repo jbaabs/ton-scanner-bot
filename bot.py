@@ -34,6 +34,7 @@ from aiogram.types import (
     InputMediaPhoto,
     ReplyParameters,
     WebAppInfo,
+    ChatMemberUpdated,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
@@ -1143,10 +1144,17 @@ def _check_pnl_milestone_sync(scope_key: str, token_key: str, chat_id: int, mult
 
 
 def _prepare_pnl_milestone_check(report: dict, scope_key: str, chat_id: int) -> None:
-    """Compares this anchor's current multiple against 2/5/10/20/50/100x and,
-    if a new one was just crossed, stashes the info on `report` so the async
-    caller can render and send the PNL card. Mutates report in place; sends
-    nothing itself — DB writes only, safe to call from a background thread.
+    """Compares this anchor's PEAK multiple (called price vs. whichever is
+    higher of current price or the token's all-time high) against
+    2/5/10/20/50/100x and, if a new one was just crossed, stashes the info
+    on `report` so the async caller can render and send the PNL card.
+    Using peak rather than current-only means a genuine spike that already
+    dumped back down by the time anyone next scans/refreshes still gets
+    detected and credited — this only ever runs at scan/refresh time, so a
+    current-price-only check could otherwise miss a real milestone entirely
+    if price crossed it and fell back before the next look. Mutates report
+    in place; sends nothing itself — DB writes only, safe to call from a
+    background thread.
     """
     anchor = report.get("_viewer_first_scan")
     if not anchor:
@@ -1155,16 +1163,23 @@ def _prepare_pnl_milestone_check(report: dict, scope_key: str, chat_id: int) -> 
     if not token_key:
         return
     dex = report.get("dex_data") or {}
-    current_mc = _as_float(dex.get("market_cap"))
     called_mc = _usd_str_to_float(anchor.get("scan_market_cap"))
-    if not current_mc or not called_mc or called_mc <= 0:
+    if not called_mc or called_mc <= 0:
         return
-    multiple = current_mc / called_mc
+
+    current_mc = _as_float(dex.get("market_cap"))
+    ath_mc = _as_float(dex.get("ath_market_cap"))
+    candidates = [v for v in (current_mc, ath_mc) if v]
+    if not candidates:
+        return
+    peak_mc = max(candidates)
+
+    multiple = peak_mc / called_mc
     threshold = _check_pnl_milestone_sync(scope_key, token_key, chat_id, multiple)
     if threshold:
         report["_pnl_milestone_multiple"] = threshold
         report["_pnl_milestone_called_mc"] = called_mc
-        report["_pnl_milestone_current_mc"] = current_mc
+        report["_pnl_milestone_current_mc"] = peak_mc
 
 
 async def _maybe_announce_pnl_milestone(
@@ -1915,6 +1930,44 @@ async def _lb_current_mcap(session: aiohttp.ClientSession, address: str) -> floa
     best = ton_pairs[0]
     return _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
 
+async def _lb_current_and_peak_mcap(session: aiohttp.ClientSession, address: str) -> tuple[float | None, float | None]:
+    """Same pair-selection as _lb_current_mcap, but also returns 'peak' —
+    whichever is higher between current market cap and the market cap
+    implied by the token's all-time high price. Used anywhere a 'best call'
+    should reflect what was actually achieved at its peak, not just
+    wherever price happens to sit right now — /wl deliberately keeps using
+    the plain current-only version above instead, since a watchlist is
+    about what's worth attention right now, not a past high."""
+    pairs = await get_dex_data(session, address)
+    if not pairs:
+        return None, None
+    ton_pairs = [p for p in pairs if _is_ton_pair(p)] or pairs
+    ton_pairs.sort(key=lambda p: _pair_liquidity(p), reverse=True)
+    best = ton_pairs[0]
+    current_mcap = _as_float(best.get("marketCap")) or _as_float(best.get("fdv"))
+    current_price = _as_float(best.get("priceUsd"))
+    pool_address = best.get("pairAddress")
+
+    peak_mcap = current_mcap
+    if pool_address and current_price and current_price > 0 and current_mcap:
+        try:
+            ath_price = await _cached_ath(pool_address)
+            if ath_price and ath_price > current_price:
+                peak_mcap = current_mcap * (ath_price / current_price)
+        except Exception:
+            logger.exception("Could not derive peak mcap for %s", address)
+    return current_mcap, peak_mcap
+
+def _fmt_row_multiple(row: dict) -> str:
+    """Peak multiple, with a quiet '(now Xx)' addendum only when the peak
+    was meaningfully higher than where it sits right now — same
+    only-show-it-when-it-adds-value pattern as /pnl."""
+    peak_str = _fmt_multiple(row["multiple"])
+    current_multiple = row.get("current_multiple")
+    if current_multiple is not None and row["multiple"] > current_multiple * 1.05:
+        return f"{peak_str} (now {_fmt_multiple(current_multiple)})"
+    return peak_str
+
 async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     seconds, label = LB_WINDOWS.get(timeframe, LB_WINDOWS["1d"])
     cutoff = int(time.time()) - seconds
@@ -1939,11 +1992,12 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
     ) as session:
         async def enrich(row):
             async with sem:
-                mc = await _lb_current_mcap(session, row["token_address"])
+                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not mc or not called or called <= 0:
+            if not peak_mc or not called or called <= 0:
                 return None
-            row["multiple"] = mc / called
+            row["multiple"] = peak_mc / called
+            row["current_multiple"] = (current_mc / called) if current_mc else None
             return row
 
         ranked_all = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -1975,7 +2029,7 @@ async def build_leaderboard(chat_id: int, timeframe: str) -> str:
             if grx_scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
-            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
+            f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_row_multiple(row)}</b>"
         )
 
     # Telegram blockquote styling gives the Top 10 a clean visual rail without adding clutter.
@@ -2162,11 +2216,12 @@ async def _recap_top_scans_rows(chat_id: int, seconds: int, limit: int = 10) -> 
     ) as session:
         async def enrich(row):
             async with sem:
-                mc = await _lb_current_mcap(session, row["token_address"])
+                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not mc or not called or called <= 0:
+            if not peak_mc or not called or called <= 0:
                 return None
-            row["multiple"] = mc / called
+            row["multiple"] = peak_mc / called
+            row["current_multiple"] = (current_mc / called) if current_mc else None
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -2218,11 +2273,12 @@ async def _global_best_scans_rows(limit: int = 10) -> list[dict]:
     ) as session:
         async def enrich(row):
             async with sem:
-                mc = await _lb_current_mcap(session, row["token_address"])
+                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not mc or not called or called <= 0:
+            if not peak_mc or not called or called <= 0:
                 return None
-            row["multiple"] = mc / called
+            row["multiple"] = peak_mc / called
+            row["current_multiple"] = (current_mc / called) if current_mc else None
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -2264,7 +2320,7 @@ async def build_best_scans_message() -> str | None:
             if scan_url else f"<b>${symbol}</b>"
         )
         ranking_lines.append(
-            f"{rank} {ticker} — <b>{_fmt_multiple(row['multiple'])}</b>\n"
+            f"{rank} {ticker} — <b>{_fmt_row_multiple(row)}</b>\n"
             f"     {_lb_caller_link(row)}"
         )
     lines.append("<blockquote>" + "\n\n".join(ranking_lines) + "</blockquote>")
@@ -2327,7 +2383,7 @@ async def build_recap_message(chat_id: int, kind: str) -> str | None:
                 if scan_url else f"<b>${symbol}</b>"
             )
             top_lines.append(
-                f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_multiple(row['multiple'])}</b>"
+                f"{rank} {ticker} » {_lb_caller_link(row)}  <b>{_fmt_row_multiple(row)}</b>"
             )
         lines.append("<blockquote>" + "\n".join(top_lines) + "</blockquote>")
     else:
@@ -3624,11 +3680,17 @@ def build_report_card(ohlcv: list, report: dict, timeframe_label: str, token_ico
             try:return float(t)*m
             except:return None
         now=f(dex.get("market_cap")); then=usdnum(then_txt); perf=_pct_change(now,then) if then else None
+        ath_mc=_as_float(dex.get("ath_market_cap"))
+        peak_perf=_pct_change(ath_mc,then) if (ath_mc and then) else None
+        if peak_perf is not None and perf is not None and peak_perf > perf + 15:
+            perf_display=f"{_fmt_pct(perf)} (pk {_fmt_pct(peak_perf)})"
+        else:
+            perf_display=_fmt_pct(perf) if perf is not None else "N/A"
         rows=[
             ("CALLED BY",caller,text),
             ("THEN",then_txt,text),
             ("NOW",_fmt_usd(now),text),
-            ("PERFORMANCE",_fmt_pct(perf) if perf is not None else "N/A",pc(perf)),
+            ("PERFORMANCE",perf_display,pc(perf)),
         ]
         for j,(lab,val,col) in enumerate(rows):
             y=.545-j*.0245
@@ -5870,6 +5932,27 @@ async def cmd_topsnake(message: Message):
     await message.answer("\n".join(lines))
 
 
+@dp.my_chat_member()
+async def on_bot_membership_changed(event: ChatMemberUpdated):
+    """Fires on any change to the bot's own status in a chat. Only acts on
+    the specific transition that means 'just got added to a group' — every
+    other status change (promoted to admin, removed, etc.) is ignored."""
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    if old_status in ("left", "kicked") and new_status in ("member", "administrator"):
+        try:
+            await bot.send_message(
+                event.chat.id,
+                "GRX Scanner's live in this chat. 🧠\n\n"
+                "Every scan counts toward this group's own leaderboard — first good call gets bragging rights, go find one.\n\n"
+                "Trending here isn't for sale either — a token only shows up because real scan activity earned it a spot, ranked live, nothing bought.",
+            )
+        except Exception:
+            logger.exception("Could not send group welcome message")
+
+
 @dp.message(Command("start", "help"))
 async def cmd_start(message: Message):
     parts = (message.text or "").split(maxsplit=1)
@@ -5946,7 +6029,19 @@ async def cmd_pnl(message: Message):
             called_mc = current_mc
 
         png = await _render_offloop(build_pnl_card, called_mc, current_mc)
-        await message.answer_photo(BufferedInputFile(png, filename="grx_pnl.png"))
+
+        # If the token peaked meaningfully higher than where it sits right
+        # now, say so — otherwise this stays exactly as before: image only,
+        # no caption, per the original request.
+        ath_mc = _as_float(dex.get("ath_market_cap"))
+        peak_mc = max(v for v in (current_mc, ath_mc) if v) if ath_mc else current_mc
+        caption = None
+        if peak_mc and peak_mc > current_mc * 1.05 and called_mc > 0:
+            peak_multiple = peak_mc / called_mc
+            now_multiple = current_mc / called_mc
+            caption = f"Peak: <b>{_fmt_multiple(peak_multiple)}</b> · Now: <b>{_fmt_multiple(now_multiple)}</b>"
+
+        await message.answer_photo(BufferedInputFile(png, filename="grx_pnl.png"), caption=caption)
     except Exception:
         logger.exception("/pnl failed")
         await message.answer("❌ Couldn't build that PNL card right now.")
@@ -6134,11 +6229,12 @@ async def _build_myscans_message(caller_id: int) -> str | None:
     ) as session:
         async def enrich(row):
             async with sem:
-                mc = await _lb_current_mcap(session, row["token_address"])
+                current_mc, peak_mc = await _lb_current_and_peak_mcap(session, row["token_address"])
             called = _as_float(row.get("called_market_cap"))
-            if not mc or not called or called <= 0:
+            if not peak_mc or not called or called <= 0:
                 return None
-            row["multiple"] = mc / called
+            row["multiple"] = peak_mc / called
+            row["current_multiple"] = (current_mc / called) if current_mc else None
             return row
 
         ranked = [r for r in await asyncio.gather(*(enrich(r) for r in rows)) if r]
@@ -6166,7 +6262,7 @@ async def _build_myscans_message(caller_id: int) -> str | None:
             f'<a href="{html.escape(scan_url, quote=True)}"><b>${symbol}</b></a>'
             if scan_url else f"<b>${symbol}</b>"
         )
-        return f"{ticker} » <b>{_fmt_multiple(row['multiple'])}</b>"
+        return f"{ticker} » <b>{_fmt_row_multiple(row)}</b>"
 
     best = ranked[0]
     rest = ranked[1:6]
